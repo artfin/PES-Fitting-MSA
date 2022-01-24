@@ -1,0 +1,10 @@
+.*
+!.gitignore
+
+*.mod
+*.o
+*.exe
+
+
+# generated files
+src/getpot.f90
