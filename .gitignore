@@ -3,8 +3,11 @@
 
 *.mod
 *.o
+*.so
 *.exe
 
-
-# generated files
-src/getpot.f90
+*.BAS
+*.FOC
+*.MAP
+*.MONO
+*.POLY
