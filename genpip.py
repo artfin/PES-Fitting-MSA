@@ -38,12 +38,15 @@ def build_lib():
         sys.exit(1)
 
 def run_msa(order, symmetry, wdir):
-    st = cl('./src/msa {} {}'.format(order, symmetry))
+    cmd = './src/msa {} {}'.format(order, symmetry)
+    logging.info("cmd: {}".format(cmd))
+    st = cl(cmd)
+    logging.info(st.stdout)
 
     if st.returncode == 0:
         logging.info("PIP basis files successfully generated.")
     else:
-        logging.error("return code = {}".format(st.returncode))
+        logging.error("MSA return code = {}".format(st.returncode))
         sys.exit(1)
 
     fname = 'MOL_{}_{}'.format(symmetry.replace(' ', '_'), order)
