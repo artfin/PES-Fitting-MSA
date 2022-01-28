@@ -54,7 +54,3 @@ if __name__ == '__main__':
 
     print("y_pred = {0:.8f}".format(y_pred.item() * HTOCM))
     print("y      = {0:.8f}".format(y.item() * HTOCM))
-
-
-
-

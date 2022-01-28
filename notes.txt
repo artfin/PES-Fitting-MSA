@@ -1,0 +1,8 @@
+* type of optimizer:
+  - lBFGS: Limited-memory BFGS
+  - SGD
+  - Adam
+
+* loss function: 
+  - MSE
+  - RMSE

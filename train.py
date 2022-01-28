@@ -1,3 +1,6 @@
+
+
+
 # about activation functions:
 # https://neurohive.io/ru/osnovy-data-science/activation-functions/ 
 
@@ -10,55 +13,58 @@ import torch.nn as nn
 
 from model import FCNet
 from dataset import PolyDataset
+from dataset import HTOCM
 
 torch.manual_seed(42)
 np.random.seed(42)
 
-def validate(model, X_test, y_test, criterion):
-    # in case the structure of the model changes
-    model.eval()
 
-    cumloss = 0.0
-    with torch.no_grad():
-        y_pred = model(X_test)
-        loss = criterion(y_pred, y_test)
-        cumloss += loss
-
-    sz = X_test.shape[0]
-    return cumloss / sz
 
 from tqdm import tqdm
 import torch.optim as optim
 
-def train(model, X_train, y_train, X_test, y_test, epochs=20):
+def train(model, opt_type, X_train, y_train, X_test, y_test, epochs=20):
     # in case the structure of the model changes
     model.train()
 
-    criterion = nn.MSELoss()
+    metric = nn.MSELoss()
 
-    # TODO: also try SGD
+    if opt_type == 'lbfgs':
+        optimizer = optim.LBFGS(model.parameters(), lr=0.5, max_iter=20, max_eval=None, tolerance_grad=1e-8, tolerance_change=1e-12, history_size=10)
+    else:
+        raise NotImplementedError()
+
     # optimizer = optim.SGD(model.parameters(), lr=1e-4)
-
-    # weight decay???
-    optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
+    # optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0)
 
     train_losses, test_losses = [], []
 
+    dprint = epochs // 20
+
     for epoch in tqdm(range(epochs)):
-        optimizer.zero_grad()
+        def closure():
+            optimizer.zero_grad()
+            y_pred = model(X_train)
+            loss = torch.sqrt(metric(y_pred, y_train)) # try RMSE instead MSE!
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+
+        #train_losses.append(train_loss.item())
+
         y_pred = model(X_train)
-        train_loss = criterion(y_pred, y_train)
-        train_losses.append(train_loss.item())
+        train_loss = metric(y_pred, y_train)
+        train_rmse = np.sqrt(train_loss.item()) * HTOCM
 
-        train_loss.backward()
-        optimizer.step()
+        with torch.no_grad():
+            y_pred = model(X_test)
+            test_loss = metric(y_pred, y_test)
+            test_rmse = np.sqrt(test_loss.item()) * HTOCM
 
-        test_loss = validate(model, X_test, y_test, criterion)
-        test_losses.append(test_loss)
-
-        if epoch % 50 == 0:
-            print("Epoch: {}; train loss: {:.10f}; test loss: {:.10f}".format(
-                epoch, train_loss.item(), test_loss
+        if epoch % dprint == 0:
+            print("Epoch: {}; train rmse: {:.10f}; test rmse: {:.10f}".format(
+                epoch, train_rmse, test_rmse
             ))
 
     return train_losses, test_losses
@@ -126,7 +132,9 @@ if __name__ == "__main__":
     nparams = count_params(model)
     logging.info("number of parameters: {}".format(nparams))
 
-    train_loss, test_loss = train(model, X_train, y_train, X_test, y_test, epochs=5000)
+    train_loss, test_loss = train(model, 'lbfgs',
+                                  X_train, y_train, X_test, y_test,
+                                  epochs=1000)
 
     model_fname = "NN_{}_{}.pt".format(order, symmetry)
     model_path  = os.path.join(wdir, model_fname)
