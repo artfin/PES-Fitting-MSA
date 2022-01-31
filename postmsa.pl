@@ -1,15 +1,16 @@
 #!/usr/bin/perl -w
 use strict;
 
-die " Syntax:\n   ./postmsa [max degree] [symmetry]\n" unless $#ARGV > 0;
+die " Syntax:\n   ./postmsa [wdir] [max degree] [symmetry]\n" unless $#ARGV > 0;
 
+my $wdir   = shift(@ARGV);
 my $degree = shift(@ARGV);
-my @atom = @ARGV;
+my @atom   = @ARGV;
 
-my $stub = "MOL_".join("_",@atom)."_$degree";
+my $stub = "$wdir/MOL_".join("_",@atom)."_$degree";
 my $mono = $stub.".MONO";
 my $poly = $stub.".POLY";
-my $fbas = "basis_".join("_", @atom)."_$degree.f90";
+my $fbas = "$wdir/basis_".join("_", @atom)."_$degree.f90";
 
 my $c_bind = 1; # = false
 

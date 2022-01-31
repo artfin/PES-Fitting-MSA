@@ -59,11 +59,12 @@ def run_msa(order, symmetry, wdir):
 
 def compile_dlib(order, symmetry, wdir):
     logging.info("postmsa.pl generates Fortran code...")
-    cl('cp postmsa.pl {0}; cd {0}; ./postmsa.pl {1} {2}; rm postmsa.pl'.format(wdir, order, symmetry))
+    cl('./postmsa.pl {0} {1} {2}'.format(wdir, order, symmetry))
 
     logging.info("compiling dynamic lib...")
     fname = "basis_{}_{}".format(symmetry.replace(' ', '_'), order)
-    st = cl('cd {0}; gfortran -shared -fdefault-real-8 {1}.f90 -o {1}.so'.format(wdir, fname))
+    fpath = os.path.join(wdir, fname)
+    st = cl('gfortran -shared -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
     logging.info(st.stdout)
 
 
