@@ -19,7 +19,7 @@ import torch.optim as optim
 # from LBFGS import LBFGS, FullBatchLBFGS
 
 # https://github.com/amirgholami/adahessian
-from adahessian.instruction.adahessian import Adahessian
+from adahessian import Adahessian
 
 def train(model, X_train, y_train, X_test, y_test, opt_type='adam', epochs=100):
     # in case the structure of the model changes
