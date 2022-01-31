@@ -1,9 +1,3 @@
-
-
-
-# about activation functions:
-# https://neurohive.io/ru/osnovy-data-science/activation-functions/ 
-
 import logging
 import numpy as np
 import os
@@ -18,24 +12,34 @@ from dataset import HTOCM
 torch.manual_seed(42)
 np.random.seed(42)
 
-
-
 from tqdm import tqdm
 import torch.optim as optim
 
-def train(model, opt_type, X_train, y_train, X_test, y_test, epochs=20):
+# taken from https://github.com/hjmshi/PyTorch-LBFGS 
+# from LBFGS import LBFGS, FullBatchLBFGS
+
+# https://github.com/amirgholami/adahessian
+from adahessian.instruction.adahessian import Adahessian
+
+def train(model, X_train, y_train, X_test, y_test, opt_type='adam', epochs=100):
     # in case the structure of the model changes
     model.train()
 
     metric = nn.MSELoss()
 
     if opt_type == 'lbfgs':
-        optimizer = optim.LBFGS(model.parameters(), lr=0.5, max_iter=20, max_eval=None, tolerance_grad=1e-8, tolerance_change=1e-12, history_size=10)
+        # Standard version from torch.optim
+        optimizer = optim.LBFGS(model.parameters(), lr=1.5, max_iter=20, max_eval=None, tolerance_grad=1e-14, tolerance_change=1e-14, history_size=10)
+    elif opt_type == 'adam':
+        optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0)
+    elif opt_type == 'adahessian':
+        logging.info('Adahessian optimizer is chosen')
+        optimizer = Adahessian(model.parameters(), lr=1.0, betas=(0.9, 0.999),
+                               eps=1e-4, weight_decay=0.0, hessian_power=1.0)
+    elif opt_type == 'sgd':
+        optimizer = optim.SGD(model.parameters(), lr=1e-4)
     else:
         raise NotImplementedError()
-
-    # optimizer = optim.SGD(model.parameters(), lr=1e-4)
-    # optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=0.0)
 
     train_losses, test_losses = [], []
 
@@ -45,26 +49,30 @@ def train(model, opt_type, X_train, y_train, X_test, y_test, epochs=20):
         def closure():
             optimizer.zero_grad()
             y_pred = model(X_train)
-            loss = torch.sqrt(metric(y_pred, y_train)) # try RMSE instead MSE!
-            loss.backward()
+
+            # try RMSE instead MSE!
+            if opt_type == 'adahessian':
+                loss = torch.sqrt(metric(y_pred, y_train))
+                loss.backward(create_graph=True)
+            else:
+                loss = torch.sqrt(metric(y_pred, y_train))
+                loss.backward()
+
             return loss
 
         optimizer.step(closure)
 
+        train_rmse = closure()
         #train_losses.append(train_loss.item())
-
-        y_pred = model(X_train)
-        train_loss = metric(y_pred, y_train)
-        train_rmse = np.sqrt(train_loss.item()) * HTOCM
 
         with torch.no_grad():
             y_pred = model(X_test)
             test_loss = metric(y_pred, y_test)
-            test_rmse = np.sqrt(test_loss.item()) * HTOCM
+            test_rmse = np.sqrt(test_loss.item())
 
         if epoch % dprint == 0:
             print("Epoch: {}; train rmse: {:.10f}; test rmse: {:.10f}".format(
-                epoch, train_rmse, test_rmse
+                epoch, train_rmse * HTOCM, test_rmse * HTOCM
             ))
 
     return train_losses, test_losses
@@ -108,12 +116,8 @@ if __name__ == "__main__":
     # scaling
     mean = X_train.mean(axis=0)
     std  = X_train.std(axis=0)
-    # a hack to avoid dividing by zero: 
     # first polynomial is a constant => std = 0.0
     std[0] = 1.0
-
-    np.savetxt("_mean.txt", mean)
-    np.savetxt("_std.txt", std)
 
     X_train = (X_train - mean) / std
     X_test  = (X_test - mean) / std
@@ -132,9 +136,8 @@ if __name__ == "__main__":
     nparams = count_params(model)
     logging.info("number of parameters: {}".format(nparams))
 
-    train_loss, test_loss = train(model, 'lbfgs',
-                                  X_train, y_train, X_test, y_test,
-                                  epochs=1000)
+    train_loss, test_loss = train(model, X_train, y_train, X_test, y_test,
+                                  opt_type='adahessian', epochs=10000)
 
     model_fname = "NN_{}_{}.pt".format(order, symmetry)
     model_path  = os.path.join(wdir, model_fname)

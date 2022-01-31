@@ -14,9 +14,9 @@ class FCNet(nn.Module):
         self.init_form  = init_form
 
         layers = [
-            nn.Linear(self.NPOLY, 30), self.activation,
-            nn.Linear(30, 30),         self.activation,
-            nn.Linear(30, 1)
+            nn.Linear(self.NPOLY, 20), self.activation,
+            nn.Linear(20, 20),         self.activation,
+            nn.Linear(20, 1)
         ]
 
         self.layers = nn.Sequential(*layers)
