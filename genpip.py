@@ -59,7 +59,7 @@ def run_msa(order, symmetry, wdir):
 
 def compile_dlib(order, symmetry, wdir):
     logging.info("postmsa.pl generates Fortran code...")
-    cl('./postmsa.pl {0} {1} {2}'.format(wdir, order, symmetry))
+    cl('perl postmsa.pl {0} {1} {2}'.format(wdir, order, symmetry))
 
     logging.info("compiling dynamic lib...")
     fname = "basis_{}_{}".format(symmetry.replace(' ', '_'), order)
