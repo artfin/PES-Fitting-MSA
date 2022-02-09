@@ -26,11 +26,11 @@ class PolyDataset(Dataset):
         self.config_fname = os.path.join(self.wdir, config_fname)
         logging.info("configuration file: {}".format(self.config_fname))
         logging.info("loading configurations...")
-        configs = self.load()
+        self.configs = self.load()
 
         logging.info("preparing the coordinates..")
         self.NDIS = self.NATOMS * (self.NATOMS - 1) // 2
-        yij       = self.make_yij(configs)
+        yij       = self.make_yij(self.configs)
         logging.info("Done.")
 
         stub       = '_{}_{}'.format(symmetry.replace(' ', '_'), order)
@@ -64,7 +64,7 @@ class PolyDataset(Dataset):
 
         logging.info("Done.")
 
-        energies = np.asarray([c.energy for c in configs]).reshape((self.NCONFIGS, 1)) # (NCONFIGS,) -> (NCONFIGS, 1)
+        energies = np.asarray([c.energy for c in self.configs]).reshape((self.NCONFIGS, 1)) # (NCONFIGS,) -> (NCONFIGS, 1)
 
         self.X = torch.from_numpy(poly)
         self.y = torch.from_numpy(energies)

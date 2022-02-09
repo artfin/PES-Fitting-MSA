@@ -138,7 +138,7 @@ if __name__ == "__main__":
     logger.addHandler(ch)
 
     wdir         = "./H2-H2O"
-    order        = "6"
+    order        = "3"
     symmetry     = "2 2 1"
     config_fname = "points.dat"
     dataset = PolyDataset(wdir=wdir, config_fname=config_fname, order=order, symmetry=symmetry)
