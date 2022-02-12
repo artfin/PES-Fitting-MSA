@@ -5,6 +5,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.optim import LBFGS, Adam
 
 from dataset import PolyDataset
@@ -19,6 +20,36 @@ np.random.seed(42)
 # from adahessian import Adahessian
 
 HTOCM = 2.194746313702e5
+
+class StandardScaler:
+    def fit(self, x):
+        self.mean = x.mean(0, keepdim=True)
+        self.std = x.std(0, unbiased=False, keepdim=True)
+
+    def transform(self, x):
+        c = torch.clone(x)
+        c -= self.mean
+        c /= self.std
+        return torch.nan_to_num(c, nan=1.0)
+
+class IdentityScaler:
+    def fit(self, x):
+        pass
+
+    def transform(self, x):
+        return x
+
+class RMSELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mse = nn.MSELoss()
+
+    def forward(self, ypred, y):
+        return torch.sqrt(self.mse(ypred, y))
+
+def get_lr(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group['lr']
 
 def count_params(model):
     nparams = 0
@@ -60,11 +91,11 @@ class FCNet(nn.Module):
         #)
 
         self.layers = nn.Sequential(
-            nn.Linear(self.NPOLY, 20),
+            nn.Linear(self.NPOLY, 10),
             activation(),
-            nn.Linear(20, 20),
+            nn.Linear(10, 10),
             activation(),
-            nn.Linear(20, 1)
+            nn.Linear(10, 1)
         )
 
     def forward(self, x):
@@ -100,36 +131,48 @@ def show_feature_distribution(X, idx):
     plt.hist(feature, bins=500)
     plt.show()
 
-class IdentityScaler:
-    def fit(self, x):
-        pass
 
-    def transform(self, x):
-        return x
+class EarlyStopping:
+    def __init__(self, patience=10, tol=0.1, chk_path='checkpoint.pt'):
+        """
+        patience : how many epochs to wait after the last time the monitored quantity [validation loss] has improved
+        tol:       minimum change in the monitored quantity to qualify as an improvement
+        path:      path for the checkpoint to be saved to
+        """
+        self.patience = patience
+        self.tol = tol
+        self.chk_path = chk_path
 
-class StandardScaler:
-    def fit(self, x):
-        self.mean = x.mean(0, keepdim=True)
-        self.std = x.std(0, unbiased=False, keepdim=True)
+        self.counter = 0
+        self.best_score = None
+        self.status = False
 
-    def transform(self, x):
-        c = torch.clone(x)
-        c -= self.mean
-        c /= self.std
-        return torch.nan_to_num(c, nan=1.0)
+    def __call__(self, score, model):
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(model)
 
-class RMSELoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mse = nn.MSELoss()
+        elif score < self.best_score and (self.best_score - score) > self.tol:
+            self.best_score = score
+            self.counter = 0
+            self.save_checkpoint(model)
 
-    def forward(self, ypred, y):
-        return torch.sqrt(self.mse(ypred, y))
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.status = True
+
+        logging.debug("Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
+        logging.debug("ES counter: {}; ES patience: {}".format(self.counter, self.patience))
+
+    def save_checkpoint(self, model):
+        logging.debug("Saving the checkpoint")
+        torch.save(model.state_dict(), self.chk_path)
 
 
 if __name__ == "__main__":
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     ch = logging.StreamHandler()
     formatter = logging.Formatter('[%(levelname)s] %(message)s')
@@ -181,11 +224,13 @@ if __name__ == "__main__":
         raise ValueError("unreachable")
 
     xscaler.fit(X_train)
+    Xtr       = xscaler.transform(X)
     Xtr_train = xscaler.transform(X_train)
     Xtr_val   = xscaler.transform(X_val)
     Xtr_test  = xscaler.transform(X_test)
 
     yscaler.fit(y_train)
+    ytr       = yscaler.transform(y)
     ytr_train = yscaler.transform(y_train)
     ytr_val   = yscaler.transform(y_val)
     ytr_test  = yscaler.transform(y_test)
@@ -210,18 +255,17 @@ if __name__ == "__main__":
     optimizer = LBFGS(model.parameters(), lr=1.0, line_search_fn='strong_wolfe', tolerance_grad=1e-14, tolerance_change=1e-14, max_iter=100)
     #optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-
     if isinstance(optimizer, LBFGS):
         logging.info("LBFGS optimizer is selected")
-        optim_type = "lbfgs"
+        OPTIM_TYPE = "lbfgs"
     elif isinstance(optimizer, Adam):
         logging.info("Adam optimizer is selected")
-        optim_type = "adam"
+        OPTIM_TYPE = "adam"
     else:
         raise ValueError("Unknown optimizer is chosen.")
 
     METRIC_TYPES = ['RMSE', 'MSE']
-    METRIC_TYPE = 'RMSE'
+    METRIC_TYPE = 'MSE'
     assert METRIC_TYPE in METRIC_TYPES
 
     logging.info("METRIC_TYPE = {}".format(METRIC_TYPE))
@@ -233,16 +277,33 @@ if __name__ == "__main__":
     else:
         raise ValueError("unreachable")
 
-    n_epochs = 10
+
+    prev_best = None
+    best_rmse_val = None
+
+    SCHEDULER_PATIENCE = 5
+    RMSE_TOL  = 0.1 # cm-1
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, threshold=RMSE_TOL, threshold_mode='abs', cooldown=2, patience=SCHEDULER_PATIENCE)
+
+    #ES_score = 0
+    #ES_patience = 10
+
+    ES_START_EPOCH = 10
+    CHK_PATH = 'checkpoint.pt'
+    es = EarlyStopping(patience=10, tol=RMSE_TOL, chk_path=CHK_PATH)
+
+    n_epochs = 500
+
+    ################ START TRAINING #######################
     for epoch in range(n_epochs):
-        if optim_type == "adam":
+        if OPTIM_TYPE == "adam":
             optimizer.zero_grad()
             y_pred = model(Xtr_train)
             loss = metric(y_pred, ytr_train)
             loss.backward()
             optimizer.step()
 
-        elif optim_type == "lbfgs":
+        elif OPTIM_TYPE == "lbfgs":
             def closure():
                 optimizer.zero_grad()
                 y_pred = model(Xtr_train)
@@ -266,9 +327,50 @@ if __name__ == "__main__":
         else:
             raise ValueError("unreachable")
 
-        print("Epoch: {}; train RMSE: {:.10f} cm-1; validation RMSE: {:.10f}".format(
+        scheduler.step(rmse_val)
+        lr = get_lr(optimizer)
+        logging.info("Current learning rate: {:.2e}".format(lr))
+
+        if epoch > ES_START_EPOCH:
+            es(rmse_val, model)
+
+            if es.status:
+                logging.info("Invoking early stop")
+                break
+
+        logging.info("Epoch: {}; train RMSE: {:.2f} cm-1; validation RMSE: {:.2f}\n".format(
             epoch, rmse_train, rmse_val
         ))
+
+    ################ END TRAINING #######################
+
+    model_params = torch.load(CHK_PATH)
+    model.load_state_dict(model_params)
+    logging.info("\nReloading best model from the last checkpoint...")
+
+    with torch.no_grad():
+        pred_val = model(Xtr_val)
+        loss_val = metric(pred_val, ytr_val)
+
+        pred_test = model(Xtr_test)
+        loss_test = metric(pred_test, ytr_test)
+
+        pred_full = model(Xtr)
+        loss_full = metric(pred_full, ytr)
+
+        if METRIC_TYPE == 'MSE':
+            rmse_val  = torch.sqrt(loss_val) * rmse_descaler * HTOCM
+            rmse_test = torch.sqrt(loss_test) * rmse_descaler * HTOCM
+            rmse_full = torch.sqrt(loss_full) * rmse_descaler * HTOCM
+        elif METRIC_TYPE == 'RMSE':
+            rmse_val  = loss_val * rmse_descaler * HTOCM
+            rmse_test = loss_test * rmse_descaler * HTOCM
+            rmse_full = loss_full * rmse_descaler * HTOCM
+
+        logging.info("Final evaluation:")
+        logging.info("Validation RMSE: {:.2f} cm-1".format(rmse_val))
+        logging.info("Test RMSE:       {:.2f} cm-1".format(rmse_test))
+        logging.info("Full RMSE:       {:.2f} cm-1".format(rmse_full))
 
     #model_fname = "NN_{}_{}.pt".format(order, symmetry)
     #model_path  = os.path.join(wdir, model_fname)
