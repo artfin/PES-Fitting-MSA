@@ -1,7 +1,21 @@
+Second-order optimizers are generally better in the convergence-critical tasks than first-optimizers. Both scikit-learn and PyTorch provide an LBFGS optimizer. Matlab provides Levenberg-Marquardt among others. Second-order optimizers require quadratic storage and cubic computation time for each gradient update. This becomes impractical for deep models. Approximate algorithms such as quasi-Newton methods are
+aimed at significantly reducing these requirements.
+
+https://arxiv.org/abs/2002.09018
+Scalable Second Order Optimization for Deep Learning
+
 * type of optimizer:
-  - lBFGS: Limited-memory BFGS
-  - SGD
-  - Adam
+  - second-order: 
+    > lBFGS - Limited-memory BFGS
+    > Levenberg-Marquardt
+  - first-order: 
+    > SGD
+    > Adam
+
+Here are a couple of the third-party LBFGS optimizers for PyTorch:
+
+> Stochastic LBFGS: http://sagecal.sourceforge.net/pytorch/index.html
+> Modular LBFGS with weak Wolfe line search: https://github.com/hjmshi/PyTorch-LBFGS
 
 * loss function: 
   - MSE
