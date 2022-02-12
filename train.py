@@ -118,6 +118,14 @@ class StandardScaler:
         c /= self.std
         return torch.nan_to_num(c, nan=1.0)
 
+class RMSELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mse = nn.MSELoss()
+
+    def forward(self, ypred, y):
+        return torch.sqrt(self.mse(ypred, y))
+
 
 if __name__ == "__main__":
     logger = logging.getLogger()
@@ -153,18 +161,24 @@ if __name__ == "__main__":
     SCALE_OPTIONS = [None, "std"] # ? "minmax"
     scale_params = {
         "Xscale" : "std",
-        "yscale" : "std" 
+        "yscale" : "std"
     }
 
     assert scale_params["Xscale"] in SCALE_OPTIONS
     if scale_params["Xscale"] == "std":
         xscaler = StandardScaler()
+    elif scale_params["Xscale"] == None:
+        xscaler = IdentityScaler()
+    else:
+        raise ValueError("unreachable")
 
     assert scale_params["yscale"] in SCALE_OPTIONS
     if scale_params["yscale"] == "std":
         yscaler = StandardScaler()
     elif scale_params["yscale"] == None:
         yscaler = IdentityScaler()
+    else:
+        raise ValueError("unreachable")
 
     xscaler.fit(X_train)
     Xtr_train = xscaler.transform(X_train)
@@ -180,15 +194,14 @@ if __name__ == "__main__":
         rmse_descaler = torch.linalg.norm(yscaler.std)
     elif scale_params["yscale"] == None:
         rmse_descaler = 1.0
-
-    print("rmse_descaler: {}".format(rmse_descaler))
+    else:
+        raise ValueError("unreachable")
 
     #show_feature_distribution(X_train, idx=0)
     #show_energy_distribution(y)
 
+    logging.info("matrix least-squares problem: (raw X, raw Y)")
     perform_lstsq(X_train, y_train)
-    perform_lstsq(Xtr_train, y_train)
-    perform_lstsq(Xtr_train, ytr_train)
 
     model = FCNet(NPOLY=dataset.NPOLY).double()
     nparams = count_params(model)
@@ -197,7 +210,6 @@ if __name__ == "__main__":
     optimizer = LBFGS(model.parameters(), lr=1.0, line_search_fn='strong_wolfe', tolerance_grad=1e-14, tolerance_change=1e-14, max_iter=100)
     #optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    metrics = nn.MSELoss()
 
     if isinstance(optimizer, LBFGS):
         logging.info("LBFGS optimizer is selected")
@@ -208,14 +220,25 @@ if __name__ == "__main__":
     else:
         raise ValueError("Unknown optimizer is chosen.")
 
+    METRIC_TYPES = ['RMSE', 'MSE']
+    METRIC_TYPE = 'RMSE'
+    assert METRIC_TYPE in METRIC_TYPES
+
+    logging.info("METRIC_TYPE = {}".format(METRIC_TYPE))
+
+    if METRIC_TYPE == 'MSE':
+        metric = nn.MSELoss()
+    elif METRIC_TYPE == 'RMSE':
+        metric = RMSELoss()
+    else:
+        raise ValueError("unreachable")
+
     n_epochs = 10
     for epoch in range(n_epochs):
         if optim_type == "adam":
             optimizer.zero_grad()
             y_pred = model(Xtr_train)
-
-            # the use of RMSE instead of MSE GREATLY improves the convergence 
-            loss = torch.sqrt(metrics(y_pred, ytr_train))
+            loss = metric(y_pred, ytr_train)
             loss.backward()
             optimizer.step()
 
@@ -223,9 +246,7 @@ if __name__ == "__main__":
             def closure():
                 optimizer.zero_grad()
                 y_pred = model(Xtr_train)
-
-                # the use of RMSE instead of MSE GREATLY improves the convergence 
-                loss = torch.sqrt(metrics(y_pred, ytr_train))
+                loss = metric(y_pred, ytr_train)
                 loss.backward()
                 return loss
 
@@ -234,10 +255,17 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             pred_val = model(Xtr_val)
-            loss_val = metrics(pred_val, ytr_val)
-            rmse_val = torch.sqrt(loss_val) * rmse_descaler * HTOCM
+            loss_val = metric(pred_val, ytr_val)
 
-        rmse_train = loss.item() * rmse_descaler * HTOCM
+        if METRIC_TYPE == 'MSE':
+            rmse_val   = torch.sqrt(loss_val) * rmse_descaler * HTOCM
+            rmse_train = torch.sqrt(loss)     * rmse_descaler * HTOCM
+        elif METRIC_TYPE == 'RMSE':
+            rmse_val   = loss_val * rmse_descaler * HTOCM
+            rmse_train = loss     * rmse_descaler * HTOCM
+        else:
+            raise ValueError("unreachable")
+
         print("Epoch: {}; train RMSE: {:.10f} cm-1; validation RMSE: {:.10f}".format(
             epoch, rmse_train, rmse_val
         ))
