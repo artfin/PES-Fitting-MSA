@@ -60,6 +60,12 @@ class PolyDataset(Dataset):
 
             p_ptr = p.ctypes.data_as(ct.POINTER(ct.c_double))
             self.evpoly(m_ptr, p_ptr)
+
+            assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
+            assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
+
+            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
+
             poly[n, :] = p.reshape((self.NPOLY, )).copy()
 
         logging.info("Done.")
@@ -105,6 +111,7 @@ class PolyDataset(Dataset):
 
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
+                # CH4-N2
                 #if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
                 #if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
                 #if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
@@ -117,6 +124,11 @@ class PolyDataset(Dataset):
                 #if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
                 #if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
 
+                # H2-H2O (makes the fitting significantly worse; check the order=3 polynomials)
+                #if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue # H1 H2 (H2)
+                #if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue # H1 H2 (H2O)
+                #if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H1 O  (H2O)
+                #if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H2 O  (H2O)
                 yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
                 yij[n][k] /= BOHRTOANG
                 yij[n][k] = np.exp(-yij[n, k] / a0)
