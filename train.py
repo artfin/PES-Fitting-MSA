@@ -10,6 +10,9 @@ from torch.optim import LBFGS, Adam
 
 from dataset import PolyDataset
 
+import optuna
+from optuna.trial import TrialState
+
 torch.manual_seed(42)
 np.random.seed(42)
 
@@ -20,6 +23,14 @@ np.random.seed(42)
 # from adahessian import Adahessian
 
 HTOCM = 2.194746313702e5
+
+# scaling of X (polynomial values) and y (energies)
+# TODO: check out several other scaling transformations (minmax, etc)
+SCALE_OPTIONS = [None, "std"]
+SCALE_PARAMS = {
+    "Xscale" : "std",
+    "yscale" : "std"
+}
 
 class StandardScaler:
     def fit(self, x):
@@ -75,32 +86,6 @@ def perform_lstsq(X, y, show_results=False):
     rmse *= HTOCM
     print("(lstsq) RMSE: {} cm-1".format(rmse))
 
-class FCNet(nn.Module):
-    # Jun Li, Bin Jiang, and Hua Guo
-    # J. Chem. Phys. 139, 204103 (2013); https://doi.org/10.1063/1.4832697
-    # Suggest using Tanh activation function and 2 hidden layers
-    def __init__(self, NPOLY, activation=nn.Tanh):
-        super().__init__()
-
-        self.NPOLY      = NPOLY
-        self.activation = activation()
-
-        # LinearRegressor model
-        #self.layers = nn.Sequential(
-        #    nn.Linear(self.NPOLY, 1, bias=False)
-        #)
-
-        self.layers = nn.Sequential(
-            nn.Linear(self.NPOLY, 10),
-            activation(),
-            nn.Linear(10, 10),
-            activation(),
-            nn.Linear(10, 1)
-        )
-
-    def forward(self, x):
-        x = x.view(-1, self.NPOLY)
-        return self.layers(x)
 
 def show_energy_distribution(y):
     energies = y.numpy() * HTOCM
@@ -170,21 +155,30 @@ class EarlyStopping:
         torch.save(model.state_dict(), self.chk_path)
 
 
-if __name__ == "__main__":
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+def define_model(trial, NPOLY):
+    # TODO: maybe add a little Dropout as a means to counteract overfitting
 
-    ch = logging.StreamHandler()
-    formatter = logging.Formatter('[%(levelname)s] %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    # we optimize the number of layers and hidden units
+    n_layers = trial.suggest_int("n_layers", low=1, high=3)
 
-    wdir     = './H2-H2O'
-    order    = "3"
-    symmetry = "2 2 1"
+    layers = []
 
-    dataset = PolyDataset(wdir=wdir, config_fname='points.dat', order=order, symmetry=symmetry)
+    in_features = NPOLY
+    for i in range(n_layers):
+        out_features = trial.suggest_int("n_hidden_l{}".format(i), low=3, high=10)
+        layers.append(nn.Linear(in_features, out_features))
+        layers.append(nn.Tanh())
 
+        in_features = out_features
+
+    layers.append(nn.Linear(in_features, 1))
+
+    return nn.Sequential(*layers)
+
+def split_train_val_test(X, y):
+    """
+    # TODO: implement energy-based splitting of dataset
+    """
     ids = np.random.permutation(len(dataset))
     val_start  = int(len(dataset) * 0.8)
     test_start = int(len(dataset) * 0.9)
@@ -192,33 +186,22 @@ if __name__ == "__main__":
     val_ids = ids[val_start:test_start]
     test_ids = ids[test_start:]
 
-    X, y             = dataset.X, dataset.y
     X_train, y_train = X[train_ids], y[train_ids]
     X_val, y_val     = X[val_ids], y[val_ids]
     X_test, y_test   = X[test_ids],  y[test_ids]
 
-    logging.info("Train size      = {}".format(y_train.size()))
-    logging.info("Validation size = {}".format(y_val.size()))
-    logging.info("Test size       = {}".format(y_test.size()))
-
-    SCALE_OPTIONS = [None, "std"] # ? "minmax"
-    scale_params = {
-        "Xscale" : "std",
-        "yscale" : "std"
-    }
-
-    assert scale_params["Xscale"] in SCALE_OPTIONS
-    if scale_params["Xscale"] == "std":
+    assert SCALE_PARAMS["Xscale"] in SCALE_OPTIONS
+    if SCALE_PARAMS["Xscale"] == "std":
         xscaler = StandardScaler()
-    elif scale_params["Xscale"] == None:
+    elif SCALE_PARAMS["Xscale"] == None:
         xscaler = IdentityScaler()
     else:
         raise ValueError("unreachable")
 
-    assert scale_params["yscale"] in SCALE_OPTIONS
-    if scale_params["yscale"] == "std":
+    assert SCALE_PARAMS["yscale"] in SCALE_OPTIONS
+    if SCALE_PARAMS["yscale"] == "std":
         yscaler = StandardScaler()
-    elif scale_params["yscale"] == None:
+    elif SCALE_PARAMS["yscale"] == None:
         yscaler = IdentityScaler()
     else:
         raise ValueError("unreachable")
@@ -235,34 +218,26 @@ if __name__ == "__main__":
     ytr_val   = yscaler.transform(y_val)
     ytr_test  = yscaler.transform(y_test)
 
-    if scale_params["yscale"] == "std":
+    return Xtr_train, ytr_train, Xtr_val, ytr_val, Xtr_test, ytr_test, xscaler, yscaler
+
+def build_model(trial):
+    d = torch.load("H2-H2O/dataset.pt")
+    X, y = d["X"], d["y"]
+
+    X_train, y_train, X_val, y_val, X_test, y_test, xscaler, yscaler = split_train_val_test(X, y)
+
+    if SCALE_PARAMS["yscale"] == "std":
         rmse_descaler = torch.linalg.norm(yscaler.std)
-    elif scale_params["yscale"] == None:
+    elif SCALE_PARAMS["yscale"] == None:
         rmse_descaler = 1.0
     else:
         raise ValueError("unreachable")
 
-    #show_feature_distribution(X_train, idx=0)
-    #show_energy_distribution(y)
-
-    logging.info("matrix least-squares problem: (raw X, raw Y)")
-    perform_lstsq(X_train, y_train)
-
-    model = FCNet(NPOLY=dataset.NPOLY).double()
-    nparams = count_params(model)
-    logging.info("number of parameters: {}".format(nparams))
+    NPOLY = X_train.size()[1]
+    model = define_model(trial, NPOLY)
+    model.double()
 
     optimizer = LBFGS(model.parameters(), lr=1.0, line_search_fn='strong_wolfe', tolerance_grad=1e-14, tolerance_change=1e-14, max_iter=100)
-    #optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-    if isinstance(optimizer, LBFGS):
-        logging.info("LBFGS optimizer is selected")
-        OPTIM_TYPE = "lbfgs"
-    elif isinstance(optimizer, Adam):
-        logging.info("Adam optimizer is selected")
-        OPTIM_TYPE = "adam"
-    else:
-        raise ValueError("Unknown optimizer is chosen.")
 
     METRIC_TYPES = ['RMSE', 'MSE']
     METRIC_TYPE = 'MSE'
@@ -277,46 +252,31 @@ if __name__ == "__main__":
     else:
         raise ValueError("unreachable")
 
-
-    prev_best = None
-    best_rmse_val = None
-
     SCHEDULER_PATIENCE = 5
     RMSE_TOL  = 0.1 # cm-1
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, threshold=RMSE_TOL, threshold_mode='abs', cooldown=2, patience=SCHEDULER_PATIENCE)
 
-    #ES_score = 0
-    #ES_patience = 10
-
     ES_START_EPOCH = 10
-    CHK_PATH = 'checkpoint.pt'
-    es = EarlyStopping(patience=10, tol=RMSE_TOL, chk_path=CHK_PATH)
+    chk_path = 'checkpoint_{}.pt'.format(trial.number)
+    es = EarlyStopping(patience=10, tol=RMSE_TOL, chk_path=chk_path)
 
-    n_epochs = 500
+    MAX_EPOCHS = 500
 
     ################ START TRAINING #######################
-    for epoch in range(n_epochs):
-        if OPTIM_TYPE == "adam":
+    for epoch in range(MAX_EPOCHS):
+        def closure():
             optimizer.zero_grad()
-            y_pred = model(Xtr_train)
-            loss = metric(y_pred, ytr_train)
+            y_pred = model(X_train)
+            loss = metric(y_pred, y_train)
             loss.backward()
-            optimizer.step()
+            return loss
 
-        elif OPTIM_TYPE == "lbfgs":
-            def closure():
-                optimizer.zero_grad()
-                y_pred = model(Xtr_train)
-                loss = metric(y_pred, ytr_train)
-                loss.backward()
-                return loss
-
-            optimizer.step(closure)
-            loss = closure()
+        optimizer.step(closure)
+        loss = closure()
 
         with torch.no_grad():
-            pred_val = model(Xtr_val)
-            loss_val = metric(pred_val, ytr_val)
+            pred_val = model(X_val)
+            loss_val = metric(pred_val, y_val)
 
         if METRIC_TYPE == 'MSE':
             rmse_val   = torch.sqrt(loss_val) * rmse_descaler * HTOCM
@@ -341,22 +301,21 @@ if __name__ == "__main__":
         logging.info("Epoch: {}; train RMSE: {:.2f} cm-1; validation RMSE: {:.2f}\n".format(
             epoch, rmse_train, rmse_val
         ))
-
     ################ END TRAINING #######################
 
-    model_params = torch.load(CHK_PATH)
+    model_params = torch.load(chk_path)
     model.load_state_dict(model_params)
     logging.info("\nReloading best model from the last checkpoint...")
 
     with torch.no_grad():
-        pred_val = model(Xtr_val)
-        loss_val = metric(pred_val, ytr_val)
+        pred_val = model(X_val)
+        loss_val = metric(pred_val, y_val)
 
-        pred_test = model(Xtr_test)
-        loss_test = metric(pred_test, ytr_test)
+        pred_test = model(X_test)
+        loss_test = metric(pred_test, y_test)
 
-        pred_full = model(Xtr)
-        loss_full = metric(pred_full, ytr)
+        pred_full = model(X)
+        loss_full = metric(pred_full, y)
 
         if METRIC_TYPE == 'MSE':
             rmse_val  = torch.sqrt(loss_val) * rmse_descaler * HTOCM
@@ -371,6 +330,42 @@ if __name__ == "__main__":
         logging.info("Validation RMSE: {:.2f} cm-1".format(rmse_val))
         logging.info("Test RMSE:       {:.2f} cm-1".format(rmse_test))
         logging.info("Full RMSE:       {:.2f} cm-1".format(rmse_full))
+
+    return rmse_val
+
+
+if __name__ == "__main__":
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter('[%(levelname)s] %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    wdir     = './H2-H2O'
+    order    = "3"
+    symmetry = "2 2 1"
+    dataset = PolyDataset(wdir=wdir, config_fname="points.dat", order=order, symmetry=symmetry)
+
+    X, y = dataset.X, dataset.y
+    torch.save({"X" : X, "y" : y}, "H2-H2O/dataset.pt")
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(build_model, n_trials=100, timeout=600)
+
+    pruned_trials   = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
+    complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
+
+    #show_feature_distribution(X_train, idx=0)
+    #show_energy_distribution(y)
+
+    #logging.info("matrix least-squares problem: (raw X, raw Y)")
+    #perform_lstsq(X_train, y_train)
+
+    #nparams = count_params(model)
+    #logging.info("number of parameters: {}".format(nparams))
+
 
     #model_fname = "NN_{}_{}.pt".format(order, symmetry)
     #model_path  = os.path.join(wdir, model_fname)

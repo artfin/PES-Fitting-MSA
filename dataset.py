@@ -132,4 +132,3 @@ class PolyDataset(Dataset):
 
         self.evpoly = basislib.c_evpoly
         self.evpoly.argtypes = [ct.POINTER(ct.c_double), ct.POINTER(ct.c_double)]
-
