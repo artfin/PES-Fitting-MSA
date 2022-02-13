@@ -76,8 +76,23 @@ def count_params(model):
     return nparams
 
 def perform_lstsq(X, y, show_results=False):
-    coeff = torch.linalg.lstsq(X, y, driver='gelss').solution
-    y_pred = X @ coeff
+    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = split_train_val_test(X, y, scale_params={"Xscale": None, "yscale": None})
+
+    coeff = torch.linalg.lstsq(X_train, y_train, driver='gelss').solution
+
+    pred_train = X_train @ coeff
+    pred_val   = X_val   @ coeff
+    pred_test  = X_test  @ coeff
+
+    RMSE = RMSELoss()
+    rmse_train = RMSE(y_train, pred_train) * HTOCM
+    rmse_val   = RMSE(y_val, pred_val) * HTOCM
+    rmse_test  = RMSE(y_test, pred_test) * HTOCM
+
+    logging.info("A rundown for the least-squares regression [in matrix form]:")
+    logging.info("  RMSE train      = {:.2f} cm-1".format(rmse_train))
+    logging.info("  RMSE validation = {:.2f} cm-1".format(rmse_val))
+    logging.info("  RMSE test       = {:.2f} cm-1".format(rmse_test))
 
     if show_results:
         NCONFIGS = y.size()[0]
@@ -86,13 +101,8 @@ def perform_lstsq(X, y, show_results=False):
                 y[n].item() * HTOCM, y_pred[n].item() * HTOCM, (y[n] - y_pred[n]).item() * HTOCM
             ))
 
-    loss = nn.MSELoss()
-    rmse = torch.sqrt(loss(y, y_pred))
-    rmse *= HTOCM
-    print("(lstsq) RMSE: {} cm-1".format(rmse))
 
-
-def show_energy_distribution(y):
+def show_energy_distribution(y, xlim=(-500, 500)):
     energies = y.numpy() * HTOCM
 
     plt.figure(figsize=(10, 10))
@@ -100,7 +110,7 @@ def show_energy_distribution(y):
     plt.xlabel(r"Energy, cm^{-1}")
     plt.ylabel(r"Density")
 
-    plt.xlim((-500.0, 500.0))
+    plt.xlim(xlim)
 
     plt.hist(energies, bins=500)
     plt.show()
@@ -119,6 +129,27 @@ def show_feature_distribution(X, idx):
     plt.ylabel(r"Density")
 
     plt.hist(feature, bins=500)
+    plt.show()
+
+def show_train_val_test_energy_distribution(X, y):
+    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = split_train_val_test(X, y, scale_params={"Xscale": None, "yscale": None})
+
+    plt.figure(figsize=(10, 10))
+    plt.title("Energy distribution")
+    plt.xlabel(r"Energy, cm^{-1}")
+    plt.ylabel(r"Density")
+
+    plt.xlim((-500.0, 2000.0))
+
+    # density=True:
+    # displays a probability density: each bin displays the bin's raw count divided by 
+    # the total number of counts and the bin width, so that the area under the histogram
+    # integrates to 1
+    nbins = 500
+    plt.hist(y_train.numpy() * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 0, 1, 0.5), label='train')
+    plt.hist(y_val.numpy()   * HTOCM, bins=nbins, density=True, lw=3, fc=(1, 0, 0, 0.5), label='val')
+    plt.hist(y_test.numpy()  * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 1, 0, 0.5), label='test')
+    plt.legend(fontsize=14)
     plt.show()
 
 
@@ -160,7 +191,7 @@ class EarlyStopping:
         torch.save(model.state_dict(), self.chk_path)
 
 
-def split_train_val_test(X, y):
+def split_train_val_test(X, y, scale_params):
     """
     # TODO: implement energy-based splitting of dataset
     """
@@ -177,18 +208,18 @@ def split_train_val_test(X, y):
     X_val, y_val     = X[val_ids], y[val_ids]
     X_test, y_test   = X[test_ids],  y[test_ids]
 
-    assert SCALE_PARAMS["Xscale"] in SCALE_OPTIONS
-    if SCALE_PARAMS["Xscale"] == "std":
+    assert scale_params["Xscale"] in SCALE_OPTIONS
+    if scale_params["Xscale"] == "std":
         xscaler = StandardScaler()
-    elif SCALE_PARAMS["Xscale"] == None:
+    elif scale_params["Xscale"] == None:
         xscaler = IdentityScaler()
     else:
         raise ValueError("unreachable")
 
-    assert SCALE_PARAMS["yscale"] in SCALE_OPTIONS
-    if SCALE_PARAMS["yscale"] == "std":
+    assert scale_params["yscale"] in SCALE_OPTIONS
+    if scale_params["yscale"] == "std":
         yscaler = StandardScaler()
-    elif SCALE_PARAMS["yscale"] == None:
+    elif scale_params["yscale"] == None:
         yscaler = IdentityScaler()
     else:
         raise ValueError("unreachable")
@@ -282,7 +313,7 @@ def build_model(trial=None, architecture="optuna", dataset_path=None):
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
 
-    X_train, y_train, X_val, y_val, X_test, y_test, xscaler, yscaler = split_train_val_test(X, y)
+    X_train, y_train, X_val, y_val, X_test, y_test, xscaler, yscaler = split_train_val_test(X, y, scale_params=SCALE_PARAMS)
     X = xscaler.transform(X)
     y = yscaler.transform(y)
 
@@ -430,7 +461,7 @@ def optuna_neural_network_achitecture_search(dataset_path):
         logging.info("    {}: {}".format(key, value))
 
 ################ H2-H2O #######################
-if __name__ == "__main__":
+if __name__ == "__main2__":
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
 
@@ -447,7 +478,6 @@ if __name__ == "__main__":
     X, y = dataset.X, dataset.y
     torch.save({"X" : X, "y" : y}, "H2-H2O/dataset.pt")
 
-    logging.info("matrix least-squares problem: (raw X, raw Y)")
     perform_lstsq(X, y)
 
     # TODO: Optuna best trial is NOT reproducible at this point
@@ -466,7 +496,7 @@ if __name__ == "__main__":
     #logging.info("number of parameters: {}".format(nparams))
 
 ################ CH4-N2 #######################
-if __name__ == "__main2__":
+if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
 
@@ -483,7 +513,10 @@ if __name__ == "__main2__":
     X, y = dataset.X, dataset.y
     torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
 
-    logging.info("matrix least-squares problem: (raw X, raw Y)")
+    #show_feature_distribution(X_train, idx=0)
+    #show_energy_distribution(y, xlim=(-500, 2000))
+    #show_train_val_test_energy_distribution(X, y)
+
     perform_lstsq(X, y)
 
     # TODO: Optuna best trial is NOT reproducible at this point

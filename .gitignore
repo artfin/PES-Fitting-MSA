@@ -1,6 +1,9 @@
 .*
 !.gitignore
 
+# venv folder
+pytorch/
+
 *.mod
 *.o
 *.so
@@ -11,3 +14,17 @@
 *.MAP
 *.MONO
 *.POLY
+
+CH4-N2/energy-1-2310*
+CH4-N2/ch4-n2-energies-bf.txt
+CH4-N2/bf-to-xyz.py
+CH4-N2/merge.py
+
+CH4-N2/basis_*.f90
+H2-H2O/basis_*.f90
+
+CH4-N2/ch4-n2-energies.xyz
+H2-H2O/points.dat
+
+CH4-N2/dataset.pt
+H2-H2O/dataset.pt
