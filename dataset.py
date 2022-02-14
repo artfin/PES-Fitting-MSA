@@ -104,6 +104,10 @@ class PolyDataset(Dataset):
         return configs
 
     def make_yij(self, configs):
+        ZERO_YIJ = True
+        if ZERO_YIJ:
+            logging.info("[-- NOTICE --] Morse variables with respect to intermolecular distances are zero.") 
+
         yij = np.zeros((self.NCONFIGS, self.NDIS), order="F")
 
         for n in range(self.NCONFIGS):
@@ -112,17 +116,18 @@ class PolyDataset(Dataset):
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
                 # CH4-N2
-                #if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
-                #if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
-                #if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
-                #if i == 1 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H2 H3
-                #if i == 1 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H2 H4
-                #if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H3 H4
-                #if i == 0 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H1 C
-                #if i == 1 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H2 C
-                #if i == 2 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H3 C
-                #if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
-                #if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
+                if ZERO_YIJ:
+                    if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
+                    if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
+                    if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
+                    if i == 1 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H2 H3
+                    if i == 1 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H2 H4
+                    if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H3 H4
+                    if i == 0 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H1 C
+                    if i == 1 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H2 C
+                    if i == 2 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H3 C
+                    if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
+                    if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
 
                 # H2-H2O (makes the fitting significantly worse; check the order=3 polynomials)
                 #if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue # H1 H2 (H2)

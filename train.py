@@ -10,10 +10,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim import LBFGS, Adam
 
-from dataset import PolyDataset
-
 import optuna
 from optuna.trial import TrialState
+
+from dataset import PolyDataset
+from util import IdentityScaler, StandardScaler
+from util import RMSELoss
 
 np.random.seed(42)
 random.seed(42)
@@ -30,38 +32,6 @@ SCALE_PARAMS = {
     "Xscale" : "std",
     "yscale" : "std"
 }
-
-class StandardScaler:
-    def fit(self, x):
-        self.mean = x.mean(0, keepdim=True)
-        self.std = x.std(0, unbiased=False, keepdim=True)
-
-        # detect the constant features (zero standard deviation)
-        self.zero_idx = (self.std == 0).nonzero()
-
-    def transform(self, x):
-        c = torch.clone(x)
-        c -= self.mean
-        c /= self.std
-
-        # -> transform those features to zero 
-        c[:, self.zero_idx] = 0.0
-        return c
-
-class IdentityScaler:
-    def fit(self, x):
-        pass
-
-    def transform(self, x):
-        return x
-
-class RMSELoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mse = nn.MSELoss()
-
-    def forward(self, ypred, y):
-        return torch.sqrt(self.mse(ypred, y))
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
@@ -95,11 +65,28 @@ def perform_lstsq(X, y, show_results=False):
     logging.info("  RMSE test       = {:.2f} cm-1".format(rmse_test))
 
     if show_results:
-        NCONFIGS = y.size()[0]
-        for n in range(NCONFIGS):
-            print("{} \t {} \t {}".format(
-                y[n].item() * HTOCM, y_pred[n].item() * HTOCM, (y[n] - y_pred[n]).item() * HTOCM
-            ))
+        MAX_ENERGY = 3000.0 # cm-1
+        idx = y_train.numpy() < MAX_ENERGY / HTOCM
+        calc_energy = y_train.numpy()[idx] * HTOCM
+        fit_energy  = pred_train.numpy()[idx] * HTOCM
+
+        abs_error = calc_energy - fit_energy
+
+        plt.figure(figsize=(10, 10))
+        plt.scatter(calc_energy, abs_error, marker='o', facecolors='none', color='k')
+
+        plt.xlim((-500.0, MAX_ENERGY))
+        plt.ylim((-100.0, 100.0))
+
+        plt.xlabel("Energy, cm-1")
+        plt.ylabel("Absolute error, cm-1")
+
+        plt.show()
+        #for n in range(nconfigs_train):
+        #    print("{} \t {} \t {}".format(
+        #        y[n].item() * HTOCM, y_pred[n].item() * HTOCM, (y[n] - y_pred[n]).item() * HTOCM
+        #    ))
+
 
 
 def show_energy_distribution(y, xlim=(-500, 500)):
@@ -189,7 +176,6 @@ class EarlyStopping:
     def save_checkpoint(self, model):
         logging.debug("Saving the checkpoint")
         torch.save(model.state_dict(), self.chk_path)
-
 
 def split_train_val_test(X, y, scale_params):
     """
@@ -308,7 +294,7 @@ def define_model(architecture, NPOLY):
 
     return model
 
-def build_model(trial=None, architecture="optuna", dataset_path=None):
+def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_params_path=None):
     print("Loading data from dataset_path = {}".format(dataset_path))
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
@@ -317,8 +303,20 @@ def build_model(trial=None, architecture="optuna", dataset_path=None):
     X = xscaler.transform(X)
     y = yscaler.transform(y)
 
+    torch.save({
+        "X_mean" : xscaler.mean,
+        "X_std"  : xscaler.std,
+        "y_mean" : yscaler.mean,
+        "y_std"  : yscaler.std
+    }, scaler_params_path)
+    logging.info("Saving scaler parameters to {}".format(scaler_params_path))
+
+    #print("(train dataset) Y_MEAN: {}".format(yscaler.mean.item()))
+    #print("(train dataset) Y_STD:  {}".format(yscaler.std.item()))
+
     if SCALE_PARAMS["yscale"] == "std":
-        rmse_descaler = torch.linalg.norm(yscaler.std)
+        rmse_descaler = yscaler.std.item()
+
     elif SCALE_PARAMS["yscale"] == None:
         rmse_descaler = 1.0
     else:
@@ -505,27 +503,30 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    wdir     = "CH4-N2"
-    order    = "3"
-    symmetry = "4 2 1"
-    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
+    #wdir     = "CH4-N2"
+    #order    = "4"
+    #symmetry = "4 2 1"
+    #dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
 
-    X, y = dataset.X, dataset.y
-    torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+    #X, y = dataset.X, dataset.y
+    #torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+
+    dataset_path = "CH4-N2/dataset.pt"
+    print("Loading data from dataset_path = {}".format(dataset_path))
+    d = torch.load(dataset_path)
+    X, y = d["X"], d["y"]
 
     #show_feature_distribution(X_train, idx=0)
     #show_energy_distribution(y, xlim=(-500, 2000))
     #show_train_val_test_energy_distribution(X, y)
 
-    perform_lstsq(X, y)
+    perform_lstsq(X, y, show_results=False)
 
     # TODO: Optuna best trial is NOT reproducible at this point
     # Do I miss any seeds?
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
     architecture = (10, 10)
-    build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt")
-
-
-
+    build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt", scaler_params_path="CH4-N2/scaler_params.pt")
+    #### 
 

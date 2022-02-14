@@ -1,17 +1,54 @@
 import logging
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 
 import torch
 import torch.nn as nn
 
-from model import FCNet
-from dataset import PolyDataset
-from dataset import HTOCM
+from util import IdentityScaler, StandardScaler
+from util import RMSELoss
 
-# very important to fix the seed !
-torch.manual_seed(42)
-np.random.seed(42)
+HTOCM = 2.194746313702e5
+
+def define_model(architecture, NPOLY):
+    """
+    architecture:
+        tuple (h0, h1, ...)
+        It implies the following MLP architecture:
+            nn.Linear(NPOLY, h0)
+            nn.Tanh()
+            nn.Linear(h0, h1)
+            nn.Tanh()
+            ...
+            nn.Tanh()
+            nn.Linear(hk, 1)
+    """
+    layers = []
+
+    in_features  = NPOLY
+    # to allow constructing LinearRegressor with architecture=() 
+    out_features = NPOLY
+
+    for i in range(len(architecture)):
+        out_features = architecture[i]
+        layers.append(nn.Linear(in_features, out_features))
+        layers.append(nn.Tanh())
+
+        in_features = out_features
+
+    layers.append(nn.Linear(out_features, 1))
+    model = nn.Sequential(*layers)
+
+    sigmoid_gain = torch.nn.init.calculate_gain("tanh")
+    for child in model.children():
+        if isinstance(child, nn.Linear):
+            for _ in range(0, len(layers)):
+                torch.nn.init.xavier_uniform_(child.weight, gain=sigmoid_gain)
+                if child.bias is not None:
+                    torch.nn.init.zeros_(child.bias)
+
+    return model
 
 if __name__ == '__main__':
     logger = logging.getLogger()
@@ -22,56 +59,58 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    wdir     = "./H2-H2O"
-    order    = "3"
-    symmetry = "2 2 1"
+    dataset_path = "CH4-N2/dataset.pt"
+    print("Loading data from dataset_path = {}".format(dataset_path))
+    d = torch.load(dataset_path)
+    X, y = d["X"], d["y"]
 
-    model_fname = "NN_{}_{}.pt".format(order, symmetry)
-    model_path  = os.path.join(wdir, model_fname)
-    logging.info("loading model from {}...".format(model_path))
-    state_dict = torch.load(model_path)
-
-    NPOLY      = 102
-    n_layers   = 2
-    activation = nn.Tanh
-    init_form  = "uniform"
-    model = FCNet(NPOLY=NPOLY, n_layers=n_layers, activation=activation, init_form=init_form)
+    NPOLY = X.size()[1]
+    model = define_model(architecture=(10, 10), NPOLY=NPOLY)
     model.double()
+    model_params = torch.load("checkpoint.pt")
+    model.load_state_dict(model_params)
 
-    model.load_state_dict(state_dict)
-    model.eval()
+    d = torch.load("CH4-N2/scaler_params.pt")
+    X_mean, X_std = d["X_mean"], d["X_std"]
+    y_mean, y_std = d["y_mean"], d["y_std"]
 
-    wdir     = './H2-H2O'
-    order    = "3"
-    symmetry = "2 2 1"
-    dataset  = PolyDataset(wdir=wdir, config_fname='points.dat', order=order, symmetry=symmetry)
+    logging.info("Loaded scaler parameters:")
+    #logging.info("X_mean: {}; X_std: {}".format(X_mean, X_std))
+    logging.info("Y_mean: {}; Y_std: {}".format(y_mean, y_std))
 
-    ids = np.random.permutation(len(dataset))
-    train_size = int(0.8 * len(dataset))
-    test_size  = len(dataset) - train_size
-    logging.info("Test size  = {}".format(test_size))
+    xscaler = StandardScaler()
+    xscaler.fit(X)
+    Xtr = xscaler.transform(X, mean=X_mean, std=X_std)
 
-    train_ids = ids[:train_size]
-    test_ids  = ids[train_size:]
+    ytr_pred = model(Xtr)
+    y_pred   = ytr_pred * y_std + y_mean
 
-    test_ids         = ids[train_size:]
-    X, y             = dataset.X, dataset.y
-    X_train, y_train = X[train_ids], y[train_ids]
-    X_test, y_test   = X[test_ids], y[test_ids]
+    RMSE = RMSELoss()
 
-    # scaling
-    mean = X_train.mean(axis=0)
-    std  = X_train.std(axis=0)
-    # first polynomial is a constant => std = 0.0
-    std[0] = 1.0
+    MAX_ENERGY = y.max().item() * HTOCM # cm-1
+    print("MAXIMUM ENERGY: {}".format(y.max().item() * HTOCM))
+    idx = y.numpy() < MAX_ENERGY / HTOCM
+    calc_energy = y.numpy()[idx] * HTOCM
+    fit_energy  = y_pred.detach().numpy()[idx] * HTOCM
+    print("RMSE(calc_energy, fit_energy): {}".format(RMSE(torch.tensor(calc_energy), torch.tensor(fit_energy))))
 
-    X_test = (X_test - mean) / std
+    MAX_ENERGY = 3000.0 # cm-1
+    idx = y.numpy() < MAX_ENERGY / HTOCM
+    calc_energy = y.numpy()[idx] * HTOCM
+    fit_energy  = y_pred.detach().numpy()[idx] * HTOCM
+    print("RMSE(calc_energy, fit_energy): {}".format(RMSE(torch.tensor(calc_energy), torch.tensor(fit_energy))))
 
-    y_pred = model(X_test)
-    y_pred = y_pred.detach().numpy()
+    abs_error = calc_energy - fit_energy
+
+    plt.figure(figsize=(10, 10))
+    plt.scatter(calc_energy, abs_error, marker='o', facecolors='none', color='k')
+
+    plt.xlim((-500.0, MAX_ENERGY))
+    plt.ylim((-25.0, 25.0))
+
+    plt.xlabel("Energy, cm-1")
+    plt.ylabel("Absolute error, cm-1")
+
+    plt.show()
 
 
-    print("Prediction \t Test \t Diff")
-    for ypred_val, ytest_val in zip(y_pred, y_test):
-        diff = ypred_val[0] - ytest_val[0]
-        print(" {:.8f} \t {:.8f} \t {:.8f}".format(ypred_val[0] * HTOCM, ytest_val[0] * HTOCM, diff * HTOCM))
