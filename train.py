@@ -1,5 +1,4 @@
 import logging
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import os
@@ -88,58 +87,6 @@ def perform_lstsq(X, y, show_results=False):
         #    print("{} \t {} \t {}".format(
         #        y[n].item() * HTOCM, y_pred[n].item() * HTOCM, (y[n] - y_pred[n]).item() * HTOCM
         #    ))
-
-
-
-def show_energy_distribution(y, xlim=(-500, 500)):
-    energies = y.numpy() * HTOCM
-
-    plt.figure(figsize=(10, 10))
-    plt.title("Energy distribution")
-    plt.xlabel(r"Energy, cm^{-1}")
-    plt.ylabel(r"Density")
-
-    plt.xlim(xlim)
-
-    plt.hist(energies, bins=500)
-    plt.show()
-
-def show_feature_distribution(X, idx):
-    if isinstance(X, np.ndarray):
-        feature = X[:, idx]
-    elif isinstance(X, torch.tensor):
-        feature = X.numpy()[:, idx]
-    else:
-        raise ValueError("Unknown type")
-
-    plt.figure(figsize=(10, 10))
-    plt.title("Invariant polynomial distribution")
-    plt.xlabel(r"Polynomial value")
-    plt.ylabel(r"Density")
-
-    plt.hist(feature, bins=500)
-    plt.show()
-
-def show_train_val_test_energy_distribution(X, y):
-    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = split_train_val_test(X, y, scale_params={"Xscale": None, "yscale": None})
-
-    plt.figure(figsize=(10, 10))
-    plt.title("Energy distribution")
-    plt.xlabel(r"Energy, cm^{-1}")
-    plt.ylabel(r"Density")
-
-    plt.xlim((-500.0, 2000.0))
-
-    # density=True:
-    # displays a probability density: each bin displays the bin's raw count divided by 
-    # the total number of counts and the bin width, so that the area under the histogram
-    # integrates to 1
-    nbins = 500
-    plt.hist(y_train.numpy() * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 0, 1, 0.5), label='train')
-    plt.hist(y_val.numpy()   * HTOCM, bins=nbins, density=True, lw=3, fc=(1, 0, 0, 0.5), label='val')
-    plt.hist(y_test.numpy()  * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 1, 0, 0.5), label='test')
-    plt.legend(fontsize=14)
-    plt.show()
 
 
 class EarlyStopping:
@@ -513,7 +460,7 @@ if __name__ == "__main__":
     logger.addHandler(ch)
 
     wdir     = "CH4-N2"
-    order    = "3"
+    order    = "4"
     symmetry = "4 2 1"
     dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
 
@@ -526,14 +473,15 @@ if __name__ == "__main__":
     X, y = d["X"], d["y"]
 
     #show_feature_distribution(X_train, idx=0)
-    #show_energy_distribution(y, xlim=(-500, 2000))
+    show_energy_distribution(y, xlim=(-400, 3000))
     #show_train_val_test_energy_distribution(X, y)
 
     perform_lstsq(X, y, show_results=False)
 
-    optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
+    #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
+    #### 
     #architecture = (10, 10)
-    #build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt", scaler_params_path="CH4-N2/scaler_params.pt")
+    #build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt")
     #### 
 

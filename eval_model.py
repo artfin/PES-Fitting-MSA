@@ -10,6 +10,32 @@ import torch.nn as nn
 from util import IdentityScaler, StandardScaler
 from util import RMSELoss
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
+
+plt.rcParams["mathtext.fontset"] = "cm"
+mpl.rcParams['font.serif'] = 'Times'
+
+latex_params = {
+    "pgf.texsystem": "pdflatex",
+    'figure.titlesize' : 'large',
+    "text.usetex": True,
+    "font.family": "serif",
+    "font.serif": 'Times',
+    "font.monospace": [],
+    "axes.labelsize": 18,
+    "font.size": 18,
+    "legend.fontsize": 18,
+    "xtick.labelsize": 18,
+    "ytick.labelsize": 18,
+    #"text.latex.preamble": [
+    #    r"\usepackage[utf8]{inputenc}",    # use utf8 fonts 
+    #    r"\usepackage[detect-all]{siunitx}",
+    #]
+}
+mpl.rcParams.update(latex_params)
+
 HTOCM = 2.194746313702e5
 
 def define_model(architecture, NPOLY):
@@ -96,7 +122,7 @@ def load_dataset(folder, fname):
 
 def plot_rmse_from_checkpoint(folder, fname, X, y):
     NPOLY = X.size()[1]
-    model, xscaler, yscaler = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-0.pt", NPOLY=NPOLY)
+    model, xscaler, yscaler = retrieve_checkpoint(folder=folder, fname=fname, NPOLY=NPOLY)
 
     Xtr = xscaler.transform(X)
     ytr_pred = model(Xtr)
@@ -122,13 +148,27 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
     abs_error = calc_energy - fit_energy
 
     plt.figure(figsize=(10, 10))
-    plt.scatter(calc_energy, abs_error, marker='o', facecolors='none', color='k')
+    ax = plt.gca()
+
+    plt.scatter(calc_energy, abs_error, s=20, marker='o', facecolors='none', color='k', lw=0.5)
 
     plt.xlim((-500.0, MAX_ENERGY))
     plt.ylim((-100.0, 100.0))
 
-    plt.xlabel("Energy, cm-1")
-    plt.ylabel("Absolute error, cm-1")
+    plt.xlabel(r"Energy, cm$^{-1}$")
+    plt.ylabel(r"Absolute error, cm$^{-1}$")
+
+    ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+    ax.yaxis.set_major_locator(plt.MultipleLocator(50.0))
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(10.0))
+
+    ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+    ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+    ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+    ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+    plt.savefig("abs-error-distribution.png", format="png", dpi=300)
 
     plt.show()
 
@@ -168,14 +208,14 @@ if __name__ == '__main__':
     logger.addHandler(ch)
 
     X, y = load_dataset("CH4-N2", "dataset.pt")
-    NPOLY = X.size()[1]
+    #NPOLY = X.size()[1]
 
     ############## 
     #summarize_optuna_run(optuna_folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", NPOLY=NPOLY)
     ############## 
 
     ############## 
-    #plot_rmse_from_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", X=X, y=y)
+    plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y)
     ############## 
 
     ############## 
