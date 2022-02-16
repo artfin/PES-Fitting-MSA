@@ -104,7 +104,7 @@ class PolyDataset(Dataset):
         return configs
 
     def make_yij(self, configs):
-        ZERO_YIJ = True
+        ZERO_YIJ = False 
         if ZERO_YIJ:
             logging.info("[-- NOTICE --] Morse variables with respect to intermolecular distances are zero.") 
 

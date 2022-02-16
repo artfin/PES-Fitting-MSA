@@ -35,6 +35,14 @@ class StandardScaler:
         c[:, self.zero_idx] = 0.0
         return c
 
+    @classmethod
+    def from_precomputed(cls, mean, std, zero_idx):
+        scaler = cls()
+        scaler.mean     = mean
+        scaler.std      = std
+        scaler.zero_idx = zero_idx
+        return scaler
+
 class IdentityScaler:
     def fit(self, x):
         pass

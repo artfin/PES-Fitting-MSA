@@ -2,6 +2,7 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -50,39 +51,57 @@ def define_model(architecture, NPOLY):
 
     return model
 
-if __name__ == '__main__':
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+def retrieve_checkpoint(folder, fname, NPOLY):
+    fpath = os.path.join(folder, fname)
+    logging.info("Retrieving checkpoint from fpath={}".format(fpath))
 
-    ch = logging.StreamHandler()
-    formatter = logging.Formatter('[%(levelname)s] %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    checkpoint = torch.load(fpath)
+    arch = checkpoint["architecture"]
 
-    dataset_path = "CH4-N2/dataset.pt"
-    print("Loading data from dataset_path = {}".format(dataset_path))
-    d = torch.load(dataset_path)
+    model = define_model(architecture=arch, NPOLY=NPOLY)
+    model.double()
+    model.load_state_dict(checkpoint["model"])
+
+    xscaler = StandardScaler.from_precomputed(mean=checkpoint["X_mean"], std=checkpoint["X_std"], zero_idx=checkpoint["X_zero_idx"])
+    yscaler = StandardScaler.from_precomputed(mean=checkpoint["y_mean"], std=checkpoint["y_std"], zero_idx=checkpoint["y_zero_idx"])
+
+    return model, xscaler, yscaler
+
+def summarize_optuna_run(optuna_folder, NPOLY):
+    model_names = [f for f in os.listdir(optuna_folder) if os.path.isfile(os.path.join(optuna_folder, f))]
+
+    for model_name in sorted(model_names):
+        model, xscaler, yscaler = retrieve_checkpoint(folder=optuna_folder, fname=model_name, NPOLY=NPOLY)
+        rmse_descaler = yscaler.std.item()
+
+        Xtr = xscaler.transform(X)
+        ytr = yscaler.transform(y)
+
+        with torch.no_grad():
+            pred = model(Xtr)
+
+        RMSE = RMSELoss()
+        rmse_full = RMSE(ytr, pred) * rmse_descaler * HTOCM
+        logging.info("model: {}; full dataset RMSE: {} cm-1".format(model_name, rmse_full))
+
+
+def load_dataset(folder, fname):
+    fpath = os.path.join(folder, fname)
+    logging.info("Loading dataset from fpath={}".format(fpath))
+
+    d = torch.load(fpath)
     X, y = d["X"], d["y"]
 
+    return X, y
+
+def plot_rmse_from_checkpoint(folder, fname, X, y):
     NPOLY = X.size()[1]
-    model = define_model(architecture=(10, 10), NPOLY=NPOLY)
-    model.double()
-    model_params = torch.load("checkpoint.pt")
-    model.load_state_dict(model_params)
+    model, xscaler, yscaler = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-0.pt", NPOLY=NPOLY)
 
-    d = torch.load("CH4-N2/scaler_params.pt")
-    X_mean, X_std = d["X_mean"], d["X_std"]
-    y_mean, y_std = d["y_mean"], d["y_std"]
-
-    logging.info("Loaded scaler parameters:")
-    #logging.info("X_mean: {}; X_std: {}".format(X_mean, X_std))
-    logging.info("Y_mean: {}; Y_std: {}".format(y_mean, y_std))
-
-    xscaler = StandardScaler()
-    xscaler.fit(X)
-    Xtr = xscaler.transform(X, mean=X_mean, std=X_std)
-
+    Xtr = xscaler.transform(X)
     ytr_pred = model(Xtr)
+
+    y_mean, y_std = yscaler.mean, yscaler.std
     y_pred   = ytr_pred * y_std + y_mean
 
     RMSE = RMSELoss()
@@ -106,11 +125,66 @@ if __name__ == '__main__':
     plt.scatter(calc_energy, abs_error, marker='o', facecolors='none', color='k')
 
     plt.xlim((-500.0, MAX_ENERGY))
-    plt.ylim((-25.0, 25.0))
+    plt.ylim((-100.0, 100.0))
 
     plt.xlabel("Energy, cm-1")
     plt.ylabel("Absolute error, cm-1")
 
     plt.show()
 
+
+def timeit_model(model, X):
+    ncycles = 100
+    start = time.time()
+
+    with torch.no_grad():
+        for k in range(ncycles):
+            pred = model(X)
+
+    end = time.time()
+
+    cycle_t = (end - start) / ncycles
+    logging.info("Total execution time:     {} s".format(end - start))
+    logging.info("Execution time per cycle: {} mcs".format(cycle_t * 1e6))
+
+    npoints = X.size()[0]
+    print("npoints: {}".format(npoints))
+    point_t = cycle_t / npoints
+    logging.info("Execution time per point: {} mcs".format(point_t * 1e6))
+
+def export_torchscript(fname, model, NPOLY):
+    dummy = torch.rand(1, NPOLY, dtype=torch.float64)
+    traced_script_module = torch.jit.trace(model, dummy)
+    traced_script_module.save(fname)
+
+
+if __name__ == '__main__':
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter('[%(levelname)s] %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    X, y = load_dataset("CH4-N2", "dataset.pt")
+    NPOLY = X.size()[1]
+
+    ############## 
+    #summarize_optuna_run(optuna_folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", NPOLY=NPOLY)
+    ############## 
+
+    ############## 
+    #plot_rmse_from_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", X=X, y=y)
+    ############## 
+
+    ############## 
+    #model, xscaler, _ = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", NPOLY=NPOLY)
+    #timeit_model(model, xscaler.transform(X))
+    ############## 
+
+    ############## 
+    #model, _, _ = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", NPOLY=NPOLY)
+    #export_torchscript(fname="test.pt", model=model, NPOLY=NPOLY)
+    ############## 
 

@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import os
+from pathlib import Path
 import random
+import uuid
 
 import torch
 import torch.nn as nn
@@ -155,15 +157,15 @@ class EarlyStopping:
         self.best_score = None
         self.status = False
 
-    def __call__(self, score, model):
+    def __call__(self, score, model, xscaler, yscaler):
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(model)
+            self.save_checkpoint(model, xscaler, yscaler)
 
         elif score < self.best_score and (self.best_score - score) > self.tol:
             self.best_score = score
             self.counter = 0
-            self.save_checkpoint(model)
+            self.save_checkpoint(model, xscaler, yscaler)
 
         else:
             self.counter += 1
@@ -173,9 +175,23 @@ class EarlyStopping:
         logging.debug("Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
         logging.debug("ES counter: {}; ES patience: {}".format(self.counter, self.patience))
 
-    def save_checkpoint(self, model):
+    def save_checkpoint(self, model, xscaler, yscaler):
         logging.debug("Saving the checkpoint")
-        torch.save(model.state_dict(), self.chk_path)
+
+        architecture = [m.out_features for m in next(model.modules()) if isinstance(m, torch.nn.modules.linear.Linear)]
+        architecture = tuple(architecture[:-1])
+
+        checkpoint = {
+            "model":        model.state_dict(),
+            "architecture": architecture,
+            "X_mean":       xscaler.mean,
+            "X_std":        xscaler.std,
+            "X_zero_idx":   xscaler.zero_idx,
+            "y_mean":       yscaler.mean,
+            "y_std":        yscaler.std,
+            "y_zero_idx":   yscaler.zero_idx,
+        }
+        torch.save(checkpoint, self.chk_path)
 
 def split_train_val_test(X, y, scale_params):
     """
@@ -228,13 +244,13 @@ def optuna_define_model(trial, NPOLY):
     # TODO: maybe add a little Dropout as a means to counteract overfitting
 
     # we optimize the number of layers and hidden units
-    n_layers = trial.suggest_int("n_layers", low=2, high=3)
+    n_layers = trial.suggest_int("n_layers", low=2, high=2)
 
     layers = []
 
     in_features = NPOLY
     for i in range(n_layers):
-        out_features = trial.suggest_int("n_hidden_l{}".format(i), low=2, high=10)
+        out_features = trial.suggest_int("n_hidden_l{}".format(i), low=5, high=20)
         layers.append(nn.Linear(in_features, out_features))
         layers.append(nn.Tanh())
         #dropout = trial.suggest_float("droupout_l{}".format(i), low=0.01, high=0.1)
@@ -294,25 +310,21 @@ def define_model(architecture, NPOLY):
 
     return model
 
-def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_params_path=None):
-    print("Loading data from dataset_path = {}".format(dataset_path))
+def build_model(trial=None, architecture="optuna", dataset_path=None, optuna_run_folder=None):
+    logging.info("Loading data from dataset_path = {}".format(dataset_path))
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
+    logging.info("Loaded the data.")
 
     X_train, y_train, X_val, y_val, X_test, y_test, xscaler, yscaler = split_train_val_test(X, y, scale_params=SCALE_PARAMS)
     X = xscaler.transform(X)
     y = yscaler.transform(y)
 
-    torch.save({
-        "X_mean" : xscaler.mean,
-        "X_std"  : xscaler.std,
-        "y_mean" : yscaler.mean,
-        "y_std"  : yscaler.std
-    }, scaler_params_path)
-    logging.info("Saving scaler parameters to {}".format(scaler_params_path))
-
-    #print("(train dataset) Y_MEAN: {}".format(yscaler.mean.item()))
-    #print("(train dataset) Y_STD:  {}".format(yscaler.std.item()))
+    if architecture == "optuna":
+        chk_path = os.path.join(optuna_run_folder, "model-{}.pt".format(trial.number))
+        logging.info("Saving current model to chk_path={}".format(chk_path))
+    else:
+        chk_path = "checkpoint.pt"
 
     if SCALE_PARAMS["yscale"] == "std":
         rmse_descaler = yscaler.std.item()
@@ -351,12 +363,6 @@ def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_par
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, threshold=RMSE_TOL, threshold_mode='abs', cooldown=2, patience=SCHEDULER_PATIENCE)
 
     ES_START_EPOCH = 10
-
-    if architecture == "optuna":
-        chk_path = "checkpoint_{}.pt".format(trial.number)
-    else:
-        chk_path = "checkpoint.pt"
-
     es = EarlyStopping(patience=15, tol=RMSE_TOL, chk_path=chk_path)
 
     MAX_EPOCHS = 500
@@ -393,7 +399,7 @@ def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_par
         logging.info("Current learning rate: {:.2e}".format(lr))
 
         if epoch > ES_START_EPOCH:
-            es(rmse_val, model)
+            es(rmse_val, model, xscaler, yscaler)
 
             if es.status:
                 logging.info("Invoking early stop")
@@ -404,8 +410,8 @@ def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_par
         ))
     ################ END TRAINING #######################
 
-    model_params = torch.load(chk_path)
-    model.load_state_dict(model_params)
+    checkpoint = torch.load(chk_path)
+    model.load_state_dict(checkpoint["model"])
     logging.info("\nReloading best model from the last checkpoint...")
 
     with torch.no_grad():
@@ -419,11 +425,11 @@ def build_model(trial=None, architecture="optuna", dataset_path=None, scaler_par
         loss_full = metric(pred_full, y)
 
         if METRIC_TYPE == 'MSE':
-            rmse_val  = torch.sqrt(loss_val) * rmse_descaler * HTOCM
+            rmse_val  = torch.sqrt(loss_val)  * rmse_descaler * HTOCM
             rmse_test = torch.sqrt(loss_test) * rmse_descaler * HTOCM
             rmse_full = torch.sqrt(loss_full) * rmse_descaler * HTOCM
         elif METRIC_TYPE == 'RMSE':
-            rmse_val  = loss_val * rmse_descaler * HTOCM
+            rmse_val  = loss_val  * rmse_descaler * HTOCM
             rmse_test = loss_test * rmse_descaler * HTOCM
             rmse_full = loss_full * rmse_descaler * HTOCM
 
@@ -439,8 +445,13 @@ def optuna_neural_network_achitecture_search(dataset_path):
     sampler = optuna.samplers.TPESampler(seed=42)
     study = optuna.create_study(direction="minimize")
 
-    objective = lambda trial: build_model(trial, architecture="optuna", dataset_path=dataset_path)
-    study.optimize(objective, n_trials=2, timeout=600)
+    uniq_id = uuid.uuid4()
+    OPTUNA_RUN_FOLDER = "optuna-run-{}".format(uniq_id)
+    Path(OPTUNA_RUN_FOLDER).mkdir(exist_ok=True)
+    logging.info("Saving models to OPTUNA_RUN_FOLDER={}".format(OPTUNA_RUN_FOLDER))
+
+    objective = lambda trial: build_model(trial, architecture="optuna", dataset_path=dataset_path, optuna_run_folder=OPTUNA_RUN_FOLDER)
+    study.optimize(objective, n_trials=5, timeout=600)
 
     pruned_trials   = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
@@ -478,8 +489,6 @@ if __name__ == "__main2__":
 
     perform_lstsq(X, y)
 
-    # TODO: Optuna best trial is NOT reproducible at this point
-    # Do I miss any seeds?
     optuna_neural_network_achitecture_search(dataset_path="H2-H2O/dataset.pt")
 
     ###
@@ -503,13 +512,13 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #wdir     = "CH4-N2"
-    #order    = "4"
-    #symmetry = "4 2 1"
-    #dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
+    wdir     = "CH4-N2"
+    order    = "3"
+    symmetry = "4 2 1"
+    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
 
-    #X, y = dataset.X, dataset.y
-    #torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+    X, y = dataset.X, dataset.y
+    torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
 
     dataset_path = "CH4-N2/dataset.pt"
     print("Loading data from dataset_path = {}".format(dataset_path))
@@ -522,11 +531,9 @@ if __name__ == "__main__":
 
     perform_lstsq(X, y, show_results=False)
 
-    # TODO: Optuna best trial is NOT reproducible at this point
-    # Do I miss any seeds?
-    #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
+    optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
-    architecture = (10, 10)
-    build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt", scaler_params_path="CH4-N2/scaler_params.pt")
+    #architecture = (10, 10)
+    #build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt", scaler_params_path="CH4-N2/scaler_params.pt")
     #### 
 
