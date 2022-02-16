@@ -83,13 +83,11 @@ if __name__   == "__main__":
     order         = raw_input('Please enter the maximum order of the polynomial: ')
     symmetry      = raw_input('Please enter the permutation symmetry of the molecule: ')
     wdir          = raw_input('Please enter the working directory: ')
-    config_fname  = raw_input('Please enter the name of the file with configurations [relative to wd]: ')
 
     logging.info("generating PIP basis:\n")
     logging.info("    order        = {}".format(order))
     logging.info("    symmetry     = {}".format(symmetry))
     logging.info("    wdir         = {}".format(wdir))
-    logging.info("    config_fname = {}".format(config_fname))
 
     run_msa(order, symmetry, wdir)
     compile_dlib(order, symmetry, wdir)
