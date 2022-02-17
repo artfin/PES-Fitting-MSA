@@ -1,11 +1,23 @@
 import os
 import logging
 import torch
+import numpy as np
+import random
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
-import numpy as np
+
+from sklearn.model_selection import train_test_split
+
+from util import IdentityScaler, StandardScaler
+from util import chi_split
+
+np.random.seed(42)
+random.seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+torch.cuda.manual_seed_all(42)
 
 plt.rcParams["mathtext.fontset"] = "cm"
 mpl.rcParams['font.serif'] = 'Times'
@@ -31,6 +43,8 @@ latex_params = {
 mpl.rcParams.update(latex_params)
 HTOCM = 2.194746313702e5
 
+SCALE_OPTIONS = [None, "std"]
+
 def load_dataset(folder, fname):
     fpath = os.path.join(folder, fname)
     logging.info("Loading dataset from fpath={}".format(fpath))
@@ -40,15 +54,11 @@ def load_dataset(folder, fname):
 
     return X, y
 
-def show_train_val_test_energy_distribution(X, y):
-    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = split_train_val_test(X, y, scale_params={"Xscale": None, "yscale": None})
-
+def show_split_energy_distribution(y_train, y_val, y_test):
     plt.figure(figsize=(10, 10))
     plt.title("Energy distribution")
-    plt.xlabel(r"Energy, cm^{-1}")
+    plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Density")
-
-    plt.xlim((-500.0, 2000.0))
 
     # density=True:
     # displays a probability density: each bin displays the bin's raw count divided by 
@@ -58,6 +68,11 @@ def show_train_val_test_energy_distribution(X, y):
     plt.hist(y_train.numpy() * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 0, 1, 0.5), label='train')
     plt.hist(y_val.numpy()   * HTOCM, bins=nbins, density=True, lw=3, fc=(1, 0, 0, 0.5), label='val')
     plt.hist(y_test.numpy()  * HTOCM, bins=nbins, density=True, lw=3, fc=(0, 1, 0, 0.5), label='test')
+
+    plt.yscale('log')
+    plt.ylim((1e-5, 1e-2))
+    plt.xlim((-300.0, 2000.0))
+
     plt.legend(fontsize=14)
     plt.show()
 
@@ -114,7 +129,16 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #X, y = load_dataset("CH4-N2", "dataset.pt")
+    X, y = load_dataset("CH4-N2", "dataset.pt")
     #show_energy_distribution(y, xlim=(-300, 2950))
 
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
 
+    logging.info("X_train.size(): {}".format(X_train.size()))
+    logging.info("X_val.size():   {}".format(X_val.size()))
+    logging.info("X_test.size():  {}".format(X_test.size()))
+
+    X_train, X_test, y_train, y_test = chi_split(X, y, test_size=0.2, nbins=20)
+    X_val, X_test, y_val, y_test     = chi_split(X_test, y_test, test_size=0.5, nbins=20)
+    show_split_energy_distribution(y_train, y_val, y_test)

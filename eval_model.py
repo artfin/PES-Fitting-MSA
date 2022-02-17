@@ -208,7 +208,7 @@ if __name__ == '__main__':
     logger.addHandler(ch)
 
     X, y = load_dataset("CH4-N2", "dataset.pt")
-    #NPOLY = X.size()[1]
+    NPOLY = X.size()[1]
 
     ############## 
     #summarize_optuna_run(optuna_folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", NPOLY=NPOLY)

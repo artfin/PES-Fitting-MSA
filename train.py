@@ -11,12 +11,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim import LBFGS, Adam
 
+import sklearn
+
 import optuna
 from optuna.trial import TrialState
 
 from dataset import PolyDataset
 from util import IdentityScaler, StandardScaler
 from util import RMSELoss
+from util import chi_split
 
 np.random.seed(42)
 random.seed(42)
@@ -46,8 +49,9 @@ def count_params(model):
 
     return nparams
 
-def perform_lstsq(X, y, show_results=False):
-    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = split_train_val_test(X, y, scale_params={"Xscale": None, "yscale": None})
+def perform_lstsq(X, y, data_split, random_state=42, show_results=False):
+    X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=random_state)
+    X_val,   X_test, y_val, y_test   = data_split(X_test, y_test, test_size=0.5, random_state=random_state)
 
     coeff = torch.linalg.lstsq(X_train, y_train, driver='gelss').solution
 
@@ -140,52 +144,6 @@ class EarlyStopping:
         }
         torch.save(checkpoint, self.chk_path)
 
-def split_train_val_test(X, y, scale_params):
-    """
-    # TODO: implement energy-based splitting of dataset
-    """
-    sz = y.size()[0]
-
-    ids = np.random.permutation(sz)
-    val_start  = int(sz * 0.8)
-    test_start = int(sz * 0.9)
-    train_ids = ids[:val_start]
-    val_ids = ids[val_start:test_start]
-    test_ids = ids[test_start:]
-
-    X_train, y_train = X[train_ids], y[train_ids]
-    X_val, y_val     = X[val_ids], y[val_ids]
-    X_test, y_test   = X[test_ids],  y[test_ids]
-
-    assert scale_params["Xscale"] in SCALE_OPTIONS
-    if scale_params["Xscale"] == "std":
-        xscaler = StandardScaler()
-    elif scale_params["Xscale"] == None:
-        xscaler = IdentityScaler()
-    else:
-        raise ValueError("unreachable")
-
-    assert scale_params["yscale"] in SCALE_OPTIONS
-    if scale_params["yscale"] == "std":
-        yscaler = StandardScaler()
-    elif scale_params["yscale"] == None:
-        yscaler = IdentityScaler()
-    else:
-        raise ValueError("unreachable")
-
-    xscaler.fit(X_train)
-    Xtr       = xscaler.transform(X)
-    Xtr_train = xscaler.transform(X_train)
-    Xtr_val   = xscaler.transform(X_val)
-    Xtr_test  = xscaler.transform(X_test)
-
-    yscaler.fit(y_train)
-    ytr       = yscaler.transform(y)
-    ytr_train = yscaler.transform(y_train)
-    ytr_val   = yscaler.transform(y_val)
-    ytr_test  = yscaler.transform(y_test)
-
-    return Xtr_train, ytr_train, Xtr_val, ytr_val, Xtr_test, ytr_test, xscaler, yscaler
 
 def optuna_define_model(trial, NPOLY):
     # TODO: maybe add a little Dropout as a means to counteract overfitting
@@ -257,15 +215,46 @@ def define_model(architecture, NPOLY):
 
     return model
 
-def build_model(trial=None, architecture="optuna", dataset_path=None, optuna_run_folder=None):
+def get_scalers(scale_params):
+    assert scale_params["Xscale"] in SCALE_OPTIONS
+    if scale_params["Xscale"] == "std":
+        xscaler = StandardScaler()
+    elif scale_params["Xscale"] == None:
+        xscaler = IdentityScaler()
+    else:
+        raise ValueError("unreachable")
+
+    assert scale_params["yscale"] in SCALE_OPTIONS
+    if scale_params["yscale"] == "std":
+        yscaler = StandardScaler()
+    elif scale_params["yscale"] == None:
+        yscaler = IdentityScaler()
+    else:
+        raise ValueError("unreachable")
+
+    return xscaler, yscaler
+
+def build_model(trial=None, architecture="optuna", data_split=None, dataset_path=None, optuna_run_folder=None):
     logging.info("Loading data from dataset_path = {}".format(dataset_path))
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
     logging.info("Loaded the data.")
 
-    X_train, y_train, X_val, y_val, X_test, y_test, xscaler, yscaler = split_train_val_test(X, y, scale_params=SCALE_PARAMS)
-    X = xscaler.transform(X)
-    y = yscaler.transform(y)
+    X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=42)
+    X_val, X_test, y_val, y_test = data_split(X_test, y_test, test_size=0.5, random_state=42)
+    xscaler, yscaler = get_scalers(scale_params=SCALE_PARAMS)
+
+    xscaler.fit(X_train)
+    X       = xscaler.transform(X)
+    X_train = xscaler.transform(X_train)
+    X_val   = xscaler.transform(X_val)
+    X_test  = xscaler.transform(X_test)
+
+    yscaler.fit(y_train)
+    y       = yscaler.transform(y)
+    y_train = yscaler.transform(y_train)
+    y_val   = yscaler.transform(y_val)
+    y_test  = yscaler.transform(y_test)
 
     if architecture == "optuna":
         chk_path = os.path.join(optuna_run_folder, "model-{}.pt".format(trial.number))
@@ -397,7 +386,7 @@ def optuna_neural_network_achitecture_search(dataset_path):
     Path(OPTUNA_RUN_FOLDER).mkdir(exist_ok=True)
     logging.info("Saving models to OPTUNA_RUN_FOLDER={}".format(OPTUNA_RUN_FOLDER))
 
-    objective = lambda trial: build_model(trial, architecture="optuna", dataset_path=dataset_path, optuna_run_folder=OPTUNA_RUN_FOLDER)
+    objective = lambda trial: build_model(trial, architecture="optuna", data_split=chi_split, dataset_path=dataset_path, optuna_run_folder=OPTUNA_RUN_FOLDER)
     study.optimize(objective, n_trials=5, timeout=600)
 
     pruned_trials   = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
@@ -443,9 +432,6 @@ if __name__ == "__main2__":
     #build_model(trial=None, architecture=architecture, dataset_path="H2-H2O/dataset.pt")
     ###
 
-    #show_feature_distribution(X_train, idx=0)
-    #show_energy_distribution(y)
-
     #nparams = count_params(model)
     #logging.info("number of parameters: {}".format(nparams))
 
@@ -472,16 +458,15 @@ if __name__ == "__main__":
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
 
-    #show_feature_distribution(X_train, idx=0)
-    show_energy_distribution(y, xlim=(-400, 3000))
-    #show_train_val_test_energy_distribution(X, y)
+    perform_lstsq(X, y, data_split=sklearn.model_selection.train_test_split, show_results=False)
 
-    perform_lstsq(X, y, show_results=False)
+    perform_lstsq(X, y, data_split=chi_split, show_results=False)
 
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
     #### 
-    #architecture = (10, 10)
-    #build_model(trial=None, architecture=architecture, dataset_path="CH4-N2/dataset.pt")
+    architecture = (10, 10)
+    build_model(trial=None, architecture=architecture, data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
+    build_model(trial=None, architecture=architecture, data_split=chi_split, dataset_path="CH4-N2/dataset.pt")
     #### 
 
