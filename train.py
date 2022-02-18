@@ -6,10 +6,13 @@ from pathlib import Path
 import random
 import uuid
 
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import LBFGS, Adam
+from torch.nn import MSELoss
 
 import sklearn
 
@@ -27,7 +30,11 @@ torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 
-HTOCM = 2.194746313702e5
+HTOCM = 2.194746313702e5      # Hartree to cm-1
+Boltzmann = 1.380649e-23      # SI: J / K
+Hartree = 4.3597447222071e-18 # SI: J
+
+HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 
 # scaling of X (polynomial values) and y (energies)
 # TODO: check out several other scaling transformations (minmax, etc)
@@ -49,48 +56,106 @@ def count_params(model):
 
     return nparams
 
-def perform_lstsq(X, y, data_split, random_state=42, show_results=False):
-    X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=random_state)
-    X_val,   X_test, y_val, y_test   = data_split(X_test, y_test, test_size=0.5, random_state=random_state)
+class WMSELoss(nn.Module):
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
 
-    coeff = torch.linalg.lstsq(X_train, y_train, driver='gelss').solution
+    def forward(self, y, y_pred):
+        """
+        NOTE: the order of `y` and `ypred` matters here!
+        """
+        w = torch.exp(-y * self.factor)
+        w = w / w.max()
+        #print("w.max(): {}".format(w.max()))
+        #EMIN = torch.abs(y.min())
 
-    pred_train = X_train @ coeff
-    pred_val   = X_val   @ coeff
-    pred_test  = X_test  @ coeff
+        #r = 0.005
+        #w = r / (r + y + EMIN)
+        #print("w.min(): {}".format(w.min()))
+        #print("w.max(): {}".format(w.max()))
+
+        return (w * (y - y_pred)**2).mean()
+
+class WRMSELoss(nn.Module):
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
+
+    def forward(self, y, y_pred):
+        w = torch.exp(-y * self.factor)
+        w = w / w.max()
+        wmse = (w * (y - y_pred)**2).mean()
+        return torch.sqrt(wmse)
+
+
+def perform_lstsq(X, y, random_state=42, show_results=False):
+    w = torch.exp(-y * HTOCM / 2000.0)
+    w = w / w.max()
+
+    NCONFIGS, NPOLY = X.size()
+    Xw, yw = X.detach().clone(), y.detach().clone()
+
+    for i in range(NCONFIGS):
+        Xw[i, :] = X[i, :] * w[i]
+        yw[i]    = y[i]    * w[i]
+
+    coeff = torch.linalg.lstsq(Xw, yw, driver='gelss').solution
+
+    pred = X @ coeff
 
     RMSE = RMSELoss()
-    rmse_train = RMSE(y_train, pred_train) * HTOCM
-    rmse_val   = RMSE(y_val, pred_val) * HTOCM
-    rmse_test  = RMSE(y_test, pred_test) * HTOCM
+    rmse = RMSE(y, pred) * HTOCM
+
+    WRMSE = WRMSELoss(HTOCM / 2000.0)
+    wrmse = WRMSE(y, pred) * HTOCM
 
     logging.info("A rundown for the least-squares regression [in matrix form]:")
-    logging.info("  RMSE train      = {:.2f} cm-1".format(rmse_train))
-    logging.info("  RMSE validation = {:.2f} cm-1".format(rmse_val))
-    logging.info("  RMSE test       = {:.2f} cm-1".format(rmse_test))
+    logging.info("  [full dataset]  RMSE(calc, fit): {}".format(rmse))
+    logging.info("  [full dataset] WRMSE(calc, fit): {}".format(wrmse))
+
+    idx = y.detach().numpy() * HTOCM < 2000.0
+    calc = y[idx]
+    fit  = pred[idx]
+    rmse = RMSE(calc, fit) * HTOCM
+
+    logging.info("  [< 2000 cm-1]  RMSE(calc, fit): {}".format(rmse))
 
     if show_results:
-        MAX_ENERGY = 3000.0 # cm-1
-        idx = y_train.numpy() < MAX_ENERGY / HTOCM
-        calc_energy = y_train.numpy()[idx] * HTOCM
-        fit_energy  = pred_train.numpy()[idx] * HTOCM
+        calc = calc * HTOCM
+        fit = fit * HTOCM
+        abs_error = calc - fit
 
-        abs_error = calc_energy - fit_energy
+        fname = "CH4-N2/published-pes/symm-adapted-published-pes-opt1.txt"
+        data = np.loadtxt(fname)
+        published_calc, published_fit = data[:,1], data[:,2]
+        published_abs_error = published_calc - published_fit
 
         plt.figure(figsize=(10, 10))
-        plt.scatter(calc_energy, abs_error, marker='o', facecolors='none', color='k')
+        ax = plt.gca()
 
-        plt.xlim((-500.0, MAX_ENERGY))
+        plt.scatter(calc, abs_error, marker='o', facecolors='none', color='k', label='weighted linear regression')
+        plt.scatter(published_calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
+
+        plt.xlim((-300.0, 2000.0))
         plt.ylim((-100.0, 100.0))
 
         plt.xlabel("Energy, cm-1")
         plt.ylabel("Absolute error, cm-1")
 
+        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(10.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        plt.legend(fontsize=14)
+
         plt.show()
-        #for n in range(nconfigs_train):
-        #    print("{} \t {} \t {}".format(
-        #        y[n].item() * HTOCM, y_pred[n].item() * HTOCM, (y[n] - y_pred[n]).item() * HTOCM
-        #    ))
 
 
 class EarlyStopping:
@@ -155,7 +220,7 @@ def optuna_define_model(trial, NPOLY):
 
     in_features = NPOLY
     for i in range(n_layers):
-        out_features = trial.suggest_int("n_hidden_l{}".format(i), low=5, high=20)
+        out_features = trial.suggest_int("n_hidden_l{}".format(i), low=5, high=25)
         layers.append(nn.Linear(in_features, out_features))
         layers.append(nn.Tanh())
         #dropout = trial.suggest_float("droupout_l{}".format(i), low=0.01, high=0.1)
@@ -281,25 +346,26 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
 
     optimizer = LBFGS(model.parameters(), lr=1.0, line_search_fn='strong_wolfe', tolerance_grad=1e-14, tolerance_change=1e-14, max_iter=100)
 
-    METRIC_TYPES = ['RMSE', 'MSE']
-    METRIC_TYPE = 'MSE'
-    assert METRIC_TYPE in METRIC_TYPES
-
-    logging.info("METRIC_TYPE = {}".format(METRIC_TYPE))
-
-    if METRIC_TYPE == 'MSE':
-        metric = nn.MSELoss()
-    elif METRIC_TYPE == 'RMSE':
+    METRIC_TYPE = 'WRMSELoss'
+    if METRIC_TYPE == 'MSELoss':
+        metric = MSELoss()
+    elif METRIC_TYPE == 'WMSELoss':
+        metric = WMSELoss(factor=yscaler.std * HTOCM / 2000.0)
+    elif METRIC_TYPE == 'RMSELoss':
         metric = RMSELoss()
+    elif METRIC_TYPE == 'WRMSELoss':
+        metric = WRMSELoss(factor=yscaler.std * HTOCM / 2000.0)
     else:
         raise ValueError("unreachable")
 
-    SCHEDULER_PATIENCE = 10
-    RMSE_TOL           = 0.5 # cm-1
+    logging.info("METRIC_TYPE = {}".format(METRIC_TYPE))
+
+    SCHEDULER_PATIENCE = 5
+    RMSE_TOL           = 1.0 # cm-1
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, threshold=RMSE_TOL, threshold_mode='abs', cooldown=2, patience=SCHEDULER_PATIENCE)
 
     ES_START_EPOCH = 10
-    es = EarlyStopping(patience=15, tol=RMSE_TOL, chk_path=chk_path)
+    es = EarlyStopping(patience=15, tol=0.1, chk_path=chk_path)
 
     MAX_EPOCHS = 500
 
@@ -308,7 +374,7 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
         def closure():
             optimizer.zero_grad()
             y_pred = model(X_train)
-            loss = metric(y_pred, y_train)
+            loss = metric(y_train, y_pred)
             loss.backward()
             return loss
 
@@ -319,12 +385,12 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
         with torch.no_grad():
             model.eval()
             pred_val = model(X_val)
-            loss_val = metric(pred_val, y_val)
+            loss_val = metric(y_val, pred_val)
 
-        if METRIC_TYPE == 'MSE':
+        if METRIC_TYPE == 'MSELoss' or METRIC_TYPE == 'WMSELoss':
             rmse_val   = torch.sqrt(loss_val) * rmse_descaler * HTOCM
             rmse_train = torch.sqrt(loss)     * rmse_descaler * HTOCM
-        elif METRIC_TYPE == 'RMSE':
+        elif METRIC_TYPE == 'RMSELoss' or METRIC_TYPE == 'WRMSELoss':
             rmse_val   = loss_val * rmse_descaler * HTOCM
             rmse_train = loss     * rmse_descaler * HTOCM
         else:
@@ -352,19 +418,19 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
 
     with torch.no_grad():
         pred_val = model(X_val)
-        loss_val = metric(pred_val, y_val)
+        loss_val = metric(y_val, pred_val)
 
         pred_test = model(X_test)
-        loss_test = metric(pred_test, y_test)
+        loss_test = metric(y_test, pred_test)
 
         pred_full = model(X)
-        loss_full = metric(pred_full, y)
+        loss_full = metric(y, pred_full)
 
-        if METRIC_TYPE == 'MSE':
+        if METRIC_TYPE == 'MSE' or METRIC_TYPE == 'WMSELoss':
             rmse_val  = torch.sqrt(loss_val)  * rmse_descaler * HTOCM
             rmse_test = torch.sqrt(loss_test) * rmse_descaler * HTOCM
             rmse_full = torch.sqrt(loss_full) * rmse_descaler * HTOCM
-        elif METRIC_TYPE == 'RMSE':
+        elif METRIC_TYPE == 'RMSE' or METRIC_TYPE == 'WRMSELoss':
             rmse_val  = loss_val  * rmse_descaler * HTOCM
             rmse_test = loss_test * rmse_descaler * HTOCM
             rmse_full = loss_full * rmse_descaler * HTOCM
@@ -387,7 +453,7 @@ def optuna_neural_network_achitecture_search(dataset_path):
     logging.info("Saving models to OPTUNA_RUN_FOLDER={}".format(OPTUNA_RUN_FOLDER))
 
     objective = lambda trial: build_model(trial, architecture="optuna", data_split=chi_split, dataset_path=dataset_path, optuna_run_folder=OPTUNA_RUN_FOLDER)
-    study.optimize(objective, n_trials=5, timeout=600)
+    study.optimize(objective, n_trials=20, timeout=7200)
 
     pruned_trials   = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
@@ -457,16 +523,18 @@ if __name__ == "__main__":
     print("Loading data from dataset_path = {}".format(dataset_path))
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
+    NPOLY = X.size()[1]
 
-    perform_lstsq(X, y, data_split=sklearn.model_selection.train_test_split, show_results=False)
+    perform_lstsq(X, y, show_results=False)
 
-    perform_lstsq(X, y, data_split=chi_split, show_results=False)
-
+    build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
     #### 
-    architecture = (10, 10)
-    build_model(trial=None, architecture=architecture, data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
-    build_model(trial=None, architecture=architecture, data_split=chi_split, dataset_path="CH4-N2/dataset.pt")
+    #architecture = (25, 17)
+    #architecture = (15, 5)
+    #architecture = (20, 20)
+    #build_model(trial=None, architecture=architecture, data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
+    #build_model(trial=None, architecture=architecture, data_split=chi_split, dataset_path="CH4-N2/dataset.pt")
     #### 
 

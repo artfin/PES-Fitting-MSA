@@ -37,6 +37,9 @@ latex_params = {
 mpl.rcParams.update(latex_params)
 
 HTOCM = 2.194746313702e5
+Boltzmann = 1.380649e-23      # SI: J / K
+Hartree = 4.3597447222071e-18 # SI: J
+HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 
 def define_model(architecture, NPOLY):
     """
@@ -120,6 +123,11 @@ def load_dataset(folder, fname):
 
     return X, y
 
+def load_published():
+    fname = "CH4-N2/published-pes/symm-adapted-published-pes-opt1.txt"
+    data = np.loadtxt(fname)
+    return data[:,1], data[:,2]
+
 def plot_rmse_from_checkpoint(folder, fname, X, y):
     NPOLY = X.size()[1]
     model, xscaler, yscaler = retrieve_checkpoint(folder=folder, fname=fname, NPOLY=NPOLY)
@@ -147,10 +155,14 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
 
     abs_error = calc_energy - fit_energy
 
+    calc, published_fit = load_published()
+    published_abs_error = calc - published_fit
+
     plt.figure(figsize=(10, 10))
     ax = plt.gca()
 
-    plt.scatter(calc_energy, abs_error, s=20, marker='o', facecolors='none', color='k', lw=0.5)
+    plt.scatter(calc_energy, abs_error, s=20, marker='o', facecolors='none', color='k', lw=0.5, label='NN')
+    plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
 
     plt.xlim((-500.0, MAX_ENERGY))
     plt.ylim((-100.0, 100.0))
@@ -160,15 +172,16 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
 
     ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
-    ax.yaxis.set_major_locator(plt.MultipleLocator(50.0))
-    ax.yaxis.set_minor_locator(plt.MultipleLocator(10.0))
+    ax.yaxis.set_major_locator(plt.MultipleLocator(10.0))
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
 
     ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
     ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
-    plt.savefig("abs-error-distribution.png", format="png", dpi=300)
+    #plt.savefig("abs-error-distribution.png", format="png", dpi=300)
+    plt.legend(fontsize=14)
 
     plt.show()
 
@@ -209,6 +222,31 @@ if __name__ == '__main__':
 
     X, y = load_dataset("CH4-N2", "dataset.pt")
     NPOLY = X.size()[1]
+
+
+    ###
+    #yscaler = StandardScaler()
+    #yscaler.fit(y)
+    #ytr = yscaler.transform(y)
+
+    #EMIN = torch.abs(y.min())
+    #r = 0.005
+    #w = r / (r + y + EMIN)
+    #we = torch.exp(-y * HkT / 2000.0)
+    #f = yscaler.std * HTOCM / 2000.0
+    #w = torch.exp(-ytr * f)
+    #w = w / w.max()
+
+    #plt.figure(figsize=(10, 10))
+
+    #plt.scatter(y * HTOCM, w, color='k', s=10, facecolors='none')
+    #plt.scatter(y * HTOCM, we, color='r', s=10)
+
+    #plt.xlim((-400, 2000.0))
+
+    #plt.show()
+    ###
+
 
     ############## 
     #summarize_optuna_run(optuna_folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", NPOLY=NPOLY)
