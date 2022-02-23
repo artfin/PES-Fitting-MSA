@@ -138,7 +138,7 @@ def perform_lstsq(X, y, random_state=42, show_results=False):
         plt.scatter(published_calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
 
         plt.xlim((-300.0, 2000.0))
-        plt.ylim((-100.0, 100.0))
+        plt.ylim((-50.0, 50.0))
 
         plt.xlabel("Energy, cm-1")
         plt.ylabel("Absolute error, cm-1")
@@ -202,10 +202,8 @@ class EarlyStopping:
             "architecture": architecture,
             "X_mean":       xscaler.mean,
             "X_std":        xscaler.std,
-            "X_zero_idx":   xscaler.zero_idx,
             "y_mean":       yscaler.mean,
             "y_std":        yscaler.std,
-            "y_zero_idx":   yscaler.zero_idx,
         }
         torch.save(checkpoint, self.chk_path)
 
@@ -525,7 +523,7 @@ if __name__ == "__main__":
     X, y = d["X"], d["y"]
     NPOLY = X.size()[1]
 
-    perform_lstsq(X, y, show_results=False)
+    perform_lstsq(X, y, show_results=True)
 
     build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")

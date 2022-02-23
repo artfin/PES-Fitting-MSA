@@ -12,8 +12,6 @@ from collections import namedtuple
 cmdstat = namedtuple('cmdstat', ['stdout', 'stderr', 'returncode'])
 
 def cl(command):
-    arg = shlex.split(command)
-
     p = Popen(command, stdout=PIPE, shell=True)
     stdout, stderr = p.communicate()
 

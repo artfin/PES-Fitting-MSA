@@ -91,8 +91,8 @@ def retrieve_checkpoint(folder, fname, NPOLY):
     model.double()
     model.load_state_dict(checkpoint["model"])
 
-    xscaler = StandardScaler.from_precomputed(mean=checkpoint["X_mean"], std=checkpoint["X_std"], zero_idx=checkpoint["X_zero_idx"])
-    yscaler = StandardScaler.from_precomputed(mean=checkpoint["y_mean"], std=checkpoint["y_std"], zero_idx=checkpoint["y_zero_idx"])
+    xscaler = StandardScaler.from_precomputed(mean=checkpoint["X_mean"], std=checkpoint["X_std"])
+    yscaler = StandardScaler.from_precomputed(mean=checkpoint["y_mean"], std=checkpoint["y_std"])
 
     return model, xscaler, yscaler
 
@@ -165,7 +165,7 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
     plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
 
     plt.xlim((-500.0, MAX_ENERGY))
-    plt.ylim((-100.0, 100.0))
+    plt.ylim((-50.0, 50.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -185,7 +185,6 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
 
     plt.show()
 
-
 def timeit_model(model, X):
     ncycles = 100
     start = time.time()
@@ -204,11 +203,6 @@ def timeit_model(model, X):
     print("npoints: {}".format(npoints))
     point_t = cycle_t / npoints
     logging.info("Execution time per point: {} mcs".format(point_t * 1e6))
-
-def export_torchscript(fname, model, NPOLY):
-    dummy = torch.rand(1, NPOLY, dtype=torch.float64)
-    traced_script_module = torch.jit.trace(model, dummy)
-    traced_script_module.save(fname)
 
 
 if __name__ == '__main__':
@@ -249,11 +243,13 @@ if __name__ == '__main__':
 
 
     ############## 
-    #summarize_optuna_run(optuna_folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", NPOLY=NPOLY)
+    #summarize_optuna_run(optuna_folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2", NPOLY=NPOLY)
     ############## 
 
     ############## 
     plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y)
+    #plot_rmse_from_checkpoint(folder=".", fname="checkpoint_linreg.pt", X=X, y=y)
+    #plot_rmse_from_checkpoint(folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2", fname="model-2.pt", X=X, y=y)
     ############## 
 
     ############## 
