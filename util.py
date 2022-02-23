@@ -30,36 +30,27 @@ class RMSELoss(nn.Module):
 
 
 class StandardScaler:
+    EPS = 1e-9
     def fit(self, x):
         self.mean = x.mean(0, keepdim=True)
         self.std = x.std(0, unbiased=False, keepdim=True)
 
-        # detect the constant features (zero standard deviation)
-        self.zero_idx = (self.std == 0).nonzero()
-
     def transform(self, x, mean=None, std=None):
         c = torch.clone(x)
+        e = self.EPS * torch.ones(c.size())
 
-        if mean is not None:
-            c -= mean
+        if mean is not None and std is not None:
+            c = (c - mean) / (std + e)
         else:
-            c -= self.mean
+            c = (c - self.mean) / (self.std + e)
 
-        if std is not None:
-            c /= std
-        else:
-            c /= self.std
-
-        # -> transform those features to zero 
-        c[:, self.zero_idx] = 0.0
         return c
 
     @classmethod
-    def from_precomputed(cls, mean, std, zero_idx):
+    def from_precomputed(cls, mean, std):
         scaler = cls()
         scaler.mean     = mean
         scaler.std      = std
-        scaler.zero_idx = zero_idx
         return scaler
 
 class IdentityScaler:
