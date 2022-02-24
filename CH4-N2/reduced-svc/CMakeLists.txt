@@ -42,12 +42,21 @@ add_executable(
     svc.exe
     svc.cpp 
     basis_4_2_1_4.f90
-    ai_pes_ch4_n2_opt1.hpp
-    ai_pes_ch4_n2_opt1.cpp
 )
 
 add_dependencies(svc.exe hep)
 target_include_directories(svc.exe PRIVATE ${HEP_INCLUDE_DIR})
 target_link_libraries(svc.exe "${TORCH_LIBRARIES}" ${MPI_C_LIBRARIES} ${MPI_CXX_LIBRARIES})
-target_link_libraries(svc.exe GSL::gsl GSL::gslcblas)
 set_property(TARGET svc.exe PROPERTY CXX_STANDARD 14)
+
+add_executable(
+    radial-curve.exe
+    radial-curve.cpp
+    basis_4_2_1_4.f90
+    ai_pes_ch4_n2_opt1.hpp
+    ai_pes_ch4_n2_opt1.cpp
+)
+
+target_link_libraries(radial-curve.exe "${TORCH_LIBRARIES}")
+target_link_libraries(radial-curve.exe GSL::gsl GSL::gslcblas)
+set_property(TARGET radial-curve.exe PROPERTY CXX_STANDARD 14)
