@@ -14,6 +14,8 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
+from genpip import cmdstat, cl
+
 plt.rcParams["mathtext.fontset"] = "cm"
 mpl.rcParams['font.serif'] = 'Times'
 
@@ -24,11 +26,11 @@ latex_params = {
     "font.family": "serif",
     "font.serif": 'Times',
     "font.monospace": [],
-    "axes.labelsize": 18,
-    "font.size": 18,
-    "legend.fontsize": 18,
-    "xtick.labelsize": 18,
-    "ytick.labelsize": 18,
+    "axes.labelsize": 21,
+    "font.size": 21,
+    "legend.fontsize": 21,
+    "xtick.labelsize": 21,
+    "ytick.labelsize": 21,
     #"text.latex.preamble": [
     #    r"\usepackage[utf8]{inputenc}",    # use utf8 fonts 
     #    r"\usepackage[detect-all]{siunitx}",
@@ -128,7 +130,7 @@ def load_published():
     data = np.loadtxt(fname)
     return data[:,1], data[:,2]
 
-def plot_rmse_from_checkpoint(folder, fname, X, y):
+def plot_rmse_from_checkpoint(folder, fname, X, y, figname=None):
     NPOLY = X.size()[1]
     model, xscaler, yscaler = retrieve_checkpoint(folder=folder, fname=fname, NPOLY=NPOLY)
 
@@ -158,14 +160,16 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
     calc, published_fit = load_published()
     published_abs_error = calc - published_fit
 
+    plt.style.use('dark_background')
+
     plt.figure(figsize=(10, 10))
     ax = plt.gca()
 
-    plt.scatter(calc_energy, abs_error, s=20, marker='o', facecolors='none', color='k', lw=0.5, label='NN')
-    plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
+    plt.scatter(calc_energy, abs_error, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='NN-PIP')
+    plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
-    plt.xlim((-500.0, MAX_ENERGY))
-    plt.ylim((-50.0, 50.0))
+    plt.xlim((-200.0, MAX_ENERGY))
+    plt.ylim((-30.0, 30.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -173,15 +177,19 @@ def plot_rmse_from_checkpoint(folder, fname, X, y):
     ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
     ax.yaxis.set_major_locator(plt.MultipleLocator(10.0))
-    ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(2.0))
 
     ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
     ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
-    #plt.savefig("abs-error-distribution.png", format="png", dpi=300)
-    plt.legend(fontsize=14)
+    lgnd = plt.legend(fontsize=18)
+    lgnd.legendHandles[0].set_lw(1.5)
+    lgnd.legendHandles[1].set_lw(1.5)
+
+    if figname is not None:
+        plt.savefig(figname, format="png", dpi=300)
 
     plt.show()
 
@@ -203,6 +211,9 @@ def timeit_model(model, X):
     print("npoints: {}".format(npoints))
     point_t = cycle_t / npoints
     logging.info("Execution time per point: {} mcs".format(point_t * 1e6))
+
+def trim_png(figname):
+    cl('convert {0} -trim +repage {0}'.format(figname))
 
 
 if __name__ == '__main__':
@@ -247,7 +258,9 @@ if __name__ == '__main__':
     ############## 
 
     ############## 
-    plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y)
+    figname = "abs-error-distribution.png"
+    plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y, figname=figname)
+    trim_png(figname)
     #plot_rmse_from_checkpoint(folder=".", fname="checkpoint_linreg.pt", X=X, y=y)
     #plot_rmse_from_checkpoint(folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2", fname="model-2.pt", X=X, y=y)
     ############## 

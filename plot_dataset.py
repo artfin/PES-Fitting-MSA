@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split
 
 from util import IdentityScaler, StandardScaler
 from util import chi_split
+from genpip import cmdstat, cl
 
 np.random.seed(42)
 random.seed(42)
@@ -92,9 +93,13 @@ def show_feature_distribution(X, idx):
     plt.hist(feature, bins=500)
     plt.show()
 
-def show_energy_distribution(y, xlim=(-500, 500)):
+def pretty_round(x, base=500.0):
+    return round(x / base) * base
+
+def show_energy_distribution(y, xlim=(-500, 500), ylim=(1e2, 6e4), figname=None):
     energies = y.numpy() * HTOCM
 
+    plt.style.use('dark_background')
     plt.figure(figsize=(10, 10))
 
     ax = plt.gca()
@@ -103,22 +108,28 @@ def show_energy_distribution(y, xlim=(-500, 500)):
 
     plt.xlim(xlim)
 
-    plt.hist(energies, bins=500, width=150.0, color='#88B04B')
+    plt.hist(energies, bins=300, width=150.0, color='#88B04B')
 
     plt.yscale('log')
-    plt.ylim((1e2, 6e4))
+    plt.ylim(ylim)
 
     ax.yaxis.set_major_formatter(ScalarFormatter())
 
-    ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+    ax.xaxis.set_major_locator(plt.MultipleLocator(5000.0))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
 
-    ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
-    ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
-    ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
-    ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+    #ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+    #ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+    #ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+    #ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+    if figname is not None:
+        plt.savefig(figname, format='png', dpi=300)
 
     plt.show()
+
+def trim_png(figname):
+    cl('convert {0} -trim +repage {0}'.format(figname))
 
 if __name__ == "__main__":
     logger = logging.getLogger()
@@ -130,15 +141,17 @@ if __name__ == "__main__":
     logger.addHandler(ch)
 
     X, y = load_dataset("CH4-N2", "dataset.pt")
-    #show_energy_distribution(y, xlim=(-300, 2950))
+    figname = "dataset-energy-distribution.png"
+    show_energy_distribution(y, xlim=(-300, 40000), ylim=(1e1, 6e4), figname=figname)
+    trim_png(figname)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+    #X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    #X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
 
-    logging.info("X_train.size(): {}".format(X_train.size()))
-    logging.info("X_val.size():   {}".format(X_val.size()))
-    logging.info("X_test.size():  {}".format(X_test.size()))
+    #logging.info("X_train.size(): {}".format(X_train.size()))
+    #logging.info("X_val.size():   {}".format(X_val.size()))
+    #logging.info("X_test.size():  {}".format(X_test.size()))
 
-    X_train, X_test, y_train, y_test = chi_split(X, y, test_size=0.2, nbins=20)
-    X_val, X_test, y_val, y_test     = chi_split(X_test, y_test, test_size=0.5, nbins=20)
-    show_split_energy_distribution(y_train, y_val, y_test)
+    #X_train, X_test, y_train, y_test = chi_split(X, y, test_size=0.2, nbins=20)
+    #X_val, X_test, y_val, y_test     = chi_split(X_test, y_test, test_size=0.5, nbins=20)
+    #show_split_energy_distribution(y_train, y_val, y_test)

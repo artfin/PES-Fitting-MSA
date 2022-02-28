@@ -101,7 +101,7 @@ def plot_svc(figname=None):
             el.set_label(refs[point.source])
             legend_elements.append(point.source)
 
-    plt.legend(fontsize=15, fancybox=True, frameon=True, shadow=True)
+    plt.legend(fontsize=18, fancybox=True, frameon=True, shadow=True)
 
     plt.xlim((150.0, 500.0))
     plt.ylim((-140.0, 40.0))
