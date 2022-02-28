@@ -1,4 +1,6 @@
 import json
+from collections import namedtuple
+from subprocess import Popen, PIPE, STDOUT
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -10,10 +12,10 @@ mpl.rcParams['font.serif'] = 'Times'
 mpl.rcParams['text.latex.preamble'] = r'\usepackage{amsmath}'
 
 mpl.rcParams['figure.titlesize'] = 'large'
-mpl.rcParams['axes.labelsize'] = 15
-mpl.rcParams['axes.titlesize'] = 15
-mpl.rcParams['xtick.labelsize'] = 15
-mpl.rcParams['ytick.labelsize'] = 15
+mpl.rcParams['axes.labelsize'] = 21
+mpl.rcParams['axes.titlesize'] = 21
+mpl.rcParams['xtick.labelsize'] = 21
+mpl.rcParams['ytick.labelsize'] = 21
 
 from collections import namedtuple
 Point = namedtuple('Point', ['temperature', 'value', 'error', 'source'])
@@ -41,7 +43,7 @@ def lighten_color(color, amount=0.5):
     c = colorsys.rgb_to_hls(*mc.to_rgb(c))
     return colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
 
-if __name__ == "__main__":
+def plot_svc(figname=None):
     experiment = load("experiment.json") 
     points = [Point(float(key), value[0], value[1], value[2]) for key, value in experiment.items()]
 
@@ -77,34 +79,36 @@ if __name__ == "__main__":
     nnpip_pes = np.loadtxt("nnpippes-svc.txt")
     symm_pes  = np.loadtxt("symmpes-svc.txt")
 
+    plt.style.use('dark_background')
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)
 
-    plt.plot(symm_pes[:,0], symm_pes[:,1], color='k', lw=2.0, label="Symmetry-adapted PES")
-    plt.plot(nnpip_pes[:,0], nnpip_pes[:,1], color='r', lw=2.0, label="NN-PIP PES")
+    plt.plot(nnpip_pes[:,0], nnpip_pes[:,1], color='#FF6F61', lw=2.0, label="NN-PIP")
+    plt.plot(symm_pes[:,0], symm_pes[:,1], color='#CFBFF7', lw=2.0, label="Symmetry-adapted angular basis")
 
     legend_elements = []
     for point in points:
         marker = markers[point.source]
         color = colors[point.source]
-        el = plt.scatter(point.temperature, point.value, color=lighten_color(color, 0.8),
-                         marker=marker, edgecolors='k', lw=0.5, s=60, zorder=2)
+        el = plt.scatter(point.temperature, point.value, color=lighten_color(color, 0.7),
+                         marker=marker, edgecolors='k', lw=0.5, s=100, zorder=2)
 
         if point.source != "01-ababio":
-            plt.errorbar(point.temperature, point.value, yerr = point.error, color='k',
+            plt.errorbar(point.temperature, point.value, yerr = point.error, color='grey',
                          capsize=4, elinewidth=0.5, markeredgewidth=1.0)
 
         if point.source not in legend_elements:
             el.set_label(refs[point.source])
             legend_elements.append(point.source)
 
-    plt.legend(fontsize=11, fancybox=True, frameon=True, shadow=True)
+    plt.legend(fontsize=15, fancybox=True, frameon=True, shadow=True)
 
     plt.xlim((150.0, 500.0))
-    plt.ylim((-140.0, 30.0))
+    plt.ylim((-140.0, 40.0))
 
     plt.xlabel(r"Temperature, K")
     plt.ylabel(r"$B_{12}$, cm$^3 \cdot$mol$^{-1}$")
+    plt.title("Second virial coefficient")
 
     ax.xaxis.set_major_locator(plt.MultipleLocator(50.0))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(10.0))
@@ -116,5 +120,30 @@ if __name__ == "__main__":
     ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
-    plt.savefig("SVC-comparison.png", format='png', dpi=300)
+    if figname is not None:
+        plt.savefig(figname, format='png', dpi=300)
+
     plt.show()
+
+cmdstat = namedtuple('cmdstat', ['stdout', 'stderr', 'returncode'])
+def cl(command):
+    p = Popen(command, stdout=PIPE, shell=True)
+    stdout, stderr = p.communicate()
+
+    stdout     = stdout.decode("utf-8").strip()
+    returncode = p.returncode
+
+    try:
+        stderr = stderr.decode("utf-8").strip()
+    except:
+        stderr = ""
+
+    return cmdstat(stdout, stderr, returncode)
+
+def trim_png(figname):
+    cl('convert {0} -trim +repage {0}'.format(figname))
+
+if __name__ == "__main__":
+    figname = "SVC-comparison.png"
+    plot_svc(figname=figname)
+    trim_png(figname)
