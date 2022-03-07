@@ -74,8 +74,7 @@ class PolyDataset(Dataset):
         for ind, config in enumerate(self.configs):
             energies[ind] = config.energy
             if lr_model is not None:
-                energies[ind] -= lr_model(config.atoms)
-        #energies = np.asarray([c.energy for c in self.configs]).reshape((self.NCONFIGS, 1)) # (NCONFIGS,) -> (NCONFIGS, 1)
+                energies[ind] -= lr_model(ind)
 
         self.X = torch.from_numpy(poly)
         self.y = torch.from_numpy(energies)

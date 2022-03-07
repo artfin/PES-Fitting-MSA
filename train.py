@@ -177,15 +177,15 @@ class EarlyStopping:
         self.best_score = None
         self.status = False
 
-    def __call__(self, score, model, xscaler, yscaler):
+    def __call__(self, score, model, xscaler, yscaler, meta_info):
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(model, xscaler, yscaler)
+            self.save_checkpoint(model, xscaler, yscaler, meta_info)
 
         elif score < self.best_score and (self.best_score - score) > self.tol:
             self.best_score = score
             self.counter = 0
-            self.save_checkpoint(model, xscaler, yscaler)
+            self.save_checkpoint(model, xscaler, yscaler, meta_info)
 
         else:
             self.counter += 1
@@ -195,19 +195,20 @@ class EarlyStopping:
         logging.debug("Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
         logging.debug("ES counter: {}; ES patience: {}".format(self.counter, self.patience))
 
-    def save_checkpoint(self, model, xscaler, yscaler):
+    def save_checkpoint(self, model, xscaler, yscaler, meta_info):
         logging.debug("Saving the checkpoint")
 
         architecture = [m.out_features for m in next(model.modules()) if isinstance(m, torch.nn.modules.linear.Linear)]
         architecture = tuple(architecture[:-1])
 
         checkpoint = {
-            "model":        model.state_dict(),
-            "architecture": architecture,
-            "X_mean":       xscaler.mean,
-            "X_std":        xscaler.std,
-            "y_mean":       yscaler.mean,
-            "y_std":        yscaler.std,
+            "model"        :  model.state_dict(),
+            "architecture" :  architecture,
+            "X_mean"       :  xscaler.mean,
+            "X_std"        :  xscaler.std,
+            "y_mean"       :  yscaler.mean,
+            "y_std"        :  yscaler.std,
+            "meta_info"    :  meta_info
         }
         torch.save(checkpoint, self.chk_path)
 
@@ -301,7 +302,7 @@ def get_scalers(scale_params):
 
     return xscaler, yscaler
 
-def build_model(trial=None, architecture="optuna", data_split=None, dataset_path=None, optuna_run_folder=None):
+def build_model(trial=None, architecture="optuna", data_split=None, dataset_path=None, optuna_run_folder=None, meta_info=None):
     logging.info("Loading data from dataset_path = {}".format(dataset_path))
     d = torch.load(dataset_path)
     X, y = d["X"], d["y"]
@@ -403,7 +404,7 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
         logging.info("Current learning rate: {:.2e}".format(lr))
 
         if epoch > ES_START_EPOCH:
-            es(rmse_val, model, xscaler, yscaler)
+            es(rmse_val, model, xscaler, yscaler, meta_info)
 
             if es.status:
                 logging.info("Invoking early stop")
@@ -535,35 +536,31 @@ def transform_coordinates(atoms):
 
     return R, ph1, th1, ph2, th2
 
-def lr_model(atoms):
-    R, ph1, th1, ph2, th2 = transform_coordinates(atoms)
-
-    program = "CH4-N2/long-range/export.exe"
-    program_input = " ".join(list(map(str, [R, ph1, th1, ph2, th2])))
-    proc = run([program], input=program_input, stdout=PIPE, encoding='ascii', check=True)
-
-    lr_energy = float(proc.stdout) * HTOCM
-    return lr_energy
-
+CACHE_LR = np.loadtxt("CH4-N2/long-range/cache_lr.dat")
+def lr_model(ind):
+    return CACHE_LR[ind][-1]
 
 if __name__ == "__main__":
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
     ch = logging.StreamHandler()
     formatter = logging.Formatter('[%(levelname)s] %(message)s')
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    start = time.time()
-
     wdir     = "CH4-N2"
     order    = "4"
     symmetry = "4 2 1"
     dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
 
-    end = time.time()
-    print("Time elapsed in PolyDataset construction: {}".format(end - start))
+    meta_info = {
+        "NATOMS"   : dataset.NATOMS,
+        "NMON"     : dataset.NMON,
+        "NPOLY"    : dataset.NPOLY,
+        "symmetry" : symmetry,
+        "order"    : order,
+    }
 
     X, y = dataset.X, dataset.y
     torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
@@ -576,7 +573,7 @@ if __name__ == "__main__":
 
     perform_lstsq(X, y, show_results=True)
 
-    build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt")
+    build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt", meta_info=meta_info)
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")
 
     #### 

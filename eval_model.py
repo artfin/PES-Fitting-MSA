@@ -82,12 +82,13 @@ def define_model(architecture, NPOLY):
 
     return model
 
-def retrieve_checkpoint(folder, fname, NPOLY):
+def retrieve_checkpoint(folder, fname):
     fpath = os.path.join(folder, fname)
     logging.info("Retrieving checkpoint from fpath={}".format(fpath))
 
     checkpoint = torch.load(fpath)
     arch = checkpoint["architecture"]
+    NPOLY = checkpoint["meta_info"]["NPOLY"]
 
     model = define_model(architecture=arch, NPOLY=NPOLY)
     model.double()
@@ -95,14 +96,15 @@ def retrieve_checkpoint(folder, fname, NPOLY):
 
     xscaler = StandardScaler.from_precomputed(mean=checkpoint["X_mean"], std=checkpoint["X_std"])
     yscaler = StandardScaler.from_precomputed(mean=checkpoint["y_mean"], std=checkpoint["y_std"])
+    meta_info = checkpoint["meta_info"]
 
-    return model, xscaler, yscaler
+    return model, xscaler, yscaler, meta_info
 
-def summarize_optuna_run(optuna_folder, NPOLY):
+def summarize_optuna_run(optuna_folder):
     model_names = [f for f in os.listdir(optuna_folder) if os.path.isfile(os.path.join(optuna_folder, f))]
 
     for model_name in sorted(model_names):
-        model, xscaler, yscaler = retrieve_checkpoint(folder=optuna_folder, fname=model_name, NPOLY=NPOLY)
+        model, xscaler, yscaler, _ = retrieve_checkpoint(folder=optuna_folder, fname=model_name)
         rmse_descaler = yscaler.std.item()
 
         Xtr = xscaler.transform(X)
@@ -131,8 +133,7 @@ def load_published():
     return data[:,1], data[:,2]
 
 def plot_rmse_from_checkpoint(folder, fname, X, y, figname=None):
-    NPOLY = X.size()[1]
-    model, xscaler, yscaler = retrieve_checkpoint(folder=folder, fname=fname, NPOLY=NPOLY)
+    model, xscaler, yscaler, _ = retrieve_checkpoint(folder=folder, fname=fname)
 
     Xtr = xscaler.transform(X)
     ytr_pred = model(Xtr)
@@ -254,24 +255,18 @@ if __name__ == '__main__':
 
 
     ############## 
-    #summarize_optuna_run(optuna_folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2", NPOLY=NPOLY)
+    #summarize_optuna_run(optuna_folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2")
     ############## 
 
     ############## 
-    figname = "abs-error-distribution.png"
-    plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y, figname=figname)
-    trim_png(figname)
+    #figname = "abs-error-distribution.png"
+    plot_rmse_from_checkpoint(folder=".", fname="checkpoint.pt", X=X, y=y) #, figname=figname)
+    #trim_png(figname)
     #plot_rmse_from_checkpoint(folder=".", fname="checkpoint_linreg.pt", X=X, y=y)
     #plot_rmse_from_checkpoint(folder="optuna-run-8991813c-ecb4-4c93-a3bf-0160a83a81a2", fname="model-2.pt", X=X, y=y)
     ############## 
 
     ############## 
-    #model, xscaler, _ = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", NPOLY=NPOLY)
+    #model, xscaler, _ = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt")
     #timeit_model(model, xscaler.transform(X))
     ############## 
-
-    ############## 
-    #model, _, _ = retrieve_checkpoint(folder="optuna-run-98b0dd87-51ad-42b7-86b5-de7301440bce", fname="model-2.pt", NPOLY=NPOLY)
-    #export_torchscript(fname="test.pt", model=model, NPOLY=NPOLY)
-    ############## 
-

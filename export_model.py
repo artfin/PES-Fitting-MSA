@@ -18,8 +18,12 @@ def generate_torchscript(fname, model, NPOLY):
     traced_script_module.save(fname)
 
 
-def generate_cpp(fname, model_fname, NATOMS, NMON, NPOLY, xscaler, yscaler):
+def generate_cpp(fname, model_fname, xscaler, yscaler, meta_info):
     logging.info("Generating cpp code to call the model to {}".format(fname))
+
+    NPOLY  = meta_info["NPOLY"]
+    NMON   = meta_info["NMON"]
+    NATOMS = meta_info["NATOMS"]
 
     xscaler_mean = ", ".join("{:.16f}".format(xscaler.mean[0][k].item()) for k in range(NPOLY))
     xscaler_std  = ", ".join("{:.16f}".format(xscaler.std[0][k].item()) for k in range(NPOLY))
@@ -216,16 +220,18 @@ set_property(TARGET load-model PROPERTY CXX_STANDARD 14)
     with open(fname, mode='w') as out:
         out.write(cmake_template)
 
-def export_model(export_wd, dataset_wd, model, xscaler, yscaler, symmetry, order, NATOMS, NMON, NPOLY):
+def export_model(export_wd, dataset_wd, model, xscaler, yscaler, meta_info):
     logging.info("Export folder={}".format(export_wd))
     Path(export_wd).mkdir(parents=True, exist_ok=True)
 
     torchscript_fname = os.path.join(export_wd, "model.pt")
-    generate_torchscript(torchscript_fname, model, NPOLY)
+    generate_torchscript(torchscript_fname, model, meta_info["NPOLY"])
 
     cpp_fname = os.path.join(export_wd, "load_model.cpp")
-    generate_cpp(cpp_fname, "model.pt", NATOMS, NMON, NPOLY, xscaler, yscaler)
+    generate_cpp(cpp_fname, "model.pt", xscaler, yscaler, meta_info)
 
+    symmetry = meta_info["symmetry"]
+    order = meta_info["order"]
     basis_fname = "basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order)
     cl(f"cp {dataset_wd}/{basis_fname} {export_wd}")
 
@@ -242,17 +248,12 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    wdir     = "CH4-N2"
-    order    = "4"
-    symmetry = "4 2 1"
-    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
+    model, xscaler, yscaler, meta_info = retrieve_checkpoint(folder=".", fname="checkpoint.pt")
+    export_model(export_wd="cpp-export", dataset_wd="CH4-N2", model=model, xscaler=xscaler, yscaler=yscaler, meta_info=meta_info)
 
-    model, xscaler, yscaler = retrieve_checkpoint(folder=".", fname="checkpoint.pt", NPOLY=dataset.NPOLY)
+    X, y = load_dataset("CH4-N2", "dataset.pt")
 
-    export_model(export_wd="cpp-export", dataset_wd="CH4-N2", model=model, xscaler=xscaler, yscaler=yscaler, symmetry=symmetry, order=order,
-                 NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY)
-
-    X0 = dataset.X[0].view((1, dataset.NPOLY))
+    X0 = X[0].view((1, meta_info["NPOLY"]))
     X0 = xscaler.transform(X0)
 
     with torch.no_grad():
