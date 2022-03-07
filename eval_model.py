@@ -14,6 +14,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
+from train import define_model
 from genpip import cmdstat, cl
 
 plt.rcParams["mathtext.fontset"] = "cm"
@@ -31,56 +32,13 @@ latex_params = {
     "legend.fontsize": 21,
     "xtick.labelsize": 21,
     "ytick.labelsize": 21,
-    #"text.latex.preamble": [
-    #    r"\usepackage[utf8]{inputenc}",    # use utf8 fonts 
-    #    r"\usepackage[detect-all]{siunitx}",
-    #]
 }
 mpl.rcParams.update(latex_params)
+plt.style.use('dark_background')
 
-HTOCM = 2.194746313702e5
 Boltzmann = 1.380649e-23      # SI: J / K
 Hartree = 4.3597447222071e-18 # SI: J
 HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
-
-def define_model(architecture, NPOLY):
-    """
-    architecture:
-        tuple (h0, h1, ...)
-        It implies the following MLP architecture:
-            nn.Linear(NPOLY, h0)
-            nn.Tanh()
-            nn.Linear(h0, h1)
-            nn.Tanh()
-            ...
-            nn.Tanh()
-            nn.Linear(hk, 1)
-    """
-    layers = []
-
-    in_features  = NPOLY
-    # to allow constructing LinearRegressor with architecture=() 
-    out_features = NPOLY
-
-    for i in range(len(architecture)):
-        out_features = architecture[i]
-        layers.append(nn.Linear(in_features, out_features))
-        layers.append(nn.Tanh())
-
-        in_features = out_features
-
-    layers.append(nn.Linear(out_features, 1))
-    model = nn.Sequential(*layers)
-
-    sigmoid_gain = torch.nn.init.calculate_gain("tanh")
-    for child in model.children():
-        if isinstance(child, nn.Linear):
-            for _ in range(0, len(layers)):
-                torch.nn.init.xavier_uniform_(child.weight, gain=sigmoid_gain)
-                if child.bias is not None:
-                    torch.nn.init.zeros_(child.bias)
-
-    return model
 
 def retrieve_checkpoint(folder, fname):
     fpath = os.path.join(folder, fname)
@@ -114,7 +72,7 @@ def summarize_optuna_run(optuna_folder):
             pred = model(Xtr)
 
         RMSE = RMSELoss()
-        rmse_full = RMSE(ytr, pred) * rmse_descaler * HTOCM
+        rmse_full = RMSE(ytr, pred) * rmse_descaler
         logging.info("model: {}; full dataset RMSE: {} cm-1".format(model_name, rmse_full))
 
 
@@ -143,25 +101,23 @@ def plot_rmse_from_checkpoint(folder, fname, X, y, figname=None):
 
     RMSE = RMSELoss()
 
-    MAX_ENERGY = y.max().item() * HTOCM # cm-1
-    print("MAXIMUM ENERGY: {}".format(y.max().item() * HTOCM))
-    idx = y.numpy() < MAX_ENERGY / HTOCM
-    calc_energy = y.numpy()[idx] * HTOCM
-    fit_energy  = y_pred.detach().numpy()[idx] * HTOCM
+    MAX_ENERGY = y.max().item()
+    print("MAXIMUM ENERGY: {}".format(MAX_ENERGY))
+    idx = y.numpy() < MAX_ENERGY
+    calc_energy = y.numpy()[idx]
+    fit_energy  = y_pred.detach().numpy()[idx]
     print("RMSE(calc_energy, fit_energy): {}".format(RMSE(torch.tensor(calc_energy), torch.tensor(fit_energy))))
 
     MAX_ENERGY = 3000.0 # cm-1
-    idx = y.numpy() < MAX_ENERGY / HTOCM
-    calc_energy = y.numpy()[idx] * HTOCM
-    fit_energy  = y_pred.detach().numpy()[idx] * HTOCM
+    idx = y.numpy() < MAX_ENERGY
+    calc_energy = y.numpy()[idx]
+    fit_energy  = y_pred.detach().numpy()[idx]
     print("RMSE(calc_energy, fit_energy): {}".format(RMSE(torch.tensor(calc_energy), torch.tensor(fit_energy))))
 
     abs_error = calc_energy - fit_energy
 
     calc, published_fit = load_published()
     published_abs_error = calc - published_fit
-
-    plt.style.use('dark_background')
 
     plt.figure(figsize=(10, 10))
     ax = plt.gca()

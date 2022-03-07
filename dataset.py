@@ -11,12 +11,8 @@ from torch.utils.data import Dataset
 from collections import namedtuple
 Config = namedtuple('Config', ['atoms', 'energy'])
 
-# Physical constants
-BOHRTOANG = 0.52917721067
-HTOCM     = 2.194746313702e5
-
 # parameter inside the `yij` exp(...)
-a0        = 2.0
+a0 = 2.0 # bohrs
 
 class PolyDataset(Dataset):
     def __init__(self, wdir, config_fname, order, symmetry, lr_model=None):
@@ -139,7 +135,6 @@ class PolyDataset(Dataset):
                 #if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H1 O  (H2O)
                 #if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H2 O  (H2O)
                 yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
-                yij[n][k] /= BOHRTOANG
                 yij[n][k] = np.exp(-yij[n, k] / a0)
                 k = k + 1
 

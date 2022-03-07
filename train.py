@@ -33,10 +33,8 @@ torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 
 # Physical constants
-HTOCM = 2.194746313702e5      # Hartree to cm-1
 Boltzmann = 1.380649e-23      # SI: J / K
 Hartree = 4.3597447222071e-18 # SI: J
-BOHRTOANG = 0.52917721067
 
 HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 
@@ -94,7 +92,7 @@ class WRMSELoss(nn.Module):
 
 
 def perform_lstsq(X, y, random_state=42, show_results=False):
-    w = torch.exp(-y * HTOCM / 2000.0)
+    w = torch.exp(-y / 2000.0)
     w = w / w.max()
 
     NCONFIGS, NPOLY = X.size()
@@ -109,25 +107,23 @@ def perform_lstsq(X, y, random_state=42, show_results=False):
     pred = X @ coeff
 
     RMSE = RMSELoss()
-    rmse = RMSE(y, pred) * HTOCM
+    rmse = RMSE(y, pred)
 
-    WRMSE = WRMSELoss(HTOCM / 2000.0)
-    wrmse = WRMSE(y, pred) * HTOCM
+    WRMSE = WRMSELoss(1.0 / 2000.0)
+    wrmse = WRMSE(y, pred)
 
     logging.info("A rundown for the least-squares regression [in matrix form]:")
     logging.info("  [full dataset]  RMSE(calc, fit): {}".format(rmse))
     logging.info("  [full dataset] WRMSE(calc, fit): {}".format(wrmse))
 
-    idx = y.detach().numpy() * HTOCM < 2000.0
+    idx = y.detach().numpy() < 2000.0
     calc = y[idx]
     fit  = pred[idx]
-    rmse = RMSE(calc, fit) * HTOCM
+    rmse = RMSE(calc, fit)
 
     logging.info("  [< 2000 cm-1]  RMSE(calc, fit): {}".format(rmse))
 
     if show_results:
-        calc = calc * HTOCM
-        fit = fit * HTOCM
         abs_error = calc - fit
 
         fname = "CH4-N2/published-pes/symm-adapted-published-pes-opt1.txt"
@@ -142,7 +138,7 @@ def perform_lstsq(X, y, random_state=42, show_results=False):
         plt.scatter(published_calc, published_abs_error, s=20, marker='o', facecolors='none', color='r', lw=0.5, label='published')
 
         plt.xlim((-300.0, 2000.0))
-        plt.ylim((-50.0, 50.0))
+        plt.ylim((-30.0, 30.0))
 
         plt.xlabel("Energy, cm-1")
         plt.ylabel("Absolute error, cm-1")
@@ -353,11 +349,11 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
     if METRIC_TYPE == 'MSELoss':
         metric = MSELoss()
     elif METRIC_TYPE == 'WMSELoss':
-        metric = WMSELoss(factor=yscaler.std * HTOCM / 2000.0)
+        metric = WMSELoss(factor=yscaler.std / 2000.0)
     elif METRIC_TYPE == 'RMSELoss':
         metric = RMSELoss()
     elif METRIC_TYPE == 'WRMSELoss':
-        metric = WRMSELoss(factor=yscaler.std * HTOCM / 2000.0)
+        metric = WRMSELoss(factor=yscaler.std  / 2000.0)
     else:
         raise ValueError("unreachable")
 
@@ -391,11 +387,11 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
             loss_val = metric(y_val, pred_val)
 
         if METRIC_TYPE == 'MSELoss' or METRIC_TYPE == 'WMSELoss':
-            rmse_val   = torch.sqrt(loss_val) * rmse_descaler * HTOCM
-            rmse_train = torch.sqrt(loss)     * rmse_descaler * HTOCM
+            rmse_val   = torch.sqrt(loss_val) * rmse_descaler
+            rmse_train = torch.sqrt(loss)     * rmse_descaler
         elif METRIC_TYPE == 'RMSELoss' or METRIC_TYPE == 'WRMSELoss':
-            rmse_val   = loss_val * rmse_descaler * HTOCM
-            rmse_train = loss     * rmse_descaler * HTOCM
+            rmse_val   = loss_val * rmse_descaler
+            rmse_train = loss     * rmse_descaler
         else:
             raise ValueError("unreachable")
 
@@ -430,13 +426,13 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
         loss_full = metric(y, pred_full)
 
         if METRIC_TYPE == 'MSE' or METRIC_TYPE == 'WMSELoss':
-            rmse_val  = torch.sqrt(loss_val)  * rmse_descaler * HTOCM
-            rmse_test = torch.sqrt(loss_test) * rmse_descaler * HTOCM
-            rmse_full = torch.sqrt(loss_full) * rmse_descaler * HTOCM
+            rmse_val  = torch.sqrt(loss_val)  * rmse_descaler
+            rmse_test = torch.sqrt(loss_test) * rmse_descaler
+            rmse_full = torch.sqrt(loss_full) * rmse_descaler
         elif METRIC_TYPE == 'RMSE' or METRIC_TYPE == 'WRMSELoss':
-            rmse_val  = loss_val  * rmse_descaler * HTOCM
-            rmse_test = loss_test * rmse_descaler * HTOCM
-            rmse_full = loss_full * rmse_descaler * HTOCM
+            rmse_val  = loss_val  * rmse_descaler
+            rmse_test = loss_test * rmse_descaler
+            rmse_full = loss_full * rmse_descaler
 
         logging.info("Final evaluation:")
         logging.info("Validation RMSE: {:.2f} cm-1".format(rmse_val))
@@ -518,7 +514,6 @@ def transform_coordinates(atoms):
     N1, N2 = atoms[4], atoms[5]
     center = (N1 + N2) / 2.0
     R = np.linalg.norm(center)
-    R /= BOHRTOANG # [ang -> bohr]
 
     th1 = np.arccos(center[2] / R)
     sin_th1 = np.sin(th1)
