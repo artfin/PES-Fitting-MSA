@@ -30,11 +30,11 @@ latex_params = {
     "font.family": "serif",
     "font.serif": 'Times',
     "font.monospace": [],
-    "axes.labelsize": 18,
+    "axes.labelsize": 21,
     "font.size": 10,
-    "legend.fontsize": 18,
-    "xtick.labelsize": 18,
-    "ytick.labelsize": 18,
+    "legend.fontsize": 21,
+    "xtick.labelsize": 21,
+    "ytick.labelsize": 21,
     #"text.latex.preamble": [
     #    r"\usepackage[utf8]{inputenc}",    # use utf8 fonts 
     #    r"\usepackage[detect-all]{siunitx}",
