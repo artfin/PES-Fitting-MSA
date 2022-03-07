@@ -1,9 +1,11 @@
 import logging
 import numpy as np
-import pandas as pd
 import os
+import pandas as pd
 from pathlib import Path
 import random
+from subprocess import run, PIPE
+import time
 import uuid
 
 import matplotlib.pyplot as plt
@@ -30,9 +32,11 @@ torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 
+# Physical constants
 HTOCM = 2.194746313702e5      # Hartree to cm-1
 Boltzmann = 1.380649e-23      # SI: J / K
 Hartree = 4.3597447222071e-18 # SI: J
+BOHRTOANG = 0.52917721067
 
 HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 
@@ -500,6 +504,48 @@ if __name__ == "__main2__":
     #logging.info("number of parameters: {}".format(nparams))
 
 ################ CH4-N2 #######################
+def transform_coordinates(atoms):
+    """
+    {(x, y, z)} -> {R, ph1, th1, ph2, th2}
+    """
+    assert np.array_equal(atoms[0], [0.6316192594896929 ,  0.6316192594896929, -0.6316192594896929])
+    assert np.array_equal(atoms[1], [-0.6316192594896929, -0.6316192594896929, -0.6316192594896929])
+    assert np.array_equal(atoms[2], [-0.6316192594896929,  0.6316192594896929,  0.6316192594896929])
+    assert np.array_equal(atoms[3], [0.6316192594896929 , -0.6316192594896929,  0.6316192594896929])
+    assert np.array_equal(atoms[6], [0.0000000000000000 ,  0.0000000000000000,  0.0000000000000000])
+
+    N1, N2 = atoms[4], atoms[5]
+    center = (N1 + N2) / 2.0
+    R = np.linalg.norm(center)
+    R /= BOHRTOANG # [ang -> bohr]
+
+    th1 = np.arccos(center[2] / R)
+    sin_th1 = np.sin(th1)
+    ph1 = np.arctan2(center[1] / R / sin_th1, center[0] / R / sin_th1)
+
+    delta = (N2 - N1) / 2.0
+    N2_len = np.linalg.norm(delta)
+
+    th2 = np.arccos(delta[2] / N2_len)
+    sin_th2 = np.sin(th2)
+    if np.isclose(sin_th2, 0.0):
+        ph2 = 0.0
+    else:
+        ph2 = np.arctan2(delta[1] / N2_len / sin_th2, delta[0] / N2_len / sin_th2)
+
+    return R, ph1, th1, ph2, th2
+
+def lr_model(atoms):
+    R, ph1, th1, ph2, th2 = transform_coordinates(atoms)
+
+    program = "CH4-N2/long-range/export.exe"
+    program_input = " ".join(list(map(str, [R, ph1, th1, ph2, th2])))
+    proc = run([program], input=program_input, stdout=PIPE, encoding='ascii', check=True)
+
+    lr_energy = float(proc.stdout) * HTOCM
+    return lr_energy
+
+
 if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -509,10 +555,15 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
+    start = time.time()
+
     wdir     = "CH4-N2"
     order    = "4"
     symmetry = "4 2 1"
-    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry)
+    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
+
+    end = time.time()
+    print("Time elapsed in PolyDataset construction: {}".format(end - start))
 
     X, y = dataset.X, dataset.y
     torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")

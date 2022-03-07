@@ -19,7 +19,7 @@ HTOCM     = 2.194746313702e5
 a0        = 2.0
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, config_fname, order, symmetry):
+    def __init__(self, wdir, config_fname, order, symmetry, lr_model=None):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
@@ -70,7 +70,12 @@ class PolyDataset(Dataset):
 
         logging.info("Done.")
 
-        energies = np.asarray([c.energy for c in self.configs]).reshape((self.NCONFIGS, 1)) # (NCONFIGS,) -> (NCONFIGS, 1)
+        energies = np.zeros((self.NCONFIGS, 1))
+        for ind, config in enumerate(self.configs):
+            energies[ind] = config.energy
+            if lr_model is not None:
+                energies[ind] -= lr_model(config.atoms)
+        #energies = np.asarray([c.energy for c in self.configs]).reshape((self.NCONFIGS, 1)) # (NCONFIGS,) -> (NCONFIGS, 1)
 
         self.X = torch.from_numpy(poly)
         self.y = torch.from_numpy(energies)
@@ -104,9 +109,9 @@ class PolyDataset(Dataset):
         return configs
 
     def make_yij(self, configs):
-        ZERO_YIJ = False 
+        ZERO_YIJ = False
         if ZERO_YIJ:
-            logging.info("[-- NOTICE --] Morse variables with respect to intermolecular distances are zero.") 
+            logging.info("[-- NOTICE --] Morse variables with respect to intermolecular distances are zero.")
 
         yij = np.zeros((self.NCONFIGS, self.NDIS), order="F")
 
