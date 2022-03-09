@@ -80,13 +80,20 @@ class WMSELoss(nn.Module):
         return (w * (y - y_pred)**2).mean()
 
 class WRMSELoss(nn.Module):
-    def __init__(self, factor):
+    def __init__(self, e_factor, p1_mean=None, p1_std=None):
         super().__init__()
-        self.factor = factor
+        self.e_factor = e_factor
+        self.p1_mean = p1_mean
+        self.p1_std = p1_std
 
     def forward(self, y, y_pred):
-        w = torch.exp(-y * self.factor)
+        w = torch.exp(-y * self.e_factor)
         w = w / w.max()
+
+        if self.p1_mean is not None:
+            p1 = self.p1_mean + self.p1_std * y[1].item()
+            w *= -10.0 * np.log(p1)
+
         wmse = (w * (y - y_pred)**2).mean()
         return torch.sqrt(wmse)
 
@@ -261,12 +268,12 @@ def define_model(architecture, NPOLY):
 
     for i in range(len(architecture)):
         out_features = architecture[i]
-        layers.append(nn.Linear(in_features, out_features))
+        layers.append(nn.Linear(in_features, out_features, bias=False))
         layers.append(nn.Tanh())
 
         in_features = out_features
 
-    layers.append(nn.Linear(out_features, 1))
+    layers.append(nn.Linear(out_features, 1, bias=False))
     model = nn.Sequential(*layers)
 
     sigmoid_gain = torch.nn.init.calculate_gain("tanh")
@@ -353,7 +360,10 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
     elif METRIC_TYPE == 'RMSELoss':
         metric = RMSELoss()
     elif METRIC_TYPE == 'WRMSELoss':
-        metric = WRMSELoss(factor=yscaler.std  / 2000.0)
+        p1_mean = xscaler.mean[0, 1]
+        p1_std  = xscaler.std[0, 1]
+        metric = WRMSELoss(e_factor=yscaler.std / 2000.0, p1_mean=p1_mean, p1_std=p1_std)
+        #metric = WRMSELoss(e_factor=yscaler.std / 2000.0)
     else:
         raise ValueError("unreachable")
 
@@ -366,7 +376,7 @@ def build_model(trial=None, architecture="optuna", data_split=None, dataset_path
     ES_START_EPOCH = 10
     es = EarlyStopping(patience=15, tol=0.1, chk_path=chk_path)
 
-    MAX_EPOCHS = 500
+    MAX_EPOCHS = 100
 
     ################ START TRAINING #######################
     for epoch in range(MAX_EPOCHS):
@@ -544,21 +554,21 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    wdir     = "CH4-N2"
-    order    = "4"
-    symmetry = "4 2 1"
-    dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
+    #wdir     = "CH4-N2"
+    #order    = "4"
+    #symmetry = "4 2 1"
+    #dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
 
-    meta_info = {
-        "NATOMS"   : dataset.NATOMS,
-        "NMON"     : dataset.NMON,
-        "NPOLY"    : dataset.NPOLY,
-        "symmetry" : symmetry,
-        "order"    : order,
-    }
+    #meta_info = {
+    #    "NATOMS"   : dataset.NATOMS,
+    #    "NMON"     : dataset.NMON,
+    #    "NPOLY"    : dataset.NPOLY,
+    #    "symmetry" : symmetry,
+    #    "order"    : order,
+    #}
 
-    X, y = dataset.X, dataset.y
-    torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+    #X, y = dataset.X, dataset.y
+    #torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
 
     dataset_path = "CH4-N2/dataset.pt"
     print("Loading data from dataset_path = {}".format(dataset_path))
@@ -566,7 +576,15 @@ if __name__ == "__main__":
     X, y = d["X"], d["y"]
     NPOLY = X.size()[1]
 
-    perform_lstsq(X, y, show_results=True)
+    perform_lstsq(X, y, show_results=False)
+
+    meta_info = {
+        "NATOMS"   : 7,
+        "NMON"     : 2892,
+        "NPOLY"    : 650,
+        "symmetry" : "4 2 1",
+        "order"    : "4",
+    }
 
     build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt", meta_info=meta_info)
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")

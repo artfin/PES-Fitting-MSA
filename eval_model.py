@@ -91,14 +91,21 @@ def load_published():
     return data[:,1], data[:,2]
 
 def plot_rmse_from_checkpoint(folder, fname, X, y, figname=None):
-    model, xscaler, yscaler, _ = retrieve_checkpoint(folder=folder, fname=fname)
+    model, xscaler, yscaler, meta_info = retrieve_checkpoint(folder=folder, fname=fname)
+
+    y_mean, y_std = yscaler.mean, yscaler.std
+
+    NPOLY = meta_info["NPOLY"]
+    inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
+    inf_poly[0, 0] = 1.0
+    inf_poly = xscaler.transform(inf_poly)
+    inf_pred = model(inf_poly)
+    inf_pred = inf_pred * y_std + y_mean
+    inf_pred = torch.ones(len(X), 1, dtype=torch.double) * inf_pred
 
     Xtr = xscaler.transform(X)
     ytr_pred = model(Xtr)
-
-    y_mean, y_std = yscaler.mean, yscaler.std
-    y_pred   = ytr_pred * y_std + y_mean
-
+    y_pred   = ytr_pred * y_std + y_mean - inf_pred
     RMSE = RMSELoss()
 
     MAX_ENERGY = y.max().item()

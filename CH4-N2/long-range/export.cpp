@@ -29,7 +29,7 @@ int main()
         double W = 1.0 / (1.0 + std::exp(-S * (R - C)));
         double en = pes.pes(R, ph1, th1, ph2, th2) * W;
 
-        ofs << R << " " << ph1 << " " << th1 << " " << ph2 << " " << th2 << " " << en << "\n"; 
+        ofs << R << " " << ph1 << " " << th1 << " " << ph2 << " " << th2 << " " << en * HTOCM << "\n"; 
     }
 
     return 0;

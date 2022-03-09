@@ -31,6 +31,13 @@ def generate_cpp(fname, model_fname, xscaler, yscaler, meta_info):
     yscaler_mean = "{:.16f}".format(yscaler.mean.item())
     yscaler_std  = "{:.16f}".format(yscaler.std.item())
 
+    inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
+    inf_poly[0, 0] = 1.0
+    inf_poly = xscaler.transform(inf_poly)
+    inf_pred = model(inf_poly)
+    inf_pred = inf_pred * yscaler.std + yscaler.mean
+    inf_pred = inf_pred.item()
+
     cpp_template = """
 #include <cassert>
 #include <chrono>
@@ -42,6 +49,7 @@ def generate_cpp(fname, model_fname, xscaler, yscaler, meta_info):
 #include <torch/script.h>
 
 const double a0 = 2.0;
+const double NN_BOND_LENGTH = 2.078; // a0
 
 extern "C" {{
     void c_evmono(double* x, double* mono);
@@ -51,6 +59,19 @@ extern "C" {{
 #define ATOMX(x, i) x[3*i]
 #define ATOMY(x, i) x[3*i + 1]
 #define ATOMZ(x, i) x[3*i + 2]
+
+template <typename T>
+std::vector<T> linspace(const T start, const T end, const size_t size) {{
+
+    const T step = (end - start) / (size - 1);
+
+    std::vector<T> v(size);
+    for (size_t k = 0; k < size; ++k) {{
+        v[k] = start + step * k;
+    }}
+
+    return v;
+}}
 
 struct StandardScaler
 {{
@@ -136,6 +157,17 @@ double NNPIP::pes(std::vector<double> const& x) {{
 
     for (size_t i = 0; i < NATOMS; ++i) {{
         for (size_t j = i + 1; j < NATOMS; ++j) {{
+            if (i == 0 && j == 1) {{ yij[k] = 0.0; k = k + 1; continue; }} // H1 H2
+            if (i == 0 && j == 2) {{ yij[k] = 0.0; k = k + 1; continue; }} // H1 H3
+            if (i == 0 && j == 3) {{ yij[k] = 0.0; k = k + 1; continue; }} // H1 H4
+            if (i == 1 && j == 2) {{ yij[k] = 0.0; k = k + 1; continue; }} // H2 H3
+            if (i == 1 && j == 3) {{ yij[k] = 0.0; k = k + 1; continue; }} // H2 H4
+            if (i == 2 && j == 3) {{ yij[k] = 0.0; k = k + 1; continue; }} // H3 H4
+            if (i == 0 && j == 6) {{ yij[k] = 0.0; k = k + 1; continue; }} // H1 C
+            if (i == 1 && j == 6) {{ yij[k] = 0.0; k = k + 1; continue; }} // H2 C
+            if (i == 2 && j == 6) {{ yij[k] = 0.0; k = k + 1; continue; }} // H3 C
+            if (i == 3 && j == 6) {{ yij[k] = 0.0; k = k + 1; continue; }} // H4 C
+            if (i == 4 && j == 5) {{ yij[k] = 0.0; k = k + 1; continue; }} // N1 N2
 
             drx = ATOMX(x, i) - ATOMX(x, j);
             dry = ATOMY(x, i) - ATOMY(x, j);
@@ -157,32 +189,58 @@ double NNPIP::pes(std::vector<double> const& x) {{
     t = torch::from_blob(poly, {{static_cast<long int>(NPOLY)}}, torch::kDouble);
     double ytr = model.forward({{t}}).toTensor().item<double>();
 
-    return ytr * yscaler.std[0] + yscaler.mean[0];
+    double INF_PRED = {6};
+
+    return ytr * yscaler.std[0] + yscaler.mean[0] - INF_PRED;
+}}
+
+double internal_pes(NNPIP & pes, double R, double PH1, double TH1, double PH2, double TH2)
+{{
+    static std::vector<double> cart(21);
+
+    cart[0] =  1.193587416; cart[1]  =  1.193587416; cart[2]  = -1.193587416; // H1
+    cart[3] = -1.193587416; cart[4]  = -1.193587416; cart[5]  = -1.193587416; // H2
+    cart[6] = -1.193587416; cart[7]  =  1.193587416; cart[8]  =  1.193587416; // H3
+    cart[9] =  1.193587416; cart[10] = -1.193587416; cart[11] =  1.193587416; // H4
+
+    // N1
+    cart[12] = R * std::sin(TH1) * std::cos(PH1) - NN_BOND_LENGTH * std::cos(PH2) * std::sin(TH2);
+    cart[13] = R * std::sin(TH1) * std::sin(PH1) - NN_BOND_LENGTH * std::sin(PH2) * std::sin(TH2);
+    cart[14] = R * std::cos(TH1)                 - NN_BOND_LENGTH * std::cos(TH2);
+
+    // N2
+    cart[15] = R * std::sin(TH1) * std::cos(PH1) + NN_BOND_LENGTH * std::cos(PH2) * std::sin(TH2);
+    cart[16] = R * std::sin(TH1) * std::sin(PH1) + NN_BOND_LENGTH * std::sin(PH2) * std::sin(TH2);
+    cart[17] = R * std::cos(TH1)                 + NN_BOND_LENGTH * std::cos(TH2);
+
+    cart[18] = 0.0; cart[19] = 0.0; cart[20] = 0.0;                           // C
+
+    return pes.pes(cart);
 }}
 
 int main()
 {{
     std::cout << std::fixed << std::setprecision(16);
 
-    const size_t natoms = {6};
-    NNPIP pes(natoms, "{7}");
+    const size_t natoms = 7;
+    NNPIP nn_pes(natoms, "model.pt");
 
-    std::vector<double> x{{
-        1.1935874160000000,  1.1935874160000000, -1.1935874160000000,
-       -1.1935874160000000, -1.1935874160000000, -1.1935874160000000,
-       -1.1935874160000000,  1.1935874160000000,  1.1935874160000000,
-        1.1935874160000000, -1.1935874160000000,  1.1935874160000000,
-        2.5980762113524745,  2.5980762113524740,  0.5200762113550002,
-        2.5980762113524745,  2.5980762113524740,  4.6760762113549994,
-        0.0000000000000000,  0.0000000000000000,  0.0000000000000000
-    }};
+    const double deg = M_PI / 180.0;
+    double PH1 = 47.912 * deg;
+    double TH1 = 56.167 * deg;
+    double PH2 = 0.0    * deg;
+    double TH2 = 135.0  * deg;
 
-    double energy = pes.pes(x);
-    std::cout << "(model) y: " << energy << "\\n";
+    std::vector<double> Rv = linspace(4.5, 30.0, 500);
+
+    for (double R : Rv) {{
+        double nnval   = internal_pes(nn_pes, R, PH1, TH1, PH2, TH2);
+        std::cout << R << " " << nnval << "\\n";
+    }}
 
     return 0;
 }}
-    """.format(NMON, NPOLY, xscaler_mean, xscaler_std, yscaler_mean, yscaler_std, NATOMS, model_fname)
+    """.format(NMON, NPOLY, xscaler_mean, xscaler_std, yscaler_mean, yscaler_std, inf_pred, NATOMS, model_fname)
 
     with open(fname, mode='w') as out:
         out.write(cpp_template)
@@ -251,11 +309,18 @@ if __name__ == "__main__":
 
     X, y = load_dataset("CH4-N2", "dataset.pt")
 
-    X0 = X[0].view((1, meta_info["NPOLY"]))
+    X0 = X[-1].view((1, meta_info["NPOLY"]))
     X0 = xscaler.transform(X0)
 
     with torch.no_grad():
         ytr = model(X0)
 
-    ytr = ytr * yscaler.std + yscaler.mean
+    NPOLY = meta_info["NPOLY"]
+    inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
+    inf_poly[0, 0] = 1.0
+    inf_poly = xscaler.transform(inf_poly)
+    inf_pred = model(inf_poly)
+    inf_pred = inf_pred * yscaler.std + yscaler.mean
+
+    ytr = ytr * yscaler.std + yscaler.mean - inf_pred
     logging.info("Expected output of the exported model: {}".format(ytr.item()))
