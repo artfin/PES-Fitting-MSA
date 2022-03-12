@@ -25,7 +25,7 @@ int main()
         ss >> R >> ph1 >> th1 >> ph2 >> th2;
 
         double C = 15.0; // sigmoid center of symmetry
-        double S = 10.0; // the speed of `turning on` the long-range model 
+        double S = 0.5; // the speed of `turning on` the long-range model 
         double W = 1.0 / (1.0 + std::exp(-S * (R - C)));
         double en = pes.pes(R, ph1, th1, ph2, th2) * W;
 

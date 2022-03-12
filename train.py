@@ -511,10 +511,13 @@ if __name__ == "__main2__":
     #logging.info("number of parameters: {}".format(nparams))
 
 ################ CH4-N2 #######################
-def transform_coordinates(atoms):
+def cart2interal(atoms):
     """
     {(x, y, z)} -> {R, ph1, th1, ph2, th2}
     """
+    assert False
+
+    # UPDATE coordinates angstrom to bohr
     assert np.array_equal(atoms[0], [0.6316192594896929 ,  0.6316192594896929, -0.6316192594896929])
     assert np.array_equal(atoms[1], [-0.6316192594896929, -0.6316192594896929, -0.6316192594896929])
     assert np.array_equal(atoms[2], [-0.6316192594896929,  0.6316192594896929,  0.6316192594896929])
@@ -554,37 +557,42 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #wdir     = "CH4-N2"
-    #order    = "4"
-    #symmetry = "4 2 1"
-    #dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
+    RELOAD_DATASET = True
 
-    #meta_info = {
-    #    "NATOMS"   : dataset.NATOMS,
-    #    "NMON"     : dataset.NMON,
-    #    "NPOLY"    : dataset.NPOLY,
-    #    "symmetry" : symmetry,
-    #    "order"    : order,
-    #}
+    if RELOAD_DATASET:
+        wdir     = "CH4-N2"
+        order    = "4"
+        symmetry = "4 2 1"
+        dataset = PolyDataset(wdir=wdir, config_fname="ch4-n2-energies.xyz", order=order, symmetry=symmetry, lr_model=lr_model)
 
-    #X, y = dataset.X, dataset.y
-    #torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+        meta_info = {
+            "NATOMS"   : dataset.NATOMS,
+            "NMON"     : dataset.NMON,
+            "NPOLY"    : dataset.NPOLY,
+            "symmetry" : symmetry,
+            "order"    : order,
+        }
 
-    dataset_path = "CH4-N2/dataset.pt"
-    print("Loading data from dataset_path = {}".format(dataset_path))
-    d = torch.load(dataset_path)
-    X, y = d["X"], d["y"]
-    NPOLY = X.size()[1]
+        X, y = dataset.X, dataset.y
+        torch.save({"X" : X, "y" : y}, "CH4-N2/dataset.pt")
+
+        NPOlY = X.size()[1]
+    else:
+        dataset_path = "CH4-N2/dataset.pt"
+        print("Loading data from dataset_path = {}".format(dataset_path))
+        d = torch.load(dataset_path)
+        X, y = d["X"], d["y"]
+        NPOLY = X.size()[1]
+
+        meta_info = {
+            "NATOMS"   : 7,
+            "NMON"     : 2892,
+            "NPOLY"    : 650,
+            "symmetry" : "4 2 1",
+            "order"    : "4",
+        }
 
     perform_lstsq(X, y, show_results=False)
-
-    meta_info = {
-        "NATOMS"   : 7,
-        "NMON"     : 2892,
-        "NPOLY"    : 650,
-        "symmetry" : "4 2 1",
-        "order"    : "4",
-    }
 
     build_model(trial=None, architecture=(10, 10), data_split=sklearn.model_selection.train_test_split, dataset_path="CH4-N2/dataset.pt", meta_info=meta_info)
     #optuna_neural_network_achitecture_search(dataset_path="CH4-N2/dataset.pt")

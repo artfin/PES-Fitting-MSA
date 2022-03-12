@@ -48,8 +48,12 @@ def generate_cpp(fname, model_fname, xscaler, yscaler, meta_info):
 
 #include <torch/script.h>
 
+#include "lr_pes_ch4_n2.hpp"
+
 const double a0 = 2.0;
 const double NN_BOND_LENGTH = 2.078; // a0
+
+const double HTOCM = 2.194746313702e5;
 
 extern "C" {{
     void c_evmono(double* x, double* mono);
@@ -101,6 +105,8 @@ public:
 
     double pes(std::vector<double> const& x);
 private:
+    void cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2);
+
     const size_t NMON = {0};
     const size_t NPOLY = {1};
 
@@ -114,6 +120,8 @@ private:
     StandardScaler xscaler;
     StandardScaler yscaler;
 
+    LR_PES_ch4_n2 lr;
+
     torch::jit::script::Module model;
     at::Tensor t;
 }};
@@ -121,6 +129,8 @@ private:
 NNPIP::NNPIP(const size_t NATOMS, std::string const& pt_fname)
     : NATOMS(NATOMS), NDIS(NATOMS * (NATOMS - 1) / 2)
 {{
+    lr.init();
+
     yij = new double [NDIS];
     mono = new double [NMON];
     poly = new double [NPOLY];
@@ -149,6 +159,46 @@ NNPIP::~NNPIP()
     delete poly;
 }}
 
+void NNPIP::cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2)
+{{
+    assert(cart[0]  ==  1.193587416 && cart[1]  ==  1.193587416 && cart[2]  == -1.193587416); // H1
+    assert(cart[3]  == -1.193587416 && cart[4]  == -1.193587416 && cart[5]  == -1.193587416); // H2
+    assert(cart[6]  == -1.193587416 && cart[7]  ==  1.193587416 && cart[8]  ==  1.193587416); // H3
+    assert(cart[9]  ==  1.193587416 && cart[10] == -1.193587416 && cart[11] ==  1.193587416); // H4
+    assert(cart[18] ==  0.000000000 && cart[19] ==  0.000000000 && cart[20] ==  0.000000000); // C
+
+    const double EPS = 1e-9;
+
+    Eigen::Vector3d N1;
+    N1 << cart[12], cart[13], cart[14];
+
+    Eigen::Vector3d N2;
+    N2 << cart[15], cart[16], cart[17];
+
+    Eigen::Vector3d center = 0.5 * (N1 + N2);
+    R = center.norm();
+
+    th1 = std::acos(center(2) / R);
+    double sin_th1 = std::sin(th1);
+
+    if (std::abs(sin_th1) < EPS) {{
+        ph1 = 0.0;
+    }} else {{
+        ph1 = std::atan2(center(1) / R / sin_th1, center(0) / R / sin_th1);
+    }}
+
+    Eigen::Vector3d delta = 0.5 * (N2 - N1);
+    double N2_len = delta.norm();
+
+    th2 = std::acos(delta(2) / N2_len);
+    double sin_th2 = std::sin(th2);
+
+    if (std::abs(sin_th2) < EPS) {{
+        ph2 = 0.0;
+    }} else {{
+        ph2 = std::atan2(delta(1) / N2_len / sin_th2, delta(0) / N2_len / sin_th2);
+    }}
+}}
 
 double NNPIP::pes(std::vector<double> const& x) {{
     double drx, dry, drz;
@@ -191,7 +241,16 @@ double NNPIP::pes(std::vector<double> const& x) {{
 
     double INF_PRED = {6};
 
-    return ytr * yscaler.std[0] + yscaler.mean[0] - INF_PRED;
+    double R, ph1, th1, ph2, th2;
+    cart2internal(x, R, ph1, th1, ph2, th2);
+
+    double lrval = lr.pes(R, ph1, th1, ph2, th2) * HTOCM;
+
+    double C = 15.0;
+    double S = 1.0;
+    double WT = 1.0 / (1.0 + std::exp(-S * (R - C)));
+
+    return ytr * yscaler.std[0] + yscaler.mean[0] - INF_PRED + lrval * WT;
 }}
 
 double internal_pes(NNPIP & pes, double R, double PH1, double TH1, double PH2, double TH2)
