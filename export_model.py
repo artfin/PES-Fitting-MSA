@@ -67,6 +67,10 @@ extern "C" {{
 template <typename T>
 std::vector<T> linspace(const T start, const T end, const size_t size) {{
 
+    if (size == 1) {
+        return std::vector<T>{start};
+    }
+
     const T step = (end - start) / (size - 1);
 
     std::vector<T> v(size);
@@ -104,13 +108,14 @@ public:
     ~NNPIP();
 
     double pes(std::vector<double> const& x);
+
+    const size_t NATOMS;
 private:
     void cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2);
 
     const size_t NMON = {0};
     const size_t NPOLY = {1};
 
-    const size_t NATOMS;
     const size_t NDIS;
 
     double *yij;
@@ -322,10 +327,15 @@ list(APPEND CMAKE_PREFIX_PATH "{0}")
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${{CMAKE_CXX_FLAGS}} ${{TORCH_CXX_FLAGS}}")
 
+find_package(Eigen3)
+include_directories(${{EIGEN3_INCLUDE_DIR}})
+
 add_executable(
     load-model
     load_model.cpp
     {1}
+    lr_pes_ch4_n2.hpp
+    lr_pes_ch4_n2.cpp
 )
 
 target_link_libraries(load-model "${{TORCH_LIBRARIES}}")
@@ -349,6 +359,11 @@ def export_model(export_wd, dataset_wd, model, xscaler, yscaler, meta_info):
     order = meta_info["order"]
     basis_fname = "basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order)
     cl(f"cp {dataset_wd}/{basis_fname} {export_wd}")
+
+    LR_CPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.cpp")
+    LR_HPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.hpp")
+    cl(f"cp {LR_CPP} {export_wd}")
+    cl(f"cp {LR_HPP} {export_wd}")
 
     cmake_fname = os.path.join(export_wd, "CMakeLists.txt")
     generate_cmake(cmake_fname, basis_fname)

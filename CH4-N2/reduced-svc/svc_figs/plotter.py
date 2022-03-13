@@ -44,7 +44,7 @@ def lighten_color(color, amount=0.5):
     return colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
 
 def plot_svc(figname=None):
-    experiment = load("experiment.json") 
+    experiment = load("experiment.json")
     points = [Point(float(key), value[0], value[1], value[2]) for key, value in experiment.items()]
 
     sources = list(set([point.source for point in points]))
@@ -76,14 +76,16 @@ def plot_svc(figname=None):
         "61-mas/eak" : r"Mason et al., 1961",
     }
 
-    nnpip_pes = np.loadtxt("nnpippes-svc.txt")
-    symm_pes  = np.loadtxt("symmpes-svc.txt")
+    nnpip_pes    = np.loadtxt("nnpippes-svc.txt")
+    nnpip_lr_pes = np.loadtxt("nnpippes-lr-svc.txt")
+    symm_pes     = np.loadtxt("symmpes-svc.txt")
 
     plt.style.use('dark_background')
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)
 
     plt.plot(nnpip_pes[:,0], nnpip_pes[:,1], color='#FF6F61', lw=2.0, label="NN-PIP")
+    plt.plot(nnpip_lr_pes[:,0], nnpip_lr_pes[:,1], color='r', lw=2., label="NN-PIP+LR")
     plt.plot(symm_pes[:,0], symm_pes[:,1], color='#CFBFF7', lw=2.0, label="Symmetry-adapted angular basis")
 
     legend_elements = []

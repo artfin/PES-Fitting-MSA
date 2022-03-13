@@ -17,6 +17,9 @@ endif()
 
 find_package(GSL REQUIRED)
 
+find_package(Eigen3)
+include_directories(${EIGEN3_INCLUDE_DIR})
+
 list(APPEND CMAKE_PREFIX_PATH "/home/artfin/Desktop/neural-networks/project/PES-Fitting-MSA/cpp_pytorch/libtorch/")
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
@@ -41,22 +44,25 @@ set(HEP_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/deps/hep/install/include)
 add_executable(
     svc.exe
     svc.cpp 
-    basis_4_2_1_4.f90
+    basis_4_2_1_5.f90
+    lr_pes_ch4_n2.hpp
+    lr_pes_ch4_n2.cpp
 )
 
 add_dependencies(svc.exe hep)
 target_include_directories(svc.exe PRIVATE ${HEP_INCLUDE_DIR})
 target_link_libraries(svc.exe "${TORCH_LIBRARIES}" ${MPI_C_LIBRARIES} ${MPI_CXX_LIBRARIES})
+target_link_libraries(svc.exe GSL::gsl GSL::gslcblas) 
 set_property(TARGET svc.exe PROPERTY CXX_STANDARD 14)
 
-add_executable(
-    radial-curve.exe
-    radial-curve.cpp
-    basis_4_2_1_4.f90
-    ai_pes_ch4_n2_opt1.hpp
-    ai_pes_ch4_n2_opt1.cpp
-)
-
-target_link_libraries(radial-curve.exe "${TORCH_LIBRARIES}")
-target_link_libraries(radial-curve.exe GSL::gsl GSL::gslcblas)
-set_property(TARGET radial-curve.exe PROPERTY CXX_STANDARD 14)
+#add_executable(
+#    radial-curve.exe
+#    radial-curve.cpp
+#    basis_4_2_1_4.f90
+#    ai_pes_ch4_n2_opt1.hpp
+#    ai_pes_ch4_n2_opt1.cpp
+#)
+#
+#target_link_libraries(radial-curve.exe "${TORCH_LIBRARIES}")
+#target_link_libraries(radial-curve.exe GSL::gsl GSL::gslcblas)
+#set_property(TARGET radial-curve.exe PROPERTY CXX_STANDARD 14)
