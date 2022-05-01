@@ -8,6 +8,17 @@ import torch
 
 from dataset import PolyDataset
 
+#DATASET_POSTFIX = "-rigid+nonrigid"
+#XYZ_PATHS = [
+#    os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#    os.path.join("datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
+#]
+
+DATASET_POSTFIX = "-rigid"
+XYZ_PATHS = {
+    os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+}
+
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -32,58 +43,50 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    order     = "4"
+    order     = "5"
     wdir      = "datasets/external"
     symmetry  = "4 2 1"
 
-    PATH_RIGID    = os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz")
-    dataset_rigid = PolyDataset(wdir=wdir, xyz_file=PATH_RIGID, order=order, symmetry=symmetry, set_intermolecular_to_zero=True) #, lr_model=lr_model)
+    GLOBAL_SET      = False
+    GLOBAL_NATOMS   = None
+    GLOBAL_NMON     = None
+    GLOBAL_NPOLY    = None
+    GLOBAL_MASK     = None
 
-    PATH_NONRIGID = os.path.join("datasets", "raw", "CH4-N2-EN-NONRIGID.xyz")
-    dataset_nonrigid = PolyDataset(wdir=wdir, xyz_file=PATH_NONRIGID, order=order, symmetry=symmetry, set_intermolecular_to_zero=True)
+    Xs, ys = [], []
+    labels = []
+    label = 0
 
-    assert dataset_rigid.NATOMS   == dataset_nonrigid.NATOMS
-    assert dataset_rigid.NMON     == dataset_nonrigid.NMON
-    assert dataset_rigid.NPOLY    == dataset_nonrigid.NPOLY
-    assert dataset_rigid.symmetry == dataset_nonrigid.symmetry
-    assert dataset_rigid.order    == dataset_nonrigid.order
+    for xyz_path in XYZ_PATHS:
+        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=True)
 
-    if hasattr(dataset_rigid, "mask"):
-        assert dataset_rigid.mask == dataset_nonrigid.mask
+        if GLOBAL_SET:
+            assert GLOBAL_NATOMS == dataset.NATOMS
+            assert GLOBAL_NMON   == dataset.NMON
+            assert GLOBAL_NPOLY  == dataset.NPOLY
 
-    X = torch.cat((dataset_rigid.X, dataset_nonrigid.X))
-    y = torch.cat((dataset_rigid.y, dataset_nonrigid.y))
+            if hasattr(dataset, "mask"):
+                np.testing.assert_equal(GLOBAL_MASK, dataset.mask)
+        else:
+            GLOBAL_NATOMS = dataset.NATOMS
+            GLOBAL_NMON   = dataset.NMON
+            GLOBAL_NPOLY  = dataset.NPOLY
+            if hasattr(dataset, "mask"):
+                GLOBAL_MASK = dataset.mask
 
-    # labels: {0: RIGID, 1: NONRIGID}
-    labels = [0] * len(dataset_rigid.y) + [1] * len(dataset_nonrigid.y)
+        Xs.append(dataset.X)
+        ys.append(dataset.y)
+        labels.extend([label] * len(dataset.y))
+        label = label + 1
+
+    X = torch.cat(tuple(Xs))
+    y = torch.cat(tuple(ys))
+
     labels = torch.Tensor(labels).reshape((len(labels), 1))
-
     X = torch.cat((X, labels), dim=1)
-
-    dict_pk  = dict(NATOMS=dataset_rigid.NATOMS, NMON=dataset_rigid.NMON, NPOLY=dataset_rigid.NPOLY,
-                    symmetry=dataset_rigid.symmetry, order=dataset_rigid.order, X=X, y=y, labels=labels) 
-
-    dict_json = dict(NATOMS=dataset_rigid.NATOMS, NMON=dataset_rigid.NMON, NPOLY=dataset_rigid.NPOLY,
-                     symmetry=dataset_rigid.symmetry, order=dataset_rigid.order, X=X.numpy(), y=y.numpy(), labels=labels)
-
-    if hasattr(dataset_rigid, "mask"):
-        dict_pk.update({"mask" : dataset_rigid.mask})
-        dict_json.update({"mask" : dataset_rigid.mask})
 
     DATASETS_INTERIM = "datasets/interim"
     BASENAME = "poly_{}_{}".format(symmetry.replace(" ", "_"), order)
-
-    #######################################################################
-    # Saving polynomials
-    #######################################################################
-
-    #interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + ".pk")
-    #logging.info("saving polynomials (pickled) to {}".format(interim_pk_fname))
-    #torch.save(dict_pk, interim_pk_fname)
-
-    #interim_json_fname = os.path.join(DATASETS_INTERIM, BASENAME + ".json")
-    #logging.info("saving polynomials (readable) to {}".format(interim_json_fname))
-    #save_json(dict_json, interim_json_fname)
 
     #######################################################################
     # splitting polynomials into train/val/test and saving
@@ -98,9 +101,13 @@ if __name__ == "__main__":
     logging.info("X_val.size(): {}".format(X_val.size()))
     logging.info("X_test.size(): {}".format(X_test.size()))
 
-    logging.info("[Train] percentage of NONRIGID: {}%".format(sum(X_train[:, -1]) / X_train.size()[0] * 100.0))
-    logging.info("[Val]   percentage of NONRIGID: {}%".format(sum(X_val[:, -1]) / X_val.size()[0] * 100.0))
-    logging.info("[Test]  percentage of NONRIGID: {}%".format(sum(X_test[:, -1]) / X_test.size()[0] * 100.0))
+    labels = list(map(int, labels.squeeze().tolist()))
+    for label_typ in set(labels):
+        p_train = sum(X_train[:, -1] == label_typ) / X_train.size()[0] * 100.0
+        p_val   = sum(X_val[:, -1] == label_typ) / X_val.size()[0] * 100.0
+        p_test  = sum(X_test[:, -1] == label_typ) / X_test.size()[0] * 100.0
+        logging.info("[label_typ={}] train: {:.2f}%; val: {:.2f}%; test: {:.2f}%".format(label_typ, p_train, p_val, p_test))
+
 
     #print("Size of training dataset: {}".format(X_train.size()))
     #train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
@@ -111,19 +118,19 @@ if __name__ == "__main__":
     #    json.dump(train_index, fp=fp)
 
     X_train = X_train[:, :-1]
-    dict_pk  = dict(NATOMS=dataset_rigid.NATOMS, NMON=dataset_rigid.NMON, NPOLY=dataset_rigid.NPOLY,
-                    symmetry=dataset_rigid.symmetry, order=dataset_rigid.order, X=X_train, y=y_train)
-    train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train.pk")
+    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
+                    symmetry=symmetry, order=order, X=X_train, y=y_train)
+    train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train{}.pk".format(DATASET_POSTFIX))
     torch.save(dict_pk, train_interim_pk_fname)
 
     X_val = X_val[:, :-1]
-    dict_pk  = dict(NATOMS=dataset_rigid.NATOMS, NMON=dataset_rigid.NMON, NPOLY=dataset_rigid.NPOLY,
-                    symmetry=dataset_rigid.symmetry, order=dataset_rigid.order, X=X_val, y=y_val)
-    val_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-val.pk")
+    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
+                    symmetry=symmetry, order=order, X=X_val, y=y_val)
+    val_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-val{}.pk".format(DATASET_POSTFIX))
     torch.save(dict_pk, val_interim_pk_fname)
 
     X_test = X_test[:, :-1]
-    dict_pk  = dict(NATOMS=dataset_rigid.NATOMS, NMON=dataset_rigid.NMON, NPOLY=dataset_rigid.NPOLY,
-                    symmetry=dataset_rigid.symmetry, order=dataset_rigid.order, X=X_test, y=y_test)
-    test_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-test.pk")
+    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
+                    symmetry=symmetry, order=order, X=X_test, y=y_test)
+    test_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-test{}.pk".format(DATASET_POSTFIX))
     torch.save(dict_pk, test_interim_pk_fname)
