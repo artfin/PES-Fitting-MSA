@@ -15,6 +15,7 @@ from collections import namedtuple
 XYZConfig = namedtuple('Config', ['atoms', 'energy'])
 
 from dataclasses import dataclass
+from typing import List, Optional
 
 @dataclass
 class PolyDataset_t:
@@ -23,11 +24,10 @@ class PolyDataset_t:
     NPOLY    : int
     symmetry : str
     order    : str
-    mask     : list
     X        : torch.Tensor
     y        : torch.Tensor
+    mask     : Optional[List[int]] = None
 
-# NOTE: move to YAML config
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
 POLYNOMIAL_LIB = "CUSTOM"

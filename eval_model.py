@@ -114,16 +114,16 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     plt.figure(figsize=(10, 10))
     ax = plt.gca()
 
-    #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
-    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=0.5, label='val')
-    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=0.5, label='test')
     plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
-    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
-    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
+    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=0.5, label='val')
+    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=0.5, label='test')
+    #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
+    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
+    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
     plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
     plt.xlim((-200.0, 2000.0))
-    plt.ylim((-5.0, 5.0))
+    plt.ylim((-15.0, 15.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -214,7 +214,7 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = "models/exp10"
+    MODEL_FOLDER = "models/exp-rigid+nonrigid"
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
         try:

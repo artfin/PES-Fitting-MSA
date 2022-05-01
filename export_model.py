@@ -64,8 +64,9 @@ def retrieve_checkpoint(cfg):
 class Export:
     DATASETS_EXTERNAL        = "datasets/external"
 
-    def __init__(self, cfg, evaluator):
-        self.evaluator = evaluator
+    def __init__(self, cfg, evaluator, poly_source="CUSTOM"):
+        self.evaluator   = evaluator
+        self.poly_source = poly_source
 
         self.export_wd           = cfg['OUTPUT_PATH']
         DEFAULT_TORCHSCRIPT_PATH = os.path.join(self.export_wd, "torchscript-model.pt")
@@ -81,7 +82,7 @@ class Export:
 
         self.torchscript_filename = self.torchscript_path.split('/')[-1]
 
-       #LR_CPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.cpp")
+        #LR_CPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.cpp")
         #LR_HPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.hpp")
         #cl(f"cp {LR_CPP} {export_wd}")
         #cl(f"cp {LR_HPP} {export_wd}")
@@ -94,7 +95,7 @@ class Export:
         order       = self.evaluator.meta_info["order"]
         basis_fname = "basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order)
         cl(f"cp {self.DATASETS_EXTERNAL}/{basis_fname} {self.export_wd}")
-        self.generate_cmake(basis_fname)
+        #self.generate_cmake(basis_fname)
 
     def generate_torchscript(self):
         logging.info("Tracing the model and saving the torchscript to {}".format(self.torchscript_path))
@@ -108,14 +109,23 @@ class Export:
     def generate_cpp(self):
         logging.info("Saving generated cpp code to {}".format(self.cpp_path))
 
-        mask         = self.evaluator.meta_info["mask"].tolist()
-        NPOLY_TOTAL  = len(mask)
-        NPOLY_MASKED = self.evaluator.meta_info["NPOLY"]
-        NMON         = self.evaluator.meta_info["NMON"]
         NATOMS       = self.evaluator.meta_info["NATOMS"]
 
-        print("mask: {}".format(mask))
-        print("TOTAL_NPOLY: {}".format(NPOLY_TOTAL))
+        if self.poly_source == "MSA":
+            mask         = self.evaluator.meta_info["mask"].tolist()
+            NPOLY_TOTAL  = len(mask)
+            NPOLY_MASKED = self.evaluator.meta_info["NPOLY"]
+            NMON         = self.evaluator.meta_info["NMON"]
+
+            print("mask: {}".format(mask))
+            print("TOTAL_NPOLY: {}".format(NPOLY_TOTAL))
+        elif self.poly_source == "CUSTOM":
+            NPOLY_TOTAL = self.evaluator.meta_info["NPOLY"]
+            NMON = 0
+            NPOLY_MASKED = 0
+            mask = []
+        else:
+            raise ValueError("unreachable")
 
         #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
         #inf_poly[0, 0] = 1.0
@@ -127,6 +137,34 @@ class Export:
         logging.info("[NOTE] Long-range potential is not included in the export code.")
         logging.info("[NOTE] Constant at R=+infinity is not subtracted from the final value.")
         logging.info("[NOTE] The code sets intermolecular Morse coordinates to zero.")
+
+        if self.poly_source == "MSA":
+            decl_apply_mask = "void apply_mask(double* poly, double* poly_masked);"
+            body_apply_mask = """
+void NNPIP::apply_mask(double* poly, double* poly_masked) {
+    size_t j = 0;
+    for (size_t k = 0; k < NPOLY; ++k) {
+        if (mask[k]) {
+            poly_masked[j] = poly[k];
+            j++;
+        }
+    }
+}
+"""
+            decl_extern_poly = """
+extern "C" {
+    void c_evmono(double* x, double* mono);
+    void c_evpoly(double* mono, double* poly);
+}
+"""
+        elif self.poly_source == "CUSTOM":
+            decl_apply_mask = ""
+            body_apply_mask = ""
+            decl_extern_poly = """
+extern "C" {
+    void evpoly(double x[], double p[]);
+}
+"""
 
         cpp_template = """
 #include <cassert>
@@ -144,11 +182,7 @@ const double a0 = 2.0;
 const double NN_BOND_LENGTH = 2.078; // a0
 
 const double HTOCM = 2.194746313702e5;
-
-extern "C" {
-    void c_evmono(double* x, double* mono);
-    void c_evpoly(double* mono, double* poly);
-}
+""" + decl_extern_poly + """
 
 #define ATOMX(x, i) x[3*i]
 #define ATOMY(x, i) x[3*i + 1]
@@ -180,22 +214,21 @@ public:
     double pes(std::vector<double> const& x);
 
     const size_t NATOMS;
-private:
-    void apply_mask(double* poly, double* poly_masked);
+private:""" + decl_apply_mask + """
     void cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2);
 
-    const size_t NMON = """ + str(NMON) + """;
+    //const size_t NMON = """ + str(NMON) + """;
     const size_t NPOLY = """ + str(NPOLY_TOTAL) + """;
-    const size_t NPOLY_MASKED = """ + str(NPOLY_MASKED) + """;
+    //const size_t NPOLY_MASKED = """ + str(NPOLY_MASKED) + """;
 
     const size_t NDIS;
 
     double *yij;
     double *mono;
     double *poly;
-    double *poly_masked;
+    //double *poly_masked;
 
-    int mask[""" + str(NPOLY_TOTAL) + """] = {""" + ", ".join(list(map(str, mask))) + """};
+    //int mask[""" + str(NPOLY_TOTAL) + """] = {""" + ", ".join(list(map(str, mask))) + """};
 
     torch::jit::script::Module model;
     at::Tensor t;
@@ -205,9 +238,9 @@ NNPIP::NNPIP(const size_t NATOMS, std::string const& pt_fname)
     : NATOMS(NATOMS), NDIS(NATOMS * (NATOMS - 1) / 2)
 {
     yij = new double [NDIS];
-    mono = new double [NMON];
+    //mono = new double [NMON];
     poly = new double [NPOLY];
-    poly_masked = new double [NPOLY_MASKED];
+    //poly_masked = new double [NPOLY_MASKED];
 
     try {
         model = torch::jit::load(pt_fname);
@@ -223,9 +256,9 @@ NNPIP::NNPIP(const size_t NATOMS, std::string const& pt_fname)
 NNPIP::~NNPIP()
 {
     delete yij;
-    delete mono;
+    //delete mono;
     delete poly;
-    delete poly_masked;
+    //delete poly_masked;
 }
 
 void NNPIP::cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2)
@@ -268,17 +301,7 @@ void NNPIP::cart2internal(std::vector<double> const& cart, double & R, double & 
         ph2 = std::atan2(delta(1) / N2_len / sin_th2, delta(0) / N2_len / sin_th2);
     }
 }
-
-void NNPIP::apply_mask(double* poly, double* poly_masked) {
-    size_t j = 0;
-    for (size_t k = 0; k < NPOLY; ++k) {
-        if (mask[k]) {
-            poly_masked[j] = poly[k];
-            j++;
-        }
-    }
-}
-
+""" + body_apply_mask + """
 double NNPIP::pes(std::vector<double> const& x) {
     double drx, dry, drz;
 
@@ -310,12 +333,14 @@ double NNPIP::pes(std::vector<double> const& x) {
 
     assert((k == NDIS) && ": ERROR: the morse variables vector is not filled properly.");
 
-    c_evmono(yij, mono);
-    c_evpoly(mono, poly);
+    //c_evmono(yij, mono);
+    //c_evpoly(mono, poly);
+    evpoly(yij, poly);
 
-    apply_mask(poly, poly_masked);
+    //apply_mask(poly, poly_masked);
 
-    t = torch::from_blob(poly_masked, {static_cast<long int>(NPOLY_MASKED)}, torch::kDouble);
+    //t = torch::from_blob(poly_masked, {static_cast<long int>(NPOLY_MASKED)}, torch::kDouble);
+    t = torch::from_blob(poly, {static_cast<long int>(NPOLY)}, torch::kDouble);
     return model.forward({t}).toTensor().item<double>();
 }
 
@@ -432,7 +457,7 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = "models/exp01"
+    MODEL_FOLDER = "models/exp11"
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
         try:
@@ -444,7 +469,7 @@ if __name__ == "__main__":
 
     evaluator = retrieve_checkpoint(cfg)
 
-    Export(cfg, evaluator).run()
+    Export(cfg, evaluator, poly_source="CUSTOM").run()
 
     cfg_dataset = cfg['DATASET']
     logging.info("Loading training dataset from TRAIN_DATA_PATH={}".format(cfg_dataset['TRAIN_DATA_PATH']))
@@ -454,24 +479,14 @@ if __name__ == "__main__":
     val   = PolyDataset.from_pickle(cfg_dataset['VAL_DATA_PATH'])
     test  = PolyDataset.from_pickle(cfg_dataset['TEST_DATA_PATH'])
 
-    NPOLY = 79
-    X0 = train.X[0].view((1, NPOLY))
+    X0 = train.X[0].view((1, train.NPOLY))
     y0 = evaluator(X0)
     logging.info("Expected output of the exported model on the first configuration: {}".format(y0.item()))
     logging.info("Dataset energy value: {}".format(train.y[0]))
 
-    #X0 = X[-1].view((1, meta_info["NPOLY"]))
-    #X0 = xscaler.transform(X0)
 
-    #with torch.no_grad():
-    #    ytr = model(X0)
-
-    #NPOLY = meta_info["NPOLY"]
     #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
     #inf_poly[0, 0] = 1.0
     #inf_poly = xscaler.transform(inf_poly)
     #inf_pred = model(inf_poly)
     #inf_pred = inf_pred * yscaler.std + yscaler.mean
-
-    #ytr = ytr * yscaler.std + yscaler.mean - inf_pred
-    #logging.info("Expected output of the exported model: {}".format(ytr.item()))

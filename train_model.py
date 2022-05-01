@@ -6,6 +6,7 @@ import logging
 import random
 import os
 import sys
+import time
 import yaml
 
 import numpy as np
@@ -260,12 +261,14 @@ class Training:
                 layer.reset_parameters()
 
     def train_model(self):
+        start = time.time()
+
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
         for epoch in range(MAX_EPOCHS):
             self.train_epoch(epoch)
 
             with torch.no_grad():
-                model.eval()
+                self.model.eval()
 
                 pred_val = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, pred_val)
@@ -275,9 +278,11 @@ class Training:
             current_lr = self.optimizer.param_groups[0]['lr']
             logging.info("Current learning rate: {:.2e}".format(current_lr))
 
-            logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1\n".format(
+            logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
                 epoch, self.metric_train, self.metric_val
             ))
+            end = time.time()
+            logging.info("Elapsed time: {:.0f}s\n".format(end - start))
 
             self.es(self.metric_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
             if self.es.status:
@@ -340,7 +345,7 @@ if __name__ == "__main__":
     stdout_handler.setLevel(logging.INFO)
     stdout_handler.setFormatter(formatter)
 
-    MODEL_FOLDER = "models/exp10"
+    MODEL_FOLDER = "models/rigid+nonrigid/L2"
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)
@@ -378,12 +383,4 @@ if __name__ == "__main__":
     t = Training(model, cfg, train, val, test, xscaler, yscaler)
     model = t.train_model()
     t.model_eval()
-
-
-
-
-
-
-
-
 

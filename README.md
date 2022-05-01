@@ -6,4 +6,10 @@ This is a software designed to fit potential energy surfaces using neural networ
 * `genpip.py`  -- invokes MSA library to generate PIP basis in the form of dynamic library `.so`
 * `dataset.py` -- prepares an array of the values of the invariant polynomials in the provided configurations
 * `lsqfit.py`  -- generates a Fortran program that performs least-squares regression on the Dataset values [calls dgells/LAPACK routine]
-* `train.py`   -- [work in progress] trains an MLP model to the dataset and utilizes Optuna library to optimize the neural network architecture    
+* `train.py`   -- [work in progress] trains an MLP model to the dataset and utilizes Optuna library to optimize the neural network architecture   
+
+### Pipeline
+
+* train model using `train.py` script
+* plot errors using `eval_model.py` script
+* export model to TorchScript using `export_model.py` script 

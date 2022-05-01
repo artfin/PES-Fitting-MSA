@@ -1,6 +1,9 @@
 Second-order optimizers are generally better in the convergence-critical tasks than first-optimizers. Both scikit-learn and PyTorch provide an LBFGS optimizer. Matlab provides Levenberg-Marquardt among others. Second-order optimizers require quadratic storage and cubic computation time for each gradient update. This becomes impractical for deep models. Approximate algorithms such as quasi-Newton methods are
 aimed at significantly reducing these requirements.
 
+Linear regression with PyTorch
+https://soham.dev/posts/linear-regression-pytorch/
+
 https://arxiv.org/abs/2002.09018
 Scalable Second Order Optimization for Deep Learning
 
@@ -20,4 +23,12 @@ Here are a couple of the third-party LBFGS optimizers for PyTorch:
 * loss function: 
   - MSE
   - RMSE
+
+
+# Porting a Pytorch model to C++
+https://www.analyticsvidhya.com/blog/2021/04/porting-a-pytorch-model-to-c/
+
+1) TorchScript [EXPERIMENTING NOW]
+2) ONNX (Open Neural Network Exchange) [python torch -> ONNX -> header/shared library (RUST cbindgen)]
+3) TFLite (Tensorflow Lite) [python torch -> ONNX -> tensorflow model (onnx-tf) -> tensorflow lite model (tflite)]
 
