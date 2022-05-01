@@ -1,8 +1,10 @@
 import ctypes as ct
 import logging
-import numpy as np
 import json
+import numpy as np
+from numpy.ctypeslib import ndpointer
 import os
+import re
 
 from itertools import combinations
 
@@ -25,93 +27,126 @@ class PolyDataset_t:
     X        : torch.Tensor
     y        : torch.Tensor
 
-class JSONNumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-
-        return super(JSONNumpyEncoder, self).default(obj)
-
+# NOTE: move to YAML config
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
+POLYNOMIAL_LIB = "CUSTOM"
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, xyz_fname, order, symmetry, set_intermolecular_to_zero=True): #, lr_model=None):
+    def __init__(self, wdir, xyz_file, order, symmetry, set_intermolecular_to_zero=True): #, lr_model=None):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
-
-        self.xyz_fname = xyz_fname
-        logging.info("loading configurations from xyz file: {}".format(self.xyz_fname))
-        self.xyz = self.load()
 
         self.order = order
         self.symmetry = symmetry
         self.set_intermolecular_to_zero = set_intermolecular_to_zero
 
+        logging.info("Loading configurations from xyz_file: {}".format(xyz_file))
+
+        xyz_configs = self.load_xyz(xyz_file)
+        X, y = self.prepare_dataset_from_configs(xyz_configs)
+
+        if POLYNOMIAL_LIB == "MSA":
+            self.mask = X.abs().sum(dim=0).bool().numpy().astype(int)
+            logging.info("Applying non-zero mask. Selecting {} polynomials out of {} initially...".format(
+                self.mask.sum(), len(self.mask)
+            ))
+
+            nonzero_index = self.mask.nonzero()[0].tolist()
+            logging.info("indices of non-zero polynomials: {}".format(nonzero_index))
+            logging.info(json.dumps(nonzero_index))
+
+            self.NPOLY = self.mask.sum()
+            X = X[:, self.mask.astype(np.bool)]
+
+            logging.info("New size of the X-array: {}".format(X.size()))
+
+        self.X, self.y = X, y
+
+    def prepare_dataset_from_configs(self, xyz_configs):
         logging.info("preparing atomic distances..")
+
         self.NDIS = self.NATOMS * (self.NATOMS - 1) // 2
-        yij       = self.make_yij(self.xyz)
+
+        yij = self.make_yij(xyz_configs)
         logging.info("Done.")
 
-        stub       = '_{}_{}'.format(symmetry.replace(' ', '_'), order)
-        MONO_fname = os.path.join(wdir, 'MOL' + stub + '.MONO')
-        POLY_fname = os.path.join(wdir, 'MOL' + stub + '.POLY')
-        self.NMON  = sum(1 for line in open(MONO_fname))
-        self.NPOLY = sum(1 for line in open(POLY_fname))
-        logging.info("detected NMON  = {}".format(self.NMON))
-        logging.info("detected NPOLY = {}".format(self.NPOLY))
+        if POLYNOMIAL_LIB == "MSA":
+            logging.info("using MSA dynamic library to compute invariant polynomials")
 
-        self.LIBNAME = os.path.join(self.wdir, 'basis' + stub + '.so')
-        self.setup_fortran_procs()
+            stub       = '_{}_{}'.format(symmetry.replace(' ', '_'), order)
+            MONO_fname = os.path.join(wdir, 'MOL' + stub + '.MONO')
+            POLY_fname = os.path.join(wdir, 'MOL' + stub + '.POLY')
+            self.NMON  = sum(1 for line in open(MONO_fname))
+            self.NPOLY = sum(1 for line in open(POLY_fname))
+            logging.info("detected NMON  = {}".format(self.NMON))
+            logging.info("detected NPOLY = {}".format(self.NPOLY))
 
-        x = np.zeros((self.NDIS, 1), order="F")
-        m = np.zeros((self.NMON, 1), order="F")
-        p = np.zeros((self.NPOLY, 1), order="F")
-        poly = np.zeros((self.NCONFIGS, self.NPOLY))
+            self.F_LIBNAME = os.path.join(self.wdir, 'f_basis' + stub + '.so')
+            self.setup_fortran_procs()
 
-        logging.info("calling MSA to compute polynomials...")
+            x = np.zeros((self.NDIS, 1))
+            m = np.zeros((self.NMON, 1))
+            p = np.zeros((self.NPOLY, 1))
+        elif POLYNOMIAL_LIB == "CUSTOM":
+            logging.info("using custom C dynamic library to compute invariant polynomials")
 
-        for n in range(0, self.NCONFIGS):
+            stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+            self.C_LIBNAME = os.path.join(self.wdir, 'c_basis' + stub + '.so')
+            self.setup_c_procs()
+
+            C_LIBNAME_CODE = os.path.join(self.wdir, 'c_basis' + stub + '.cc')
+            with open(C_LIBNAME_CODE, mode='r') as fp:
+                lines = "".join(fp.readlines())
+
+            pattern = "double p\[(\d+)\]"
+            found = re.findall(pattern, lines)
+            self.NPOLY = int(found[0])
+            self.NMON = None
+
+            x = np.zeros((self.NDIS,  1))
+            p = np.zeros((self.NPOLY, 1))
+        else:
+            raise ValueError("unreachable")
+
+        NCONFIGS = len(xyz_configs)
+        poly = np.zeros((NCONFIGS, self.NPOLY))
+
+        logging.info("Computing polynomials...")
+
+        for n in range(0, NCONFIGS):
             x = yij[n, :].copy()
 
-            x_ptr = x.ctypes.data_as(ct.POINTER(ct.c_double))
-            m_ptr = m.ctypes.data_as(ct.POINTER(ct.c_double))
-            self.evmono(x_ptr, m_ptr)
+            if POLYNOMIAL_LIB == "MSA":
+                self.evmono(x, m)
+                self.evpoly(m, p)
 
-            p_ptr = p.ctypes.data_as(ct.POINTER(ct.c_double))
-            self.evpoly(m_ptr, p_ptr)
+                assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
+                assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
+                assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
+            elif POLYNOMIAL_LIB == "CUSTOM":
+                self.evpoly(x, p)
 
-            assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
-            assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
-
-            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
+                assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by C_evpoly"
+                assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by C_evpoly"
+            else:
+                raise ValueError("unreachable")
 
             poly[n, :] = p.reshape((self.NPOLY, )).copy()
 
         logging.info("Done.")
 
-        energies = np.zeros((self.NCONFIGS, 1))
-        for ind, xyz_config in enumerate(self.xyz):
+        energies = np.zeros((NCONFIGS, 1))
+        for ind, xyz_config in enumerate(xyz_configs):
             energies[ind] = xyz_config.energy
+        # NOTE: LR-model is to added here
         #    if lr_model is not None:
         #        energies[ind] -= lr_model(ind)
 
-        self.X = torch.from_numpy(poly)
-        self.y = torch.from_numpy(energies)
+        X = torch.from_numpy(poly)
+        y = torch.from_numpy(energies)
 
-        self.mask = self.X.abs().sum(dim=0).bool().numpy().astype(int)
-        logging.info("Applying non-zero mask. Selecting {} polynomials out of {} initially...".format(
-            self.mask.sum(), len(self.mask)
-        ))
-
-        self.NPOLY = self.mask.sum()
-        self.X     = self.X[:, self.mask.astype(np.bool)]
-
-        logging.info("New size of the X-array: {}".format(self.X.size()))
+        return X, y
 
     @classmethod
     def from_pickle(cls, path):
@@ -125,22 +160,28 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
-    def load(self):
-        nlines = sum(1 for line in open(self.xyz_fname))
+    def load_xyz(self, fpath):
+        nlines = sum(1 for line in open(fpath, mode='r'))
+        NATOMS = int(open(fpath, mode='r').readline())
+        if hasattr(self, 'NATOMS'):
+            assert self.NATOMS == NATOMS
+            logging.info("NATOMS is consistent.")
+        else:
+            self.NATOMS = NATOMS
+            logging.info("Setting NATOMS attribute.")
 
-        self.NATOMS = int(open(self.xyz_fname).readline())
         logging.info("detected NATOMS = {}".format(self.NATOMS))
 
-        self.NCONFIGS = nlines // (self.NATOMS + 2)
-        logging.info("detected NCONFIGS = {}".format(self.NCONFIGS))
+        NCONFIGS = nlines // (self.NATOMS + 2)
+        logging.info("detected NCONFIGS = {}".format(NCONFIGS))
 
         xyz_configs = []
-        with open(self.xyz_fname, mode='r') as inp:
-            for i in range(self.NCONFIGS):
+        with open(fpath, mode='r') as inp:
+            for i in range(NCONFIGS):
                 line = inp.readline()
                 energy = float(inp.readline())
 
-                atoms = np.zeros((self.NATOMS, 3))
+                atoms = np.zeros((NCONFIGS, 3))
                 for natom in range(self.NATOMS):
                     words = inp.readline().split()
                     atoms[natom, :] = list(map(float, words[1:]))
@@ -150,14 +191,15 @@ class PolyDataset(Dataset):
 
         return xyz_configs
 
-    def make_yij(self, configs):
+    def make_yij(self, xyz_configs):
         if self.set_intermolecular_to_zero:
             logging.info("setting intermolecular Morse variables to zero")
 
-        yij = np.zeros((self.NCONFIGS, self.NDIS), order="F")
+        NCONFIGS = len(xyz_configs)
+        yij = np.zeros((NCONFIGS, self.NDIS), order="F")
 
-        for n in range(self.NCONFIGS):
-            c = configs[n]
+        for n in range(NCONFIGS):
+            c = xyz_configs[n]
 
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
@@ -187,23 +229,18 @@ class PolyDataset(Dataset):
         return yij
 
     def setup_fortran_procs(self):
-        basislib = ct.CDLL(self.LIBNAME)
+        logging.info("Loading and setting up Fortran procedures from LIBNAME: {}".format(self.F_LIBNAME))
+        basislib = ct.CDLL(self.F_LIBNAME)
 
         self.evmono = basislib.c_evmono
-        self.evmono.argtypes = [ct.POINTER(ct.c_double), ct.POINTER(ct.c_double)]
-
         self.evpoly = basislib.c_evpoly
-        self.evpoly.argtypes = [ct.POINTER(ct.c_double), ct.POINTER(ct.c_double)]
 
+        self.evmono.argtypes = [ndpointer(ct.c_double, flags="F_CONTIGUOUS"), ndpointer(ct.c_double, flags="F_CONTIGUOUS")]
+        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="F_CONTIGUOUS"), ndpointer(ct.c_double, flags="F_CONTIGUOUS")]
 
-    def make_dict(self):
-        return dict(NATOMS=self.NATOMS, NMON=self.NMON, NPOLY=self.NPOLY, symmetry=self.symmetry, order=self.order, mask=self.mask, X=self.X, y=self.y)
+    def setup_c_procs(self):
+        logging.info("Loading and setting up C procedures from LIBNAME: {}".format(self.C_LIBNAME))
+        basislib = ct.CDLL(self.C_LIBNAME)
 
-    def save_pickle(self, fname):
-        torch.save(self.make_dict(), fname)
-
-    def save_json(self, fname):
-        with open(fname, 'w') as fp:
-            json.dump(dict(NATOMS=self.NATOMS, NMON=self.NMON, NPOLY=self.NPOLY, symmetry=self.symmetry, order=self.order,
-                           mask=self.mask, X=self.X.numpy(), y=self.y.numpy()), cls=JSONNumpyEncoder, fp=fp)
-
+        self.evpoly = basislib.evpoly
+        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="C_CONTIGUOUS"), ndpointer(ct.c_double, flags="C_CONTIGUOUS")]
