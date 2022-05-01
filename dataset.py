@@ -74,9 +74,9 @@ class PolyDataset(Dataset):
         if POLYNOMIAL_LIB == "MSA":
             logging.info("using MSA dynamic library to compute invariant polynomials")
 
-            stub       = '_{}_{}'.format(symmetry.replace(' ', '_'), order)
-            MONO_fname = os.path.join(wdir, 'MOL' + stub + '.MONO')
-            POLY_fname = os.path.join(wdir, 'MOL' + stub + '.POLY')
+            stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+            MONO_fname = os.path.join(self.wdir, 'MOL' + stub + '.MONO')
+            POLY_fname = os.path.join(self.wdir, 'MOL' + stub + '.POLY')
             self.NMON  = sum(1 for line in open(MONO_fname))
             self.NPOLY = sum(1 for line in open(POLY_fname))
             logging.info("detected NMON  = {}".format(self.NMON))
