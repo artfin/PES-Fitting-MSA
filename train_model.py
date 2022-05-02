@@ -72,7 +72,7 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
 class WRMSELoss_Boltzmann(torch.nn.Module):
     def __init__(self, e_factor):
         super().__init__()
-        self.e_factor = e_factor
+        self.e_factor = torch.tensor(e_factor).to(DEVICE)
 
     def forward(self, y, y_pred):
         w = torch.exp(-y * self.e_factor)
@@ -276,6 +276,8 @@ class Training:
         self.val.X = self.val.X.to(DEVICE)
         self.val.y = self.val.y.to(DEVICE)
 
+        self.loss_fn = self.loss_fn.to(DEVICE)
+
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
         for epoch in range(MAX_EPOCHS):
             self.train_epoch(epoch)
@@ -327,6 +329,9 @@ class Training:
         self.metric_train = self.get_metric(loss_train)
 
     def model_eval(self):
+        self.test.X = self.test.X.to(DEVICE)
+        self.test.y = self.test.y.to(DEVICE)
+
         with torch.no_grad():
             self.model.eval()
 
@@ -350,6 +355,7 @@ class Training:
 
 if __name__ == "__main__":
     logger = logging.getLogger()
+    logger.handlers = []
     logger.setLevel(logging.INFO)
 
     formatter = logging.Formatter('[%(levelname)s] %(message)s')
