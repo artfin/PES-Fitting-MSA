@@ -17,6 +17,8 @@ from sklearn.preprocessing import StandardScaler
 from dataset import PolyDataset
 from build_model import build_network_yaml
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 def seed_torch(seed=42):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -268,6 +270,12 @@ class Training:
     def train_model(self):
         start = time.time()
 
+        self.model = self.model.to(DEVICE)
+        self.train.X = self.train.X.to(DEVICE)
+        self.train.y = self.train.y.to(DEVICE)
+        self.val.X = self.val.X.to(DEVICE)
+        self.val.y = self.val.y.to(DEVICE)
+
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
         for epoch in range(MAX_EPOCHS):
             self.train_epoch(epoch)
@@ -352,7 +360,12 @@ if __name__ == "__main__":
 
     seed_torch()
 
-    MODEL_FOLDER = "models/rigid/L1/L1-tanh/";
+    if DEVICE.type == 'cuda':
+        logging.info(torch.cuda.get_device_name(0))
+        logging.info("Memory usage:")
+        logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
+
+    MODEL_FOLDER = "models/rigid/L1/L1-tanh/"
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)

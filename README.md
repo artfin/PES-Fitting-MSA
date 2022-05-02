@@ -15,7 +15,7 @@ This is a software designed to fit potential energy surfaces using neural networ
 
 ### Pipeline
 
-* train model using `train.py` script
+* train model using `train_model.py` script
 * plot errors using `eval_model.py` script
 * export model to TorchScript using `export_model.py` script 
 

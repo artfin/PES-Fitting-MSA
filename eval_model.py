@@ -123,7 +123,7 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
     plt.xlim((-200.0, 2000.0))
-    plt.ylim((-10.0, 10.0))
+    plt.ylim((-30.0, 30.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -214,7 +214,8 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = "models/rigid/L1/L1-tanh/";
+    #MODEL_FOLDER = "models/rigid/L1/L1-tanh/"
+    MODEL_FOLDER = "models/nonrigid/L1/L1-silu/"
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
         try:
