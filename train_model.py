@@ -17,12 +17,16 @@ from sklearn.preprocessing import StandardScaler
 from dataset import PolyDataset
 from build_model import build_network_yaml
 
-np.random.seed(42)
-random.seed(42)
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.cuda.manual_seed_all(42)
-torch.use_deterministic_algorithms(True)
+def seed_torch(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
 
 def preprocess_dataset(train, val, test, cfg_preprocess):
     if cfg_preprocess['NORMALIZE'] == 'std':
@@ -345,6 +349,8 @@ if __name__ == "__main__":
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(logging.INFO)
     stdout_handler.setFormatter(formatter)
+
+    seed_torch()
 
     MODEL_FOLDER = "models/rigid/L1/L1-tanh/";
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
