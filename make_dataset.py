@@ -8,16 +8,16 @@ import torch
 
 from dataset import PolyDataset
 
-DATASET_POSTFIX = "-rigid+nonrigid"
-XYZ_PATHS = [
-    os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-    os.path.join("datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
-]
-
-#DATASET_POSTFIX = "-rigid"
-#XYZ_PATHS = {
+#DATASET_POSTFIX = "-rigid+nonrigid"
+#XYZ_PATHS = [
 #    os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#}
+#    os.path.join("datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
+#]
+
+DATASET_POSTFIX = "-rigid"
+XYZ_PATHS = {
+    os.path.join("datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+}
 
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -43,7 +43,7 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    order     = "5"
+    order     = "4"
     wdir      = "datasets/external"
     symmetry  = "4 2 1"
 

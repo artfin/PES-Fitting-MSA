@@ -22,6 +22,7 @@ random.seed(42)
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
+torch.use_deterministic_algorithms(True)
 
 def preprocess_dataset(train, val, test, cfg_preprocess):
     if cfg_preprocess['NORMALIZE'] == 'std':

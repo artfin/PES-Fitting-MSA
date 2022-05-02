@@ -8,6 +8,8 @@ import re
 
 from itertools import combinations
 
+from genpip import cl 
+
 import torch
 from torch.utils.data import Dataset
 
@@ -93,6 +95,24 @@ class PolyDataset(Dataset):
 
             stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             self.C_LIBNAME = os.path.join(self.wdir, 'c_basis' + stub + '.so')
+
+            if not os.path.isfile(self.C_LIBNAME):
+                logging.info("compiling custom C dynamic library")
+                assert False
+                import resource
+                print(resource.getrlimit(resource.RLIMIT_AS))
+                #fpath = os.path.join(wdir, fname)
+                st = cl('gcc -c -fPIC c_basis_4_2_1_4.cc -o c_basis_4_2_1_4.o')
+                logging.info(st.stdout)
+                st = cl('gcc -shared -o c_basis_4_2_1_4.so c_basis_4_2_1_4.o')
+                logging.info(st.stdout)
+
+                #import subprocess
+                #subprocess.call(['sh', os.path.join(self.wdir, 'build_shared.sh'), self.order])
+                #subprocess.call('sh datasets/external/build_shared.sh 4')
+
+
+            assert os.path.isfile(self.C_LIBNAME)
             self.setup_c_procs()
 
             C_LIBNAME_CODE = os.path.join(self.wdir, 'c_basis' + stub + '.cc')
