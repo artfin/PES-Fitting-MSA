@@ -345,7 +345,7 @@ if __name__ == "__main__":
     stdout_handler.setLevel(logging.INFO)
     stdout_handler.setFormatter(formatter)
 
-    MODEL_FOLDER = "models/rigid+nonrigid/L2"
+    MODEL_FOLDER = "models/rigid/L1/L1-tanh/";
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)

@@ -1,3 +1,6 @@
-*
+nonrigid/*
 
-!.gitignore
+rigid/*
+!rigid/
+
+!rigid/L1

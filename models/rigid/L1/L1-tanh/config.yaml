@@ -1,0 +1,34 @@
+DATASET: 
+  TRAIN_DATA_PATH: datasets/interim/poly_4_2_1_4-train-rigid.pk
+  VAL_DATA_PATH: datasets/interim/poly_4_2_1_4-val-rigid.pk
+  TEST_DATA_PATH: datasets/interim/poly_4_2_1_4-test-rigid.pk
+  NORMALIZE: std 
+
+MODEL:
+  ACTIVATION: Tanh
+  HIDDEN_DIMS: [10]
+
+SOLVER:
+  MAX_EPOCHS: 2000
+  OPTIMIZER:
+    NAME: LBFGS
+    LR: 1.0
+    TOLERANCE_GRAD: 1.0e-14
+    TOLERANCE_CHANGE: 1.0e-14
+  LOSS:
+    NAME: WRMSE
+    WEIGHT_TYPE: Boltzmann
+    EFFECTIVE_TEMPERATURE: 2000.0
+  SCHEDULER:
+    NAME: ReduceLROnPlateau
+    LR_REDUCE_GAMMA: 0.5
+    PATIENCE: 30 
+    THRESHOLD: 0.1
+    THRESHOLD_MODE: abs
+    COOLDOWN: 3
+    MIN_LR: 1.0e-5
+  EARLY_STOPPING:
+    PATIENCE: 100 
+    TOLERANCE: 0.05
+
+OUTPUT_PATH: models/rigid/L1/L1-tanh
