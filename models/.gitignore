@@ -1,6 +1,7 @@
 nonrigid/*
+!nonrigid/
+!nonrigid/L1/L1-tanh/config.yaml
 
 rigid/*
 !rigid/
-
-!rigid/L1
+!rigid/L1/L1-tanh/config.yaml
