@@ -9,40 +9,23 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
 from sklearn.model_selection import train_test_split
-
-from util import IdentityScaler, StandardScaler
-from util import chi_split
 from genpip import cmdstat, cl
 
-np.random.seed(42)
-random.seed(42)
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.cuda.manual_seed_all(42)
+import pathlib
+BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-plt.rcParams["mathtext.fontset"] = "cm"
-mpl.rcParams['font.serif'] = 'Times'
+plt.style.use('science')
 
-latex_params = {
-    "pgf.texsystem": "pdflatex",
-    'figure.titlesize' : 'large',
-    "text.usetex": True,
+plt.rcParams.update({
     "font.family": "serif",
-    "font.serif": 'Times',
-    "font.monospace": [],
-    "axes.labelsize": 21,
-    "font.size": 10,
-    "legend.fontsize": 21,
-    "xtick.labelsize": 21,
-    "ytick.labelsize": 21,
-    #"text.latex.preamble": [
-    #    r"\usepackage[utf8]{inputenc}",    # use utf8 fonts 
-    #    r"\usepackage[detect-all]{siunitx}",
-    #]
-}
+    "font.serif" : ["Times"],
+    'figure.titlesize' : "Large",
+    "axes.labelsize" : 21,
+    "xtick.labelsize" : 18,
+    "ytick.labelsize" : 18,
+})
 
-mpl.rcParams.update(latex_params)
-HTOCM = 2.194746313702e5
+BOHRTOANG = 0.529177249
 
 SCALE_OPTIONS = [None, "std"]
 
@@ -93,43 +76,184 @@ def show_feature_distribution(X, idx):
     plt.hist(feature, bins=500)
     plt.show()
 
-def pretty_round(x, base=500.0):
-    return round(x / base) * base
 
-def show_energy_distribution(y, xlim=(-500, 500), ylim=(1e2, 6e4), figname=None):
-    energies = y.numpy() * HTOCM
 
-    plt.style.use('dark_background')
-    plt.figure(figsize=(10, 10))
+from dataclasses import dataclass
+from typing import List
 
-    ax = plt.gca()
-    plt.xlabel(r"Energy, cm$^{-1}$")
-    plt.ylabel(r"Number of points")
+@dataclass
+class XYZConfig:
+    atoms  : np.array
+    energy : float
 
-    plt.xlim(xlim)
+class XYZPlotter:
+    def __init__(self, fpath):
+        self.xyz_configs = self.load_xyz(fpath)
 
-    plt.hist(energies, bins=300, width=150.0, color='#88B04B')
+    def make_histogram_CH_distance(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        CH_dist = np.zeros((NCONFIGS * 4, 1))
 
-    plt.yscale('log')
-    plt.ylim(ylim)
+        k = 0
+        for xyz_config in self.xyz_configs:
+            r1 = np.linalg.norm(xyz_config.atoms[0, :] - xyz_config.atoms[6, :])
+            r2 = np.linalg.norm(xyz_config.atoms[1, :] - xyz_config.atoms[6, :])
+            r3 = np.linalg.norm(xyz_config.atoms[2, :] - xyz_config.atoms[6, :])
+            r4 = np.linalg.norm(xyz_config.atoms[3, :] - xyz_config.atoms[6, :])
 
-    ax.yaxis.set_major_formatter(ScalarFormatter())
+            CH_dist[k]     = r1
+            CH_dist[k + 1] = r2
+            CH_dist[k + 2] = r3
+            CH_dist[k + 3] = r4
+            k = k + 4
 
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5000.0))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
+        CH_dist = CH_dist * BOHRTOANG
 
-    #ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
-    #ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
-    #ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
-    #ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+        CH_ref_dist = 1.08601
 
-    if figname is not None:
-        plt.savefig(figname, format='png', dpi=300)
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
 
-    plt.show()
+        plt.hist(CH_dist, color='#88B04B', bins='auto')
+        plt.axvline(CH_ref_dist, color='#FF6F61', linewidth=3)
 
-def trim_png(figname):
-    cl('convert {0} -trim +repage {0}'.format(figname))
+        plt.title("May 03; NCONFIGS={}".format(NCONFIGS))
+        plt.xlabel(r'C--H distance, \AA')
+
+        plt.xlim((1.04, 1.14))
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(0.03))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(0.01))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(200.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        if figpath is not None:
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
+
+        plt.show()
+
+    def make_histogram_HCH_angle(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        HCH_angles = np.zeros((NCONFIGS * 6, 1))
+
+        k = 0
+        for xyz_config in self.xyz_configs:
+            H1 = xyz_config.atoms[0, :] / np.linalg.norm(xyz_config.atoms[0, :] - xyz_config.atoms[6, :])
+            H2 = xyz_config.atoms[1, :] / np.linalg.norm(xyz_config.atoms[1, :] - xyz_config.atoms[6, :])
+            H3 = xyz_config.atoms[2, :] / np.linalg.norm(xyz_config.atoms[2, :] - xyz_config.atoms[6, :])
+            H4 = xyz_config.atoms[3, :] / np.linalg.norm(xyz_config.atoms[3, :] - xyz_config.atoms[6, :])
+
+            HCH_angles[k]     = np.arccos(np.dot(H1, H2))
+            HCH_angles[k + 1] = np.arccos(np.dot(H1, H3))
+            HCH_angles[k + 2] = np.arccos(np.dot(H1, H4))
+            HCH_angles[k + 3] = np.arccos(np.dot(H2, H3))
+            HCH_angles[k + 4] = np.arccos(np.dot(H2, H4))
+            HCH_angles[k + 5] = np.arccos(np.dot(H3, H4))
+            k = k + 6
+
+        HCH_angles = HCH_angles * 180.0 / np.pi
+
+        HCH_ref_angle = np.arccos(-1.0/3.0) / np.pi * 180.0
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        plt.hist(HCH_angles, color='#88B04B', bins='auto')
+        plt.axvline(HCH_ref_angle, color='#FF6F61', linewidth=3)
+
+        plt.title("May 03; NCONFIGS={}".format(NCONFIGS))
+        plt.xlabel(r"$\angle$ HCH angle")
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(10.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(5.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(200.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        if figpath is not None:
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+
+        plt.show()
+
+    def make_energy_distribution(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+
+        energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        #bins = [-200.0, -150.0, -100.0, -50.0, 0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0]
+        #r = ([-200.0, -150.0], [-150.0, -100.0])
+
+        bins = list(50.0 * x for x in range(-4, 21, 1)) + [10000.0]
+        hist, bind_edges = np.histogram(energy, bins)
+
+        plt.bar(range(len(hist)), hist, width=0.8, color='#88B04B')
+
+        ax.set_xticks([0.5 + i for i, _ in enumerate(hist)])
+        ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist[:-1])] + [''])
+        ax.tick_params(axis='x', which='major', labelsize=15, rotation=45)
+
+        plt.xlabel(r"Energy, cm$^{-1}$")
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        if figpath is not None:
+            plt.savefig(figpath, format='png', dpi=300)
+
+        plt.show()
+
+    def load_xyz(self, fpath):
+        nlines = sum(1 for line in open(fpath, mode='r'))
+        NATOMS = int(open(fpath, mode='r').readline())
+        if hasattr(self, 'NATOMS'):
+            assert self.NATOMS == NATOMS
+            logging.info("NATOMS is consistent.")
+        else:
+            self.NATOMS = NATOMS
+            logging.info("Setting NATOMS attribute.")
+
+        logging.info("detected NATOMS = {}".format(self.NATOMS))
+
+        NCONFIGS = nlines // (self.NATOMS + 2)
+        logging.info("detected NCONFIGS = {}".format(NCONFIGS))
+
+        xyz_configs = []
+        with open(fpath, mode='r') as inp:
+            for i in range(NCONFIGS):
+                line = inp.readline()
+                energy = float(inp.readline())
+
+                atoms = np.zeros((NCONFIGS, 3))
+                for natom in range(self.NATOMS):
+                    words = inp.readline().split()
+                    atoms[natom, :] = np.fromiter(map(float, words[1:]), dtype=np.float64)
+
+                c = XYZConfig(atoms=atoms, energy=energy)
+                xyz_configs.append(c)
+
+        return xyz_configs
+
+    def trim_png(self, figname):
+        cl('convert {0} -trim +repage {0}'.format(figname))
+
+
 
 if __name__ == "__main__":
     logger = logging.getLogger()
@@ -140,10 +264,12 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    X, y = load_dataset("CH4-N2", "dataset.pt")
-    figname = "dataset-energy-distribution.png"
-    show_energy_distribution(y, xlim=(-300, 40000), ylim=(1e1, 6e4), figname=figname)
-    trim_png(figname)
+    xyz_nonrigid = os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz")
+    plotter = XYZPlotter(fpath=xyz_nonrigid)
+    plotter.make_histogram_CH_distance()
+    #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
+    #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
+    #plotter.make_energy_distribution()
 
     #X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     #X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)

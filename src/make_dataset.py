@@ -11,16 +11,16 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-#DATASET_POSTFIX = "-nonrigid"
-#XYZ_PATHS = [
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
-#]
-
-DATASET_POSTFIX = "-rigid"
-XYZ_PATHS = {
+DATASET_POSTFIX = "-nonrigid"
+XYZ_PATHS = [
     os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-}
+    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
+]
+
+#DATASET_POSTFIX = "-rigid"
+#XYZ_PATHS = {
+#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#}
 
 order     = "4"
 wdir      = "datasets/external"
@@ -57,6 +57,8 @@ if __name__ == "__main__":
     GLOBAL_MASK     = None
 
     Xs, ys = [], []
+
+    # Adding the label for stratification during splitting
     labels = []
     label = 0
 
