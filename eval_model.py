@@ -186,7 +186,7 @@ class Evaluator:
 
 def retrieve_checkpoint(cfg):
     chk_path = os.path.join(cfg["OUTPUT_PATH"], "checkpoint.pt")
-    checkpoint = torch.load(chk_path)
+    checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
     cfg_model = cfg['MODEL']
@@ -215,7 +215,7 @@ if __name__ == '__main__':
     logger.addHandler(ch)
 
     #MODEL_FOLDER = "models/rigid/L1/L1-tanh/"
-    MODEL_FOLDER = "models/nonrigid/L1/L1-silu/"
+    MODEL_FOLDER = "models/nonrigid/L2/L2-silu/"
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
         try:
