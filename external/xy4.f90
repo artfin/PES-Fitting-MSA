@@ -1,3 +1,11 @@
+! Potential energy surface for CH4 from 
+! A. Owens, S. N. Yurchenko, A. Yachmenev, et al. "A highly accurate ab initio potential energy surface for methane", JCP 145, 104305 (2016).
+! htpps://doi.org/10.1063/1.4962261
+!
+! First call `potinit` to read in the paramters.
+! `poten_xy4` accepts a vector of cartesian coordinates (C, H1, H2, H3, H4) in Angstrom
+! and returns the potential energy in cm-1.
+
 module params
     integer ipar, ieq, parmax, info, term(289)
     double precision  par(2)
@@ -10,7 +18,8 @@ subroutine potinit() bind(C, name="potinit")
     implicit none
 
     !read parameters
-    open (unit=100, file='ch4_cbs-f12-hl_PES.inp')
+    open (unit=100, file='/home/artfin/Desktop/neural-networks/project/PES-Fitting-MSA/external/ch4_cbs-f12-hl_PES.inp')
+    !open (unit=100, file='ch4_cbs-f12-hl_PES.inp')
     read (100, *) parmax
   
     !read eq parameters

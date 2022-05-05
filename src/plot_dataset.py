@@ -14,6 +14,10 @@ from genpip import cmdstat, cl
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
+import sys
+sys.path.insert(0, os.path.join(BASEDIR, "external"))
+from pybind_example import Poten_CH4
+
 plt.style.use('science')
 
 plt.rcParams.update({
@@ -89,6 +93,73 @@ class XYZConfig:
 class XYZPlotter:
     def __init__(self, fpath):
         self.xyz_configs = self.load_xyz(fpath)
+
+    def make_histogram_R(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        R = np.zeros((NCONFIGS, 1))
+
+        for k, xyz_config in enumerate(self.xyz_configs):
+            N2_center = 0.5 * (xyz_config.atoms[4, :] + xyz_config.atoms[5, :])
+            R[k] = np.linalg.norm(N2_center - xyz_config.atoms[6, :])
+
+        R = R * BOHRTOANG
+
+        plt.figure(figsize=(10, 10))
+        plt.hist(R, color='#88B04B', bins='auto')
+
+        if figpath is not None:
+            assert False
+
+        plt.show()
+
+    def make_histogram_CH4_energy(self, figpath=None):
+        pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "obj", "xy4.so"))
+
+        NCONFIGS = len(self.xyz_configs)
+        ch4_energy = np.zeros((NCONFIGS, 1))
+
+        for k, xyz_config in enumerate(self.xyz_configs):
+            CH4_config = np.array([
+                *xyz_config.atoms[6, :] * BOHRTOANG, # C
+                *xyz_config.atoms[0, :] * BOHRTOANG, # H1
+                *xyz_config.atoms[1, :] * BOHRTOANG, # H2
+                *xyz_config.atoms[2, :] * BOHRTOANG, # H3
+                *xyz_config.atoms[3, :] * BOHRTOANG, # H4
+            ])
+
+            ch4_energy[k] = pes.eval(CH4_config)
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        plt.hist(ch4_energy, color='#88B04B', bins='auto')
+
+        if figpath is not None:
+            assert False
+
+        plt.show()
+
+    def make_histogram_NN_distance(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        NN_dist = np.zeros((NCONFIGS, 1))
+
+        for k, xyz_config in enumerate(self.xyz_configs):
+            NN_dist[k] = np.linalg.norm(xyz_config.atoms[4, :] - xyz_config.atoms[5, :])
+
+        NN_dist = NN_dist * BOHRTOANG
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        NN_ref_dist = 1.09768 # A
+
+        plt.hist(NN_dist, color='#88B04B', bins='auto')
+        plt.axvline(NN_ref_dist, color='#FF6F61', linewidth=3)
+
+        if figpath is not None:
+            assert False
+
+        plt.show()
 
     def make_histogram_CH_distance(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
@@ -198,7 +269,7 @@ class XYZPlotter:
         #bins = [-200.0, -150.0, -100.0, -50.0, 0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0]
         #r = ([-200.0, -150.0], [-150.0, -100.0])
 
-        bins = list(50.0 * x for x in range(-4, 21, 1)) + [10000.0]
+        bins = list(100.0 * x for x in range(-3, 21, 1)) + [10000.0]
         hist, bind_edges = np.histogram(energy, bins)
 
         plt.bar(range(len(hist)), hist, width=0.8, color='#88B04B')
@@ -266,7 +337,11 @@ if __name__ == "__main__":
 
     xyz_nonrigid = os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz")
     plotter = XYZPlotter(fpath=xyz_nonrigid)
-    plotter.make_histogram_CH_distance()
+    plotter.make_histogram_CH4_energy()
+
+    #plotter.make_histogram_R()
+    #plotter.make_histogram_NN_distance()
+    #plotter.make_histogram_CH_distance()
     #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
     #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
     #plotter.make_energy_distribution()
