@@ -102,13 +102,25 @@ class WRMSELoss_PS(torch.nn.Module):
     """
     def __init__(self, Emax=2000.0):
         super().__init__()
-        self.Emax = torch.FloatTensor([Emax])
+        self.Emax   = torch.FloatTensor([Emax])
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist())
+        self.y_std  = torch.FloatTensor(y_std.tolist())
 
     def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
+
         N = 1e-4
         Ehat = torch.max(y, self.Emax.expand_as(y))
         w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
-        print(w)
         wmse = (w * (y - y_pred)**2).mean()
 
         return torch.sqrt(wmse)
@@ -186,6 +198,9 @@ class Training:
         self.scheduler = self.build_scheduler()
         self.loss_fn = self.build_loss()
 
+        if isinstance(self.loss_fn, WRMSELoss_PS):
+            self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+
         output_path = cfg.get('OUTPUT_PATH', '')
         self.es = self.build_early_stopper(output_path=output_path)
         self.meta_info = {
@@ -224,7 +239,7 @@ class Training:
             dwt = cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
         elif cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'PS':
-            Emax = cfg_loss.get('Emax', 2000.0)
+            Emax = cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
         else:
             raise ValueError("unreachable")
@@ -392,7 +407,8 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-3")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
