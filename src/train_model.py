@@ -102,13 +102,13 @@ class WRMSELoss_PS(torch.nn.Module):
     """
     def __init__(self, Emax=2000.0):
         super().__init__()
-        self.Emax   = torch.FloatTensor([Emax])
+        self.Emax   = torch.FloatTensor([Emax]).to(DEVICE)
         self.y_mean = None
         self.y_std  = None
 
     def set_scale(self, y_mean, y_std):
-        self.y_mean = torch.FloatTensor(y_mean.tolist())
-        self.y_std  = torch.FloatTensor(y_std.tolist())
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
     def forward(self, y, y_pred):
         assert self.y_mean is not None
@@ -408,7 +408,7 @@ if __name__ == "__main__":
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-3")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
