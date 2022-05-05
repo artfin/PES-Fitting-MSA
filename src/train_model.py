@@ -95,7 +95,23 @@ class WRMSELoss_Ratio(torch.nn.Module):
 
         return torch.sqrt(wmse)
 
+class WRMSELoss_PS(torch.nn.Module):
+    """
+    Weight factors of the form suggested by Partridge and Schwenke
+    H. Partridge, D. W. Schwenke, J. Chem. Phys. 106, 4618 (1997)
+    """
+    def __init__(self, Emax=2000.0):
+        super().__init__()
+        self.Emax = torch.FloatTensor([Emax])
 
+    def forward(self, y, y_pred):
+        N = 1e-4
+        Ehat = torch.max(y, self.Emax.expand_as(y))
+        w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
+        print(w)
+        wmse = (w * (y - y_pred)**2).mean()
+
+        return torch.sqrt(wmse)
 
 class EarlyStopping:
     def __init__(self, patience=10, tol=0.1, chk_path='checkpoint.pt'):
@@ -207,6 +223,9 @@ class Training:
         elif cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'Ratio':
             dwt = cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
+        elif cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'PS':
+            Emax = cfg_loss.get('Emax', 2000.0)
+            loss_fn = WRMSELoss_PS(Emax=Emax)
         else:
             raise ValueError("unreachable")
 
@@ -373,7 +392,7 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-tanh")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
