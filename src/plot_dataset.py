@@ -17,6 +17,7 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 import sys
 sys.path.insert(0, os.path.join(BASEDIR, "external"))
 from pybind_example import Poten_CH4
+from nitrogen_morse import Poten_N2
 
 plt.style.use('science')
 
@@ -106,6 +107,26 @@ class XYZPlotter:
 
         plt.figure(figsize=(10, 10))
         plt.hist(R, color='#88B04B', bins='auto')
+
+        if figpath is not None:
+            assert False
+
+        plt.show()
+
+    def make_histogram_N2_energy(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        N2_energy = np.zeros((NCONFIGS, 1))
+
+        for k, xyz_config in enumerate(self.xyz_configs):
+            l_N2 = np.linalg.norm(xyz_config.atoms[4, :] - xyz_config.atoms[5, :]) * BOHRTOANG
+            N2_energy[k] = Poten_N2(l_N2) 
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        plt.hist(N2_energy, color='#88B04B', bins='auto')
+
+        plt.xlim((0.0, 700.0))
 
         if figpath is not None:
             assert False
@@ -337,8 +358,9 @@ if __name__ == "__main__":
 
     xyz_nonrigid = os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz")
     plotter = XYZPlotter(fpath=xyz_nonrigid)
-    plotter.make_histogram_CH4_energy()
+    plotter.make_histogram_N2_energy()
 
+    #plotter.make_histogram_CH4_energy()
     #plotter.make_histogram_R()
     #plotter.make_histogram_NN_distance()
     #plotter.make_histogram_CH_distance()
