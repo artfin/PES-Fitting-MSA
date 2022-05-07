@@ -85,6 +85,7 @@ def show_feature_distribution(X, idx):
 
 from dataclasses import dataclass
 from typing import List
+import itertools
 
 @dataclass
 class XYZConfig:
@@ -92,8 +93,8 @@ class XYZConfig:
     energy : float
 
 class XYZPlotter:
-    def __init__(self, fpath):
-        self.xyz_configs = self.load_xyz(fpath)
+    def __init__(self, *fpaths):
+        self.xyz_configs = list(itertools.chain.from_iterable(self.load_xyz(fpath) for fpath in fpaths))
 
     def make_histogram_R(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
@@ -279,7 +280,7 @@ class XYZPlotter:
 
         plt.show()
 
-    def make_energy_distribution(self, figpath=None):
+    def make_histogram_energy(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
 
         energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
@@ -356,15 +357,21 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    xyz_nonrigid = os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz")
-    plotter = XYZPlotter(fpath=xyz_nonrigid)
-    plotter.make_histogram_N2_energy()
+    xyz_nonrigid = [
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000cm-1.xyz"),
+    ]
 
+    plotter = XYZPlotter(*xyz_nonrigid)
+    #plotter.make_histogram_N2_energy()
     #plotter.make_histogram_CH4_energy()
+    plotter.make_histogram_energy()
+
     #plotter.make_histogram_R()
     #plotter.make_histogram_NN_distance()
     #plotter.make_histogram_CH_distance()
     #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
+
     #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
     #plotter.make_energy_distribution()
 
