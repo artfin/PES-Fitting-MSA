@@ -24,16 +24,16 @@ class Poten_CH4:
            xH2 = x[6]  yH2 = x[7]  zH2 = x[8]
            xH3 = x[9]  yH3 = x[10] zH3 = x[11]
            xH4 = x[12] yH4 = x[13] zH4 = x[14]
-        q: [0] r1 -- d(C-H1)
-           [1] r2 -- d(C-H2)
-           [2] r3 -- d(C-H3)
-           [3] r4 -- d(C-H4)
-           [4] alpha12 -- ang(H1-C-H2)
-           [5] alpha13 -- ang(H1-C-H3)
-           [6] alpha14 -- ang(H1-C-H4)
-           [7] alpha23 -- ang(H2-C-H3)
-           [8] alpha24 -- ang(H2-C-H4)
-           [9] alpha34 -- ang(H3-C-H4)
+        q: [0] r1 -- d(C-H1), Angstrom
+           [1] r2 -- d(C-H2), Angstrom
+           [2] r3 -- d(C-H3), Angstrom
+           [3] r4 -- d(C-H4), Angstrom
+           [4] alpha12 -- ang(H1-C-H2), rad
+           [5] alpha13 -- ang(H1-C-H3), rad
+           [6] alpha14 -- ang(H1-C-H4), rad
+           [7] alpha23 -- ang(H2-C-H3), rad
+           [8] alpha24 -- ang(H2-C-H4), rad
+           [9] alpha34 -- ang(H3-C-H4), rad
         """
 
         q = np.zeros((10, 1))
@@ -51,7 +51,7 @@ class Poten_CH4:
                 v = np.array([x[3*j], x[3*j + 1], x[3*j + 2]])
                 v = v / np.linalg.norm(v)
 
-                q[k] = np.arccos(np.dot(u, v)) / np.pi
+                q[k] = np.arccos(np.dot(u, v))
                 k = k + 1
 
         return q

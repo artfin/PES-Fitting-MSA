@@ -3,8 +3,6 @@
 ! htpps://doi.org/10.1063/1.4962261
 !
 ! First call `potinit` to read in the paramters.
-! `poten_xy4` accepts a vector of cartesian coordinates (C, H1, H2, H3, H4) in Angstrom
-! and returns the potential energy in cm-1.
 
 module params
     integer ipar, ieq, parmax, info, term(289)

@@ -22,26 +22,35 @@ const double EVTOJ         = 1.602176565e-19;
 const double ANGTOBOHR     = 1.0 / 0.529177249;
 
 #define SHOW_MCMC_STEPS_COUNTER
-#undef SHOW_MCMC_STEPS_COUNTER
+//#undef SHOW_MCMC_STEPS_COUNTER
 
 const int DIM = 15;
-const double GENSTEP[DIM] = {2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2};
+const double GENSTEP[DIM] = {1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2};
 
-const double Teff_CH4 = 300.0; // K 
+const double Teff_CH4 = 200.0; // K 
 const double Teff_N2  = 300.0; // K
 
-const double EMIN_CH4 = 1000.0; // cm-1
-const double EMAX_CH4 = 2000.0; // cm-1
+const double EMIN_CH4 = 500.0; // cm-1
+const double EMAX_CH4 = 1000.0; // cm-1
 
+const double EMIN_N2 = 0.0;
 const double EMAX_N2 = 1000.0; // cm-1
 
 const int BURNIN = 10000;
-const int THINNING = 1000;
+const int THINNING = 500;
 
 extern "C" {
     void potinit();
     void poten_xy4(double *q, double* res);
 }
+
+static double INITIAL_CH4_GEOM[15] = {
+     0.0000000000,  0.0000000000,  0.0000000000, 
+     1.0860100000,  0.0000000000,  0.0000000000,
+    -0.3620033333,  0.0000000000, -1.0239000473,
+    -0.3620033333, -0.8867234520,  0.5119500235,
+    -0.3620033333,  0.8867234517,  0.5119500240,
+};
 
 double generate_normal(double sigma) 
 /*
@@ -98,7 +107,7 @@ void xyz_to_internal(double x[15], double q[10])
         for (int j = i + 1; j <= 4; ++j) {
             unit_vector(x[3*i], x[3*i + 1], x[3*i + 2], u);
             unit_vector(x[3*j], x[3*j + 1], x[3*j + 2], v);
-            q[k] = acos(dot_product(u, v)) / M_PI;
+            q[k] = acos(dot_product(u, v));
             k++;
         } 
     } 
@@ -114,10 +123,10 @@ void center_CH4(double x[15]) {
 double pot_CH4(double x[15]) {
     static double q[10];
     xyz_to_internal(x, q);
-   
-    for (int k = 0; k < 10; ++k) {
-        printf("q[%d]: %.10lf\n", k, q[k]);
-    }
+
+    //for (int k = 0; k < 10; ++k) {
+    //    printf("q[%d] = %.10lf\n", k, q[k]);
+    //}
 
     double V;
     poten_xy4(q, &V);
@@ -192,6 +201,47 @@ void burnin(double x[15]) {
     printf("Percentage of accepted points: %.3lf\n", (double) acc/BURNIN * 100.0);
 }
 
+void print_CH4_coords(FILE * fd, double x_CH4[15]) {
+    fprintf(fd, "6 %.10lf %.10lf %.10lf\n", x_CH4[0] , x_CH4[1] , x_CH4[2] );
+    fprintf(fd, "1 %.10lf %.10lf %.10lf\n", x_CH4[3] , x_CH4[4] , x_CH4[5] );
+    fprintf(fd, "1 %.10lf %.10lf %.10lf\n", x_CH4[6] , x_CH4[7] , x_CH4[8] );
+    fprintf(fd, "1 %.10lf %.10lf %.10lf\n", x_CH4[9] , x_CH4[10], x_CH4[11]);
+    fprintf(fd, "1 %.10lf %.10lf %.10lf\n", x_CH4[12], x_CH4[13], x_CH4[14]);
+}
+
+bool check_geometry_CH4(double x[15])
+/* 
+ * x: 
+ *    xC  = x[0]  yC  = x[1]  zC  = x[2]
+ *    xH1 = x[3]  yH1 = x[4]  zH1 = x[5]
+ *    xH2 = x[6]  yH2 = x[7]  zH2 = x[8]
+ *    xH3 = x[9]  yH3 = x[10] zH3 = x[11]
+ *    xH4 = x[12] yH4 = x[13] zH4 = x[14]
+ */
+{
+    const double HH_LOWLIM = 1.0;
+    const double HH_UPLIM  = 2.2;
+        
+    double H12, H13, H14, H23, H24, H34;
+
+    H12 = sqrt((x[3] - x[6]) * (x[3] - x[6]) + (x[4] - x[7]) * (x[4] - x[7]) + (x[5] - x[8]) * (x[5] - x[8])); 
+    H13 = sqrt((x[3] - x[9]) * (x[3] - x[9]) + (x[4] - x[10]) * (x[4] - x[10]) + (x[5] - x[11]) * (x[5] - x[11])); 
+    H14 = sqrt((x[3] - x[12]) * (x[3] - x[12]) + (x[4] - x[13]) * (x[4] - x[13]) + (x[5] - x[14]) * (x[5] - x[14])); 
+    H23 = sqrt((x[6] - x[9]) * (x[6] - x[9]) + (x[7] - x[10]) * (x[7] - x[10]) + (x[8] - x[11]) * (x[8] - x[11])); 
+    H24 = sqrt((x[6] - x[12]) * (x[6] - x[12]) + (x[7] - x[13]) * (x[7] - x[13]) + (x[8] - x[14]) * (x[8] - x[14])); 
+    H34 = sqrt((x[9] - x[12]) * (x[9] - x[12]) + (x[10] - x[13]) * (x[10] - x[13]) + (x[11] - x[14]) * (x[11] - x[14])); 
+
+    bool status = true;
+    if ((H12 > HH_UPLIM) || (H12 < HH_LOWLIM)) status = false;
+    if ((H13 > HH_UPLIM) || (H13 < HH_LOWLIM)) status = false;
+    if ((H14 > HH_UPLIM) || (H14 < HH_LOWLIM)) status = false;
+    if ((H23 > HH_UPLIM) || (H23 < HH_LOWLIM)) status = false;
+    if ((H24 > HH_UPLIM) || (H24 < HH_LOWLIM)) status = false;
+    if ((H34 > HH_UPLIM) || (H34 < HH_LOWLIM)) status = false;
+
+    return status;
+}
+
 void sample_CH4(double x[15], int thinning=THINNING) {
 
     double c[15];
@@ -209,6 +259,14 @@ void sample_CH4(double x[15], int thinning=THINNING) {
             acc++;
         }
         if (counter % thinning == 0 && counter != 0) {
+            bool st = check_geometry_CH4(x);
+
+            if (!st) {
+                print_CH4_coords(stdout, x);
+                printf("geometry rejected\n");
+                memcpy(x, INITIAL_CH4_GEOM, sizeof(double) * DIM);
+                burnin(x); 
+            }
 #ifdef SHOW_MCMC_STEPS_COUNTER
             printf("Steps made: %d\n", acc);
 #endif
@@ -225,41 +283,19 @@ void sample_inter(double inter[3]) {
     inter[2] = acos(mt_drand() * 2.0 - 1.0);      // Theta
 }
 
+
 int main()
-{
-    potinit();
-
-    double x_CH4[15] = {
-         0.0000000000,  0.0000000000,  0.0000000000, 
-         1.0860100000,  0.0000000000,  0.0000000000,
-        -0.3620033333,  0.0000000000, -1.0239000473,
-        -0.3620033333, -0.8867234520,  0.5119500235,
-        -0.3620033333,  0.8867234517,  0.5119500240,
-    };
-
-    double V = pot_CH4(x_CH4);
-    printf("V: %.10lf\n", V);
-
-    return 0;
-}
-
-int main2()
 {
     mt_goodseed();
     potinit();
 
-    double x_CH4[15] = {
-         0.0000000000,  0.0000000000,  0.0000000000, 
-         1.0860100000,  0.0000000000,  0.0000000000,
-        -0.3620033333,  0.0000000000, -1.0239000473,
-        -0.3620033333, -0.8867234520,  0.5119500235,
-        -0.3620033333,  0.8867234517,  0.5119500240,
-    };
+    double x_CH4[15];
+    memcpy(x_CH4, INITIAL_CH4_GEOM, sizeof(double) * DIM);
 
     burnin(x_CH4);
     center_CH4(x_CH4);
 
-    for (int n = 20000; n < 24999; ) {
+    for (int n = 25000; n < 30000; ) {
         sample_CH4(x_CH4);
         center_CH4(x_CH4);
 
@@ -270,14 +306,17 @@ int main2()
             continue;
         }
 
-        printf("[CH4] V: %.3lf cm-1\n", V_CH4);
-
         double l_N2 = sample_N2();
         double V_N2 = pot_N2(l_N2);
-
+        
+        if (V_N2 < EMIN_N2) {
+            continue;
+        }
         if (V_N2 > EMAX_N2) {
             continue;
         }
+        
+        printf("[CH4] V: %.3lf cm-1\n", V_CH4);
         printf("[N2]  V: %.3lf cm-1\n", V_N2);
 
         double phi_N2 = mt_drand() * 2.0 * M_PI;
@@ -302,7 +341,7 @@ int main2()
         x_N2[5] += inter[0] * cos(inter[2]);
 
         char xyz_fname[256];
-        snprintf(xyz_fname, sizeof(xyz_fname), "inp/%03d.xyz", n);
+        snprintf(xyz_fname, sizeof(xyz_fname), "INP-25000-30000/%03d.xyz", n);
         printf("Writing xyz configuration to %s\n", xyz_fname); 
 
         FILE * fd_xyz = fopen(xyz_fname, "w");
@@ -319,7 +358,7 @@ int main2()
         fclose(fd_xyz);
 
         char molpro_fname[256];
-        snprintf(molpro_fname, sizeof(molpro_fname), "inp/%03d.inp", n);
+        snprintf(molpro_fname, sizeof(molpro_fname), "INP-25000-30000/%03d.inp", n);
         printf("Writing MOLPRO input to %s\n", molpro_fname);
 
         FILE * fd_molpro = fopen(molpro_fname, "w");
