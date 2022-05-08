@@ -14,9 +14,9 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 DATASET_POSTFIX = "-nonrigid"
 XYZ_PATHS = [
     os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000cm-1.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000cm-1.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000cm-1.xyz"),
+    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
 ]
 
 #DATASET_POSTFIX = "-rigid"
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     label = 0
 
     for xyz_path in XYZ_PATHS:
-        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=False)
+        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=True)
 
         if GLOBAL_SET:
             assert GLOBAL_NATOMS == dataset.NATOMS

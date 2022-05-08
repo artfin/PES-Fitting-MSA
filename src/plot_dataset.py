@@ -120,7 +120,7 @@ class XYZPlotter:
 
         for k, xyz_config in enumerate(self.xyz_configs):
             l_N2 = np.linalg.norm(xyz_config.atoms[4, :] - xyz_config.atoms[5, :]) * BOHRTOANG
-            N2_energy[k] = Poten_N2(l_N2) 
+            N2_energy[k] = Poten_N2(l_N2)
 
         plt.figure(figsize=(10, 10))
         ax = plt.subplot(1, 1, 1)
@@ -357,15 +357,15 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    xyz_nonrigid = [
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000cm-1.xyz"),
+    xyz_paths = [
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
     ]
 
-    plotter = XYZPlotter(*xyz_nonrigid)
+    plotter = XYZPlotter(*xyz_paths)
     #plotter.make_histogram_N2_energy()
-    #plotter.make_histogram_CH4_energy()
-    plotter.make_histogram_energy()
+    plotter.make_histogram_CH4_energy()
+    #plotter.make_histogram_energy()
 
     #plotter.make_histogram_R()
     #plotter.make_histogram_NN_distance()

@@ -62,12 +62,17 @@ if __name__ == "__main__":
 
     xyz_configs = list(itertools.chain.from_iterable(load_xyz(fpath) for fpath in fpaths))
 
-    pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "obj", "xy4.so"))
+    ch4_pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "obj", "xy4.so"))
 
-    EMIN_CH4 = 3000.0
-    EMAX_CH4 = 5000.0
+    EMIN_CH4 = 2000.0
+    EMAX_CH4 = 3000.0
 
-    out_fpath = os.path.join(BASEDIR, "CH4-N2-EN-NONRIGID-CH4={0:.0f}-{1:.0f}cm-1.xyz".format(EMIN_CH4, EMAX_CH4))
+    EMIN_N2 = 0.0
+    EMAX_N2 = 1000.0
+
+    out_fpath = os.path.join(BASEDIR, "CH4-N2-EN-NONRIGID-CH4={0:.0f}-{1:.0f}-N2={2:.0f}-{3:.0f}.xyz".format(EMIN_CH4, EMAX_CH4, EMIN_N2, EMAX_N2))
+    logging.info("Writing found configurations to {}".format(out_fpath))
+
     fd = open(out_fpath, "w")
 
     k = 0
@@ -80,19 +85,22 @@ if __name__ == "__main__":
             *xyz_config.atoms[3, :] * BOHRTOANG, # H4
         ])
 
-        CH4_energy = pes.eval(CH4_config)
-        if CH4_energy > EMIN_CH4 and CH4_energy < EMAX_CH4:
+        N2_len = np.linalg.norm(xyz_config.atoms[4, :] - xyz_config.atoms[5, :]) * BOHRTOANG
+        N2_energy = Poten_N2(N2_len)
+
+        CH4_energy = ch4_pes.eval(CH4_config)
+        if CH4_energy > EMIN_CH4 and CH4_energy < EMAX_CH4 and N2_energy > EMIN_N2 and N2_energy < EMAX_N2:
             fd.write("   7\n")
             fd.write("   {:.16f}\n".format(xyz_config.energy))
-            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[0, 0] * BOHRTOANG, xyz_config.atoms[0, 1] * BOHRTOANG, xyz_config.atoms[0, 2] * BOHRTOANG))
-            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[1, 0] * BOHRTOANG, xyz_config.atoms[1, 1] * BOHRTOANG, xyz_config.atoms[1, 2] * BOHRTOANG))
-            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[2, 0] * BOHRTOANG, xyz_config.atoms[2, 1] * BOHRTOANG, xyz_config.atoms[2, 2] * BOHRTOANG))
-            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[3, 0] * BOHRTOANG, xyz_config.atoms[3, 1] * BOHRTOANG, xyz_config.atoms[3, 2] * BOHRTOANG))
-            fd.write("N {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[4, 0] * BOHRTOANG, xyz_config.atoms[4, 1] * BOHRTOANG, xyz_config.atoms[4, 2] * BOHRTOANG))
-            fd.write("N {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[5, 0] * BOHRTOANG, xyz_config.atoms[5, 1] * BOHRTOANG, xyz_config.atoms[5, 2] * BOHRTOANG))
-            fd.write("C {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[6, 0] * BOHRTOANG, xyz_config.atoms[6, 1] * BOHRTOANG, xyz_config.atoms[6, 2] * BOHRTOANG))
+            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[0, 0], xyz_config.atoms[0, 1], xyz_config.atoms[0, 2]))
+            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[1, 0], xyz_config.atoms[1, 1], xyz_config.atoms[1, 2]))
+            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[2, 0], xyz_config.atoms[2, 1], xyz_config.atoms[2, 2]))
+            fd.write("H {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[3, 0], xyz_config.atoms[3, 1], xyz_config.atoms[3, 2]))
+            fd.write("N {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[4, 0], xyz_config.atoms[4, 1], xyz_config.atoms[4, 2]))
+            fd.write("N {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[5, 0], xyz_config.atoms[5, 1], xyz_config.atoms[5, 2]))
+            fd.write("C {:.10f} {:.10f} {:.10f}\n".format(xyz_config.atoms[6, 0], xyz_config.atoms[6, 1], xyz_config.atoms[6, 2]))
             k = k + 1
 
-    print("Found {} configs.".format(k))
-
     fd.close()
+    logging.info("Found {} configs.".format(k))
+

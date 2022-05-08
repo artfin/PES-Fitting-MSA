@@ -32,7 +32,7 @@ class PolyDataset_t:
 
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
-POLYNOMIAL_LIB = "CUSTOM"
+POLYNOMIAL_LIB = "MSA"
 
 class PolyDataset(Dataset):
     def __init__(self, wdir, xyz_file, order, symmetry, set_intermolecular_to_zero=True): #, lr_model=None):
@@ -163,6 +163,23 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
+    def check_config(self, xyz_config):
+        C  = xyz_config.atoms[6, :]
+        H1 = xyz_config.atoms[0, :]
+        H2 = xyz_config.atoms[1, :]
+        H3 = xyz_config.atoms[2, :]
+        H4 = xyz_config.atoms[3, :]
+
+        r1 = np.linalg.norm(C - H1)
+        r2 = np.linalg.norm(C - H2)
+        r3 = np.linalg.norm(C - H3)
+        r4 = np.linalg.norm(C - H4)
+        rr = np.array([r1, r2, r3, r4])
+
+        MIN_CH = 1.88 # BOHR
+        MAX_CH = 2.5  # BOHR
+        assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
+
     def load_xyz(self, fpath):
         nlines = sum(1 for line in open(fpath, mode='r'))
         NATOMS = int(open(fpath, mode='r').readline())
@@ -190,6 +207,7 @@ class PolyDataset(Dataset):
                     atoms[natom, :] = list(map(float, words[1:]))
 
                 c = XYZConfig(atoms=atoms, energy=energy)
+                self.check_config(c)
                 xyz_configs.append(c)
 
         return xyz_configs
