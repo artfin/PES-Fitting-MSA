@@ -1,7 +1,7 @@
 import os
 import sys
-sys.path.insert(0, "external")
-from pybind_example import Poten_CH4
+sys.path.insert(0, os.path.join("external", "pes"))
+from pybind_ch4 import Poten_CH4
 from nitrogen_morse import Poten_N2
 
 import itertools
@@ -58,14 +58,15 @@ if __name__ == "__main__":
     fpaths = [
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-1.xyz"),
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-2.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-3.xyz"),
     ]
 
     xyz_configs = list(itertools.chain.from_iterable(load_xyz(fpath) for fpath in fpaths))
 
-    ch4_pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "obj", "xy4.so"))
+    ch4_pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "pes", "xy4.so"))
 
-    EMIN_CH4 = 2000.0
-    EMAX_CH4 = 3000.0
+    EMIN_CH4 = 1000.0
+    EMAX_CH4 = 2000.0
 
     EMIN_N2 = 0.0
     EMAX_N2 = 1000.0

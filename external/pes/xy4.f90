@@ -3,6 +3,8 @@
 ! htpps://doi.org/10.1063/1.4962261
 !
 ! First call `potinit` to read in the paramters.
+! `poten_xy4` accepts internal coordinates (r1, r2, r3, r4, alpha12, alpha13, alpha14, alpha23, alpha24, alpha34)
+! where interatomic distances are given in Angstrom and interbond angles are given in radian. 
 
 module params
     integer ipar, ieq, parmax, info, term(289)
@@ -16,7 +18,7 @@ subroutine potinit() bind(C, name="potinit")
     implicit none
 
     !read parameters
-    open (unit=100, file='/home/artfin/Desktop/neural-networks/project/PES-Fitting-MSA/external/ch4_cbs-f12-hl_PES.inp')
+    open (unit=100, file='/home/artfin/Desktop/neural-networks/project/PES-Fitting-MSA/external/pes/ch4_cbs-f12-hl_PES.inp')
     !open (unit=100, file='ch4_cbs-f12-hl_PES.inp')
     read (100, *) parmax
   

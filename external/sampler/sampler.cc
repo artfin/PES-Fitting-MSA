@@ -25,15 +25,15 @@ const double ANGTOBOHR     = 1.0 / 0.529177249;
 //#undef SHOW_MCMC_STEPS_COUNTER
 
 const int DIM = 15;
-const double GENSTEP[DIM] = {1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2};
+const double GENSTEP[DIM] = {5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3};
 
-const double Teff_CH4 = 200.0; // K 
-const double Teff_N2  = 300.0; // K
+const double Teff_CH4 = 50.0; // K 
+const double Teff_N2  = 1000.0; // K
 
 const double EMIN_CH4 = 500.0; // cm-1
 const double EMAX_CH4 = 1000.0; // cm-1
 
-const double EMIN_N2 = 0.0;
+const double EMIN_N2 = 500.0;
 const double EMAX_N2 = 1000.0; // cm-1
 
 const int BURNIN = 10000;
@@ -131,6 +131,8 @@ double pot_CH4(double x[15]) {
     double V;
     poten_xy4(q, &V);
 
+    //printf("[pot_CH4] V: %.5lf\n", V);
+
     return V;
 }
 
@@ -148,6 +150,7 @@ double pot_N2(double r)
 /*
  * returns N2 potential [cm-1] approximated as a Morse curve
  * the parameters are derived from experiment
+ * accepts the distance in A
  */ 
 {
     // https://doi.org/10.1098/rspa.1956.0135 
@@ -171,15 +174,18 @@ double sample_N2()
  * sample density function of N2 using rejection approach
  */
 {
-    const double x1 = 1.05, x2 = 1.15; // A
-    const double y1 = 0.0,  y2 = 1.0; 
+    const double x1 = 0.9, x2 = 1.3; // A
+    const double y1 = 0.0, y2 = 1.0; 
 
-    double x, y;
+    double x, y, E;
     while (true) {
         x = mt_drand() * (x2 - x1) + x1;
         y = mt_drand() * (y2 - y1) + y1;
 
-        if (y < density_N2(x)) return x;
+        if (y < density_N2(x)) {
+            E = pot_N2(x);
+            if ((E > EMIN_N2) && (E < EMAX_N2)) return x;
+        }
     }
 }
 
@@ -292,33 +298,24 @@ int main()
     double x_CH4[15];
     memcpy(x_CH4, INITIAL_CH4_GEOM, sizeof(double) * DIM);
 
+    printf("INITIAL ENERGY: %lf\n", pot_CH4(x_CH4));
+
     burnin(x_CH4);
     center_CH4(x_CH4);
 
     for (int n = 25000; n < 30000; ) {
         sample_CH4(x_CH4);
         center_CH4(x_CH4);
-
         double V_CH4 = pot_CH4(x_CH4);
-        if (V_CH4 > EMAX_CH4) {
-            continue;
-        } else if (V_CH4 < EMIN_CH4) {
-            continue;
-        }
-
+        
         double l_N2 = sample_N2();
         double V_N2 = pot_N2(l_N2);
-        
-        if (V_N2 < EMIN_N2) {
-            continue;
-        }
-        if (V_N2 > EMAX_N2) {
-            continue;
-        }
-        
+
         printf("[CH4] V: %.3lf cm-1\n", V_CH4);
         printf("[N2]  V: %.3lf cm-1\n", V_N2);
 
+        if ((V_CH4 > EMAX_CH4) || (V_CH4 < EMIN_CH4)) continue;
+        
         double phi_N2 = mt_drand() * 2.0 * M_PI;
         double theta_N2 = acos(mt_drand() * 2.0 - 1.0);
         
