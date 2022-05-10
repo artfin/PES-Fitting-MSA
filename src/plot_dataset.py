@@ -15,8 +15,8 @@ import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 import sys
-sys.path.insert(0, os.path.join(BASEDIR, "external"))
-from pybind_example import Poten_CH4
+sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
+from pybind_ch4 import Poten_CH4
 from nitrogen_morse import Poten_N2
 
 plt.style.use('science')
@@ -135,7 +135,7 @@ class XYZPlotter:
         plt.show()
 
     def make_histogram_CH4_energy(self, figpath=None):
-        pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "obj", "xy4.so"))
+        pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "pes", "xy4.so"))
 
         NCONFIGS = len(self.xyz_configs)
         ch4_energy = np.zeros((NCONFIGS, 1))
@@ -280,7 +280,7 @@ class XYZPlotter:
 
         plt.show()
 
-    def make_histogram_energy(self, figpath=None):
+    def make_histogram_intermolecular_energy(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
 
         energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
@@ -360,20 +360,21 @@ if __name__ == "__main__":
     xyz_paths = [
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
     ]
 
     plotter = XYZPlotter(*xyz_paths)
     #plotter.make_histogram_N2_energy()
     plotter.make_histogram_CH4_energy()
-    #plotter.make_histogram_energy()
+    #plotter.make_histogram_intermolecular_energy()
 
     #plotter.make_histogram_R()
     #plotter.make_histogram_NN_distance()
     #plotter.make_histogram_CH_distance()
-    #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
+    #plotter.make_histogram_HCH_angle()
 
+    #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
     #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
-    #plotter.make_energy_distribution()
 
     #X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     #X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
