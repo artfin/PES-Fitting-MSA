@@ -4,14 +4,12 @@ import os
 import torch
 import yaml
 
-#from sklearn.preprocessing import StandardScaler
 from build_model import build_network_yaml
-#from eval_model import load_dataset
-#from eval_model import retrieve_checkpoint
-
+from dataset import PolyDataset
 from genpip import cl
 
-from dataset import PolyDataset
+import pathlib
+BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 class StandardScaler_impl(torch.nn.Module):
     def __init__(self, mean_=None, scale_=None):
@@ -43,7 +41,7 @@ class Evaluator(torch.nn.Module):
 
 def retrieve_checkpoint(cfg):
     chk_path = os.path.join(cfg["OUTPUT_PATH"], "checkpoint.pt")
-    checkpoint = torch.load(chk_path)
+    checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
     cfg_model = cfg['MODEL']
@@ -93,8 +91,14 @@ class Export:
 
         symmetry    = self.evaluator.meta_info["symmetry"]
         order       = self.evaluator.meta_info["order"]
-        basis_fname = "basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order)
-        cl(f"cp {self.DATASETS_EXTERNAL}/{basis_fname} {self.export_wd}")
+
+        basis_fname = "c_basis_{}_{}.cc".format(symmetry.replace(' ', '_'), order) if self.poly_source == "CUSTOM" \
+                      else "f_basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order)
+
+        basis_fpath = os.path.join(BASEDIR, self.DATASETS_EXTERNAL, basis_fname)
+        assert os.path.isfile(basis_fpath), "basis file {} is not found".format(basis_fpath)
+
+        cl(f"cp {basis_fpath} {self.export_wd}")
         #self.generate_cmake(basis_fname)
 
     def generate_torchscript(self):
@@ -109,24 +113,6 @@ class Export:
     def generate_cpp(self):
         logging.info("Saving generated cpp code to {}".format(self.cpp_path))
 
-        NATOMS       = self.evaluator.meta_info["NATOMS"]
-
-        if self.poly_source == "MSA":
-            mask         = self.evaluator.meta_info["mask"].tolist()
-            NPOLY_TOTAL  = len(mask)
-            NPOLY_MASKED = self.evaluator.meta_info["NPOLY"]
-            NMON         = self.evaluator.meta_info["NMON"]
-
-            print("mask: {}".format(mask))
-            print("TOTAL_NPOLY: {}".format(NPOLY_TOTAL))
-        elif self.poly_source == "CUSTOM":
-            NPOLY_TOTAL = self.evaluator.meta_info["NPOLY"]
-            NMON = 0
-            NPOLY_MASKED = 0
-            mask = []
-        else:
-            raise ValueError("unreachable")
-
         #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
         #inf_poly[0, 0] = 1.0
         #inf_poly = xscaler.transform(inf_poly)
@@ -136,28 +122,72 @@ class Export:
 
         logging.info("[NOTE] Long-range potential is not included in the export code.")
         logging.info("[NOTE] Constant at R=+infinity is not subtracted from the final value.")
-        logging.info("[NOTE] The code sets intermolecular Morse coordinates to zero.")
+        #logging.info("[NOTE] The code sets intermolecular Morse coordinates to zero.")
+
+        NATOMS       = self.evaluator.meta_info["NATOMS"]
 
         if self.poly_source == "MSA":
-            decl_apply_mask = "void apply_mask(double* poly, double* poly_masked);"
-            body_apply_mask = """
-void NNPIP::apply_mask(double* poly, double* poly_masked) {
-    size_t j = 0;
-    for (size_t k = 0; k < NPOLY; ++k) {
-        if (mask[k]) {
-            poly_masked[j] = poly[k];
-            j++;
-        }
-    }
-}
-"""
+            mask         = self.evaluator.meta_info.get("mask", None)
+            NPOLY_TOTAL  = None
+
+            if mask is not None:
+                mask = mask.tolist()
+                NPOLY_TOTAL = len(mask)
+
+            NPOLY = self.evaluator.meta_info["NPOLY"]
+            NMON  = self.evaluator.meta_info["NMON"]
+            decl_apply_mask = "" 
+            body_apply_mask = ""
             decl_extern_poly = """
 extern "C" {
     void c_evmono(double* x, double* mono);
     void c_evpoly(double* mono, double* poly);
 }
 """
+            mono_init = """
+    mono = new double [NMON];
+"""
+            var_declarations = """
+    const size_t NMON  = {};
+    const size_t NPOLY = {};
+""".format(NMON, NPOLY)
+
+            poly_masked_init = ""
+            free_vars = """
+    delete mono;
+"""
+            poly_eval = """
+    c_evmono(yij, mono);
+    c_evpoly(mono, poly);
+"""
+            # decl_apply_mask = "void apply_mask(double* poly, double* poly_masked);"
+            # body_apply_mask = """
+            # void NNPIP::apply_mask(double* poly, double* poly_masked) {
+            # size_t j = 0;
+            # for (size_t k = 0; k < NPOLY; ++k) {
+            # if (mask[k]) {
+            # poly_masked[j] = poly[k];
+            # j++;
+            # }
+            # }
+            # }
+            # """
+
+            #//apply_mask(poly, poly_masked);
+            # //t = torch::from_blob(poly_masked, {static_cast<long int>(NPOLY_MASKED)}, torch::kDouble);
+            #poly_masked_init = """
+            # poly_masked = new double [NPOLY_MASKED];
+            # """
+            # free_vars = """
+            # delete poly_masked;
+            # """
+
         elif self.poly_source == "CUSTOM":
+            NPOLY_TOTAL = self.evaluator.meta_info["NPOLY"]
+            NMON = 0
+            NPOLY_MASKED = 0
+            mask = []
+
             decl_apply_mask = ""
             body_apply_mask = ""
             decl_extern_poly = """
@@ -165,6 +195,18 @@ extern "C" {
     void evpoly(double x[], double p[]);
 }
 """
+            poly_masked = ""
+            free_vars = ""
+            poly_eval = """
+    evpoly(yij, poly);
+"""
+            # const size_t NMON = """ + str(NMON) + """;
+            # const size_t NPOLY = """ + str(NPOLY_TOTAL) + """;
+            # const size_t NPOLY_MASKED = """ + str(NPOLY_MASKED) + """;
+            # int mask[""" + str(NPOLY_TOTAL) + """] = {""" + ", ".join(list(map(str, mask))) + """};
+            # double *poly_masked;
+        else:
+            raise ValueError("unreachable")
 
         cpp_template = """
 #include <cassert>
@@ -216,19 +258,12 @@ public:
     const size_t NATOMS;
 private:""" + decl_apply_mask + """
     void cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2);
-
-    //const size_t NMON = """ + str(NMON) + """;
-    const size_t NPOLY = """ + str(NPOLY_TOTAL) + """;
-    //const size_t NPOLY_MASKED = """ + str(NPOLY_MASKED) + """;
-
+    """ + var_declarations + """
     const size_t NDIS;
 
     double *yij;
     double *mono;
     double *poly;
-    //double *poly_masked;
-
-    //int mask[""" + str(NPOLY_TOTAL) + """] = {""" + ", ".join(list(map(str, mask))) + """};
 
     torch::jit::script::Module model;
     at::Tensor t;
@@ -237,10 +272,10 @@ private:""" + decl_apply_mask + """
 NNPIP::NNPIP(const size_t NATOMS, std::string const& pt_fname)
     : NATOMS(NATOMS), NDIS(NATOMS * (NATOMS - 1) / 2)
 {
-    yij = new double [NDIS];
-    //mono = new double [NMON];
-    poly = new double [NPOLY];
-    //poly_masked = new double [NPOLY_MASKED];
+    yij = new double [NDIS];""" + \
+    mono_init + """
+    poly = new double [NPOLY];""" + \
+    poly_masked_init + """
 
     try {
         model = torch::jit::load(pt_fname);
@@ -255,10 +290,9 @@ NNPIP::NNPIP(const size_t NATOMS, std::string const& pt_fname)
 
 NNPIP::~NNPIP()
 {
-    delete yij;
-    //delete mono;
+    delete yij;""" + \
+    free_vars + """
     delete poly;
-    //delete poly_masked;
 }
 
 void NNPIP::cart2internal(std::vector<double> const& cart, double & R, double & ph1, double & th1, double & ph2, double & th2)
@@ -333,13 +367,9 @@ double NNPIP::pes(std::vector<double> const& x) {
 
     assert((k == NDIS) && ": ERROR: the morse variables vector is not filled properly.");
 
-    //c_evmono(yij, mono);
-    //c_evpoly(mono, poly);
-    evpoly(yij, poly);
+    """ + \
+    poly_eval + """
 
-    //apply_mask(poly, poly_masked);
-
-    //t = torch::from_blob(poly_masked, {static_cast<long int>(NPOLY_MASKED)}, torch::kDouble);
     t = torch::from_blob(poly, {static_cast<long int>(NPOLY)}, torch::kDouble);
     return model.forward({t}).toTensor().item<double>();
 }
@@ -457,7 +487,9 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = "models/exp11"
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
+
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
         try:
@@ -469,7 +501,7 @@ if __name__ == "__main__":
 
     evaluator = retrieve_checkpoint(cfg)
 
-    Export(cfg, evaluator, poly_source="CUSTOM").run()
+    Export(cfg, evaluator, poly_source="MSA").run()
 
     cfg_dataset = cfg['DATASET']
     logging.info("Loading training dataset from TRAIN_DATA_PATH={}".format(cfg_dataset['TRAIN_DATA_PATH']))
