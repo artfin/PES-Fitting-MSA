@@ -423,7 +423,10 @@ class Training:
             self.es.save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
         logging.info("\nReloading best model from the last checkpoint")
-        self.load_basic_checkpoint()
+
+        self.reset_weights()
+        checkpoint = torch.load(self.chk_path)
+        self.model.load_state_dict(checkpoint["model"])
 
         return self.model
 
@@ -469,8 +472,6 @@ class Training:
         logging.info("Train      RMSE: {:.2f} cm-1".format(self.metric_train))
         logging.info("Validation RMSE: {:.2f} cm-1".format(self.metric_val))
         logging.info("Test       RMSE: {:.2f} cm-1".format(self.metric_test))
-
-        print(self.metric_train)
 
 
 if __name__ == "__main__":
