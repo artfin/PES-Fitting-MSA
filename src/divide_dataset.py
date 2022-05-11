@@ -60,14 +60,15 @@ if __name__ == "__main__":
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-2.xyz"),
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-3.xyz"),
         os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-4.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-5.xyz"),
     ]
 
     xyz_configs = list(itertools.chain.from_iterable(load_xyz(fpath) for fpath in fpaths))
 
     ch4_pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "pes", "xy4.so"))
 
-    EMIN_CH4 = 1000.0
-    EMAX_CH4 = 2000.0
+    EMIN_CH4 = 0.0
+    EMAX_CH4 = 1000.0
 
     EMIN_N2 = 0.0
     EMAX_N2 = 1000.0
