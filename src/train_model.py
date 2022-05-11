@@ -215,16 +215,20 @@ class Training:
     def build_optimizer(self):
         cfg_optimizer = self.cfg_solver['OPTIMIZER']
 
-        lr               = cfg_optimizer.get('LR', 1.0)
-        tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
-        tolerance_change = cfg_optimizer.get('TOLERANCE_CHANGE', 1e-14)
-        max_iter         = cfg_optimizer.get('MAX_ITER', 100)
 
         if cfg_optimizer['NAME'] == 'LBFGS':
-            optimizer = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
-                                          tolerance_change=tolerance_change, max_iter=max_iter)
+            lr               = cfg_optimizer.get('LR', 1.0)
+            tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
+            tolerance_change = cfg_optimizer.get('TOLERANCE_CHANGE', 1e-14)
+            max_iter         = cfg_optimizer.get('MAX_ITER', 100)
+
+            optimizer        = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
+                                                 tolerance_change=tolerance_change, max_iter=max_iter)
+        elif cfg_optimizer['NAME'] == 'Adam':
+            lr        = cfg_optimizer.get('LR', 1e-3)
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         else:
-            raise ValuerError("unreachable")
+            raise ValueError("unreachable")
 
         logging.info("Build optimizer: {}".format(optimizer))
 
@@ -388,6 +392,8 @@ class Training:
         logging.info("Validation RMSE: {:.2f} cm-1".format(self.metric_val))
         logging.info("Test       RMSE: {:.2f} cm-1".format(self.metric_test))
 
+        print(self.metric_train)
+
 
 if __name__ == "__main__":
     logger = logging.getLogger()
@@ -407,8 +413,8 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
