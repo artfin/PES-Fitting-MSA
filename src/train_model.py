@@ -20,7 +20,7 @@ import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-PRINT_TRAINING_STEPS = 30
+PRINT_TRAINING_STEPS = 1
 
 def seed_torch(seed=42):
     random.seed(seed)
@@ -70,6 +70,17 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
     #plt.figure(figsize=(10, 10))
     #plt.scatter(train.X[:,6], np.zeros_like(train.X[:,6]) + 1)
     #plt.show()
+
+class L2Regularization(torch.nn.Module):
+    def __init__(self, lambda_):
+        super().__init__()
+        self.lambda_ = lambda_
+
+    def forward(self, model):
+        l2_norm = torch.tensor(0.)
+        for p in model.parameters():
+            l2_norm += (p**2).sum()
+        return self.lambda_ * l2_norm
 
 
 class WRMSELoss_Boltzmann(torch.nn.Module):
@@ -198,6 +209,14 @@ class Training:
 
         self.cfg_loss = cfg['LOSS']
         self.loss_fn = self.build_loss()
+
+        self.cfg_regularization = cfg.get('REGULARIZATION', None)
+        self.regularization = self.build_regularization()
+
+        # 
+        # Partridge-Schwenke loss function requires absolute energies not normalized ones
+        # so we pass (mean_, scale_) variables to perform inverse_transform
+        #
         if isinstance(self.loss_fn, WRMSELoss_PS):
             self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
@@ -219,6 +238,17 @@ class Training:
             "order":    self.train.order,
             "mask" :    self.train.mask,
         }
+
+    def build_regularization(self):
+        if self.cfg_regularization is None:
+            return None
+
+        if self.cfg_regularization['NAME'] == 'L2':
+            lambda_ = self.cfg_regularization['LAMBDA']
+            return L2Regularization(lambda_)
+        else:
+            raise ValueError("unreachable")
+
 
     def build_optimizer(self, cfg_optimizer):
         if cfg_optimizer['NAME'] == 'LBFGS':
@@ -353,8 +383,7 @@ class Training:
 
         if self.pretraining:
             self.run_pretraining()
-
-        self.load_basic_checkpoint()
+            self.load_basic_checkpoint()
 
         self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
         self.scheduler = self.build_scheduler()
@@ -402,8 +431,13 @@ class Training:
         def closure():
             optimizer.zero_grad()
             y_pred = self.model(self.train.X)
+
             loss = self.loss_fn(self.train.y, y_pred)
+            if self.regularization is not None:
+                loss = loss + self.regularization(self.model)
+
             loss.backward()
+
             return loss
 
         self.model.train()
