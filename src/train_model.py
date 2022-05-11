@@ -20,6 +20,7 @@ import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+PRINT_TRAINING_STEPS = 30
 
 def seed_torch(seed=42):
     random.seed(seed)
@@ -140,7 +141,7 @@ class EarlyStopping:
         self.best_score = None
         self.status = False
 
-    def __call__(self, score, model, xscaler, yscaler, meta_info):
+    def __call__(self, epoch, score, model, xscaler, yscaler, meta_info):
         if self.best_score is None:
             self.best_score = score
             self.save_checkpoint(model, xscaler, yscaler, meta_info)
@@ -155,8 +156,9 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.status = True
 
-        logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
-        logging.info("(Early Stopping) ES counter: {}; ES patience: {}".format(self.counter, self.patience))
+        if epoch % PRINT_TRAINING_STEPS == 0:
+            logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
+            logging.info("(Early Stopping) ES counter: {}; ES patience: {}".format(self.counter, self.patience))
 
     def save_checkpoint(self, model, xscaler, yscaler, meta_info):
         logging.info("Saving the checkpoint.")
@@ -185,7 +187,7 @@ class EarlyStopping:
 class Training:
     def __init__(self, model, cfg, train, val, test, xscaler, yscaler):
         self.model = model
-        self.cfg_solver = cfg['SOLVER']
+        self.cfg_solver = cfg['TRAINING']
 
         self.train = train
         self.val   = val
@@ -194,12 +196,18 @@ class Training:
         self.xscaler = xscaler
         self.yscaler = yscaler
 
-        self.optimizer = self.build_optimizer()
-        self.scheduler = self.build_scheduler()
+        self.cfg_loss = cfg['LOSS']
         self.loss_fn = self.build_loss()
-
         if isinstance(self.loss_fn, WRMSELoss_PS):
             self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+
+        self.pretraining = False
+        if cfg.get('PRETRAINING'):
+            self.pretraining = True
+
+            cfg_pretrain = cfg['PRETRAINING']
+            self.pretraining_epochs = cfg_pretrain['EPOCHS']
+            self.pretraining_optimizer = self.build_optimizer(cfg_pretrain['OPTIMIZER'])
 
         output_path = cfg.get('OUTPUT_PATH', '')
         self.es = self.build_early_stopper(output_path=output_path)
@@ -212,10 +220,7 @@ class Training:
             "mask" :    self.train.mask,
         }
 
-    def build_optimizer(self):
-        cfg_optimizer = self.cfg_solver['OPTIMIZER']
-
-
+    def build_optimizer(self, cfg_optimizer):
         if cfg_optimizer['NAME'] == 'LBFGS':
             lr               = cfg_optimizer.get('LR', 1.0)
             tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
@@ -235,21 +240,20 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        cfg_loss = self.cfg_solver['LOSS']
-        if cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
-            eff_temperature = cfg_loss.get('EFFECTIVE_TEMPERATURE', 2000.0)
+        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
+            eff_temperature = self.cfg_loss.get('EFFECTIVE_TEMPERATURE', 2000.0)
             loss_fn = WRMSELoss_Boltzmann(e_factor=self.yscaler.scale_ / eff_temperature)
-        elif cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'Ratio':
-            dwt = cfg_loss.get('dwt', 1.0)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio':
+            dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
-        elif cfg_loss['NAME'] == 'WRMSE' and cfg_loss['WEIGHT_TYPE'] == 'PS':
-            Emax = cfg_loss.get('EMAX', 2000.0)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS':
+            Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
         else:
             raise ValueError("unreachable")
 
         logging.info("Build loss function:")
-        logging.info(" WEIGHT_TYPE:           {}".format(cfg_loss['WEIGHT_TYPE']))
+        logging.info(" WEIGHT_TYPE:           {}".format(self.cfg_loss['WEIGHT_TYPE']))
 
         return loss_fn
 
@@ -292,10 +296,9 @@ class Training:
 
     def get_metric(self, loss):
         loss_value = loss.detach().item()
-        logging.info("loss_value: {}".format(loss_value))
+        #logging.info("loss_value: {}".format(loss_value))
 
-        cfg_loss = self.cfg_solver['LOSS']
-        if cfg_loss['NAME'] == 'WRMSE':
+        if self.cfg_loss['NAME'] == 'WRMSE':
             descaler = self.yscaler.scale_[0]
             return loss_value * descaler
         else:
@@ -307,9 +310,38 @@ class Training:
                 logging.info(f'Reset trainable parameters of layer = {layer}')
                 layer.reset_parameters()
 
-    def train_model(self):
-        start = time.time()
+    def load_basic_checkpoint(self):
+        self.reset_weights()
+        state = torch.load(self.chk_path)
+        self.model.load_state_dict(state)
 
+    def run_pretraining(self):
+        logging.info("-------------------------------------------------")
+        logging.info("----------- Running pretraining -----------------")
+        logging.info("-------------------------------------------------")
+
+        for epoch in range(self.pretraining_epochs):
+            self.train_epoch(self.pretraining_optimizer)
+
+            with torch.no_grad():
+                self.model.eval()
+
+                pred_val = self.model(self.val.X)
+                loss_val = self.loss_fn(self.val.y, pred_val)
+                self.metric_val = self.get_metric(loss_val)
+
+            logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
+                epoch, self.metric_train, self.metric_val
+            ))
+
+        torch.save(model.state_dict(), self.chk_path)
+
+        logging.info("-------------------------------------------------")
+        logging.info("----------- Pretraining finished. ---------------")
+        logging.info("-------------------------------------------------")
+
+
+    def train_model(self):
         self.model = self.model.to(DEVICE)
         self.train.X = self.train.X.to(DEVICE)
         self.train.y = self.train.y.to(DEVICE)
@@ -318,9 +350,20 @@ class Training:
 
         self.loss_fn = self.loss_fn.to(DEVICE)
 
+        if self.pretraining:
+            self.run_pretraining()
+
+        self.load_basic_checkpoint()
+
+        self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
+        self.scheduler = self.build_scheduler()
+
+        start = time.time()
+
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
+
         for epoch in range(MAX_EPOCHS):
-            self.train_epoch(epoch)
+            self.train_epoch(self.optimizer)
 
             with torch.no_grad():
                 self.model.eval()
@@ -331,15 +374,17 @@ class Training:
 
             self.scheduler.step(self.metric_val)
             current_lr = self.optimizer.param_groups[0]['lr']
-            logging.info("Current learning rate: {:.2e}".format(current_lr))
 
-            logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
-                epoch, self.metric_train, self.metric_val
-            ))
-            end = time.time()
-            logging.info("Elapsed time: {:.0f}s\n".format(end - start))
+            if epoch % PRINT_TRAINING_STEPS == 0:
+                logging.info("Current learning rate: {:.2e}".format(current_lr))
+                logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
+                    epoch, self.metric_train, self.metric_val
+                ))
 
-            self.es(self.metric_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+                end = time.time()
+                logging.info("Elapsed time: {:.0f}s\n".format(end - start))
+
+            self.es(epoch, self.metric_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
             if self.es.status:
                 logging.info("Invoking early stop.")
                 break
@@ -348,22 +393,20 @@ class Training:
             self.es.save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
         logging.info("\nReloading best model from the last checkpoint")
-        self.reset_weights()
-        checkpoint = torch.load(self.chk_path)
-        self.model.load_state_dict(checkpoint["model"])
+        self.load_basic_checkpoint()
 
         return self.model
 
-    def train_epoch(self, epoch):
+    def train_epoch(self, optimizer):
         def closure():
-            self.optimizer.zero_grad()
+            optimizer.zero_grad()
             y_pred = self.model(self.train.X)
             loss = self.loss_fn(self.train.y, y_pred)
             loss.backward()
             return loss
 
         self.model.train()
-        self.optimizer.step(closure)
+        optimizer.step(closure)
         loss_train = closure()
 
         self.metric_train = self.get_metric(loss_train)

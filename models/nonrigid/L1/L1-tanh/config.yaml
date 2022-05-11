@@ -1,0 +1,39 @@
+DATASET: 
+  TRAIN_DATA_PATH: datasets/interim/poly_4_2_1_4-train-nonrigid.pk
+  VAL_DATA_PATH: datasets/interim/poly_4_2_1_4-val-nonrigid.pk
+  TEST_DATA_PATH: datasets/interim/poly_4_2_1_4-test-nonrigid.pk
+  NORMALIZE: std 
+
+MODEL:
+  ACTIVATION: Tanh
+  HIDDEN_DIMS: [10]
+
+LOSS:
+  NAME: WRMSE
+  WEIGHT_TYPE: Boltzmann
+  EFFECTIVE_TEMPERATURE: 2000.0
+  
+PRETRAINING:
+  EPOCHS: 5 
+  OPTIMIZER: 
+    NAME: LBFGS
+    LR: 1.0
+
+TRAINING:
+  MAX_EPOCHS: 100000
+  OPTIMIZER:
+    NAME: Adam 
+    LR: 1.0e-4
+  SCHEDULER:
+    NAME: ReduceLROnPlateau
+    LR_REDUCE_GAMMA: 0.8
+    PATIENCE: 5000 
+    THRESHOLD: 0.1
+    THRESHOLD_MODE: abs
+    COOLDOWN: 50
+    MIN_LR: 1.0e-9
+  EARLY_STOPPING:
+    PATIENCE: 10000 
+    TOLERANCE: 0.05
+
+OUTPUT_PATH: models/nonrigid/L1/L1-tanh
