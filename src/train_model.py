@@ -230,8 +230,9 @@ class Training:
             optimizer        = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
                                                  tolerance_change=tolerance_change, max_iter=max_iter)
         elif cfg_optimizer['NAME'] == 'Adam':
-            lr        = cfg_optimizer.get('LR', 1e-3)
-            optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+            lr           = cfg_optimizer.get('LR', 1e-3)
+            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 0.0)
+            optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             raise ValueError("unreachable")
 
