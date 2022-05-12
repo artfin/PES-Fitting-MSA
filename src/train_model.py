@@ -76,6 +76,9 @@ class L1Regularization(torch.nn.Module):
         super().__init__()
         self.lambda_ = lambda_
 
+    def __repr__(self):
+        return "L1Regularization(lambda={})".format(self.lambda_)
+
     def forward(self, model):
         l1_norm = torch.tensor(0.).to(dtype=torch.float64, device=DEVICE)
         for p in model.parameters():
@@ -87,6 +90,9 @@ class L2Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
         self.lambda_ = lambda_
+
+    def __repr__(self):
+        return "L2Regularization(lambda={})".format(self.lambda_)
 
     def forward(self, model):
         l2_norm = torch.tensor(0.).to(DEVICE)
@@ -257,13 +263,16 @@ class Training:
 
         if self.cfg_regularization['NAME'] == 'L1':
             lambda_ = self.cfg_regularization['LAMBDA']
-            return L1Regularization(lambda_)
+            reg = L1Regularization(lambda_)
         elif self.cfg_regularization['NAME'] == 'L2':
             lambda_ = self.cfg_regularization['LAMBDA']
-            return L2Regularization(lambda_)
+            reg = L2Regularization(lambda_)
         else:
             raise ValueError("unreachable")
 
+        logging.info("Build regularization module: {}".format(reg))
+
+        return reg
 
     def build_optimizer(self, cfg_optimizer):
         if cfg_optimizer['NAME'] == 'LBFGS':
