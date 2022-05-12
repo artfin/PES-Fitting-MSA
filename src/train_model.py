@@ -71,6 +71,18 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
     #plt.scatter(train.X[:,6], np.zeros_like(train.X[:,6]) + 1)
     #plt.show()
 
+class L1Regularization(torch.nn.Module):
+    def __init__(self, lambda_):
+        super().__init__()
+        self.lambda_ = lambda_
+
+    def forward(self, model):
+        l1_norm = torch.tensor(0.).to(dtype=torch.float64, device=DEVICE)
+        for p in model.parameters():
+            l1_norm += p.abs().sum()
+
+        return self.lambda_ * l1_norm
+
 class L2Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
@@ -243,7 +255,10 @@ class Training:
         if self.cfg_regularization is None:
             return None
 
-        if self.cfg_regularization['NAME'] == 'L2':
+        if self.cfg_regularization['NAME'] == 'L1':
+            lambda_ = self.cfg_regularization['LAMBDA']
+            return L1Regularization(lambda_)
+        elif self.cfg_regularization['NAME'] == 'L2':
             lambda_ = self.cfg_regularization['LAMBDA']
             return L2Regularization(lambda_)
         else:
@@ -492,8 +507,8 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
