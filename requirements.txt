@@ -3,3 +3,5 @@ torch>=1.11.0+cpu
 scikit-learn>=1.0.2
 matplotlib>=3.5.1
 PyYAML>=6.0
+tensorboard>=2.9.0
+pydrive>=1.3.1

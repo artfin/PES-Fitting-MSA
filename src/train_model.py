@@ -8,6 +8,10 @@ import time
 import yaml
 
 import torch.nn
+from torch.utils.tensorboard import SummaryWriter
+
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -214,7 +218,12 @@ class EarlyStopping:
         torch.save(checkpoint, self.chk_path)
 
 class Training:
-    def __init__(self, model, cfg, train, val, test, xscaler, yscaler):
+    def __init__(self, model, cfg, train, val, test, xscaler, yscaler, writer_dir=None):
+        if writer_dir is not None:
+            self.writer = SummaryWriter(log_dir=writer_dir)
+        else:
+            self.writer = SummaryWriter()
+
         self.model = model
         self.cfg_solver = cfg['TRAINING']
 
@@ -376,7 +385,7 @@ class Training:
         logging.info("-------------------------------------------------")
 
         for epoch in range(self.pretraining_epochs):
-            self.train_epoch(self.pretraining_optimizer)
+            self.train_epoch(epoch, self.pretraining_optimizer)
 
             with torch.no_grad():
                 self.model.eval()
@@ -417,7 +426,7 @@ class Training:
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
         for epoch in range(MAX_EPOCHS):
-            self.train_epoch(self.optimizer)
+            self.train_epoch(epoch, self.optimizer)
 
             with torch.no_grad():
                 self.model.eval()
@@ -425,6 +434,7 @@ class Training:
                 pred_val = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, pred_val)
                 self.metric_val = self.get_metric(loss_val)
+                self.writer.add_scalar("loss/val", self.metric_val, epoch)
 
             self.scheduler.step(self.metric_val)
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -437,6 +447,9 @@ class Training:
 
                 end = time.time()
                 logging.info("Elapsed time: {:.0f}s\n".format(end - start))
+
+            # writing all pending events to disk
+            self.writer.flush()
 
             self.es(epoch, self.metric_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
             if self.es.status:
@@ -454,7 +467,7 @@ class Training:
 
         return self.model
 
-    def train_epoch(self, optimizer):
+    def train_epoch(self, epoch, optimizer):
         def closure():
             optimizer.zero_grad()
             y_pred = self.model(self.train.X)
@@ -472,6 +485,7 @@ class Training:
         loss_train = closure()
 
         self.metric_train = self.get_metric(loss_train)
+        self.writer.add_scalar("loss/train", self.metric_train, epoch)
 
     def model_eval(self):
         self.test.X = self.test.X.to(DEVICE)
@@ -496,6 +510,24 @@ class Training:
         logging.info("Train      RMSE: {:.2f} cm-1".format(self.metric_train))
         logging.info("Validation RMSE: {:.2f} cm-1".format(self.metric_val))
         logging.info("Test       RMSE: {:.2f} cm-1".format(self.metric_test))
+
+def setup_google_folder():
+    assert os.path.exists('client_secrets.json')
+    gauth = GoogleAuth()
+    gauth.LocalWebserverAuth()
+
+    drive = GoogleDrive(gauth)
+
+    folderName = "PES-Fitting-MSA"
+
+    folders = drive.ListFile(
+        {'q': "title='" + folderName + "' and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
+
+    for folder in folders:
+        if folder['title'] == folderName:
+            file = drive.CreateFile({'parents': [{'id': folder['id']}]})
+            file.SetContentFile('README.md')
+            file.Upload()
 
 
 if __name__ == "__main__":
