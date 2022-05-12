@@ -77,7 +77,7 @@ class L2Regularization(torch.nn.Module):
         self.lambda_ = lambda_
 
     def forward(self, model):
-        l2_norm = torch.tensor(0.)
+        l2_norm = torch.tensor(0.).to(DEVICE)
         for p in model.parameters():
             l2_norm += (p**2).sum()
         return self.lambda_ * l2_norm
@@ -492,7 +492,8 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
