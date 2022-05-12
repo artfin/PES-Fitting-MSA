@@ -376,7 +376,7 @@ class Training:
 
     def load_basic_checkpoint(self):
         self.reset_weights()
-        state = torch.load(self.chk_path)
+        state = torch.load(self.chk_path, map_location=torch.device(DEVICE))
         self.model.load_state_dict(state)
 
     def run_pretraining(self):
@@ -403,6 +403,15 @@ class Training:
         logging.info("-------------------------------------------------")
         logging.info("----------- Pretraining finished. ---------------")
         logging.info("-------------------------------------------------")
+
+    def continue_from_checkpoint(self, chkpath):
+        assert os.path.exists(chkpath)
+
+        self.reset_weights()
+        checkpoint = torch.load(chkpath, map_location=torch.device(DEVICE))
+        self.model.load_state_dict(checkpoint["model"])
+
+        self.train_model()
 
 
     def train_model(self):
@@ -462,7 +471,7 @@ class Training:
         logging.info("\nReloading best model from the last checkpoint")
 
         self.reset_weights()
-        checkpoint = torch.load(self.chk_path)
+        checkpoint = torch.load(self.chk_path, map_location=torch.device(DEVICE))
         self.model.load_state_dict(checkpoint["model"])
 
         return self.model
@@ -548,9 +557,10 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-4-L1")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
@@ -587,6 +597,11 @@ if __name__ == "__main__":
     model = build_network_yaml(cfg_model, input_features=train.NPOLY)
 
     t = Training(model, cfg, train, val, test, xscaler, yscaler)
-    model = t.train_model()
+
+    chkpath = os.path.join(MODEL_FOLDER, "run-1.pt")
+    print("chkpath: {}".format(chkpath))
+
+    model = t.continue_from_checkpoint(chkpath)
+    #model = t.train_model()
     t.model_eval()
 
