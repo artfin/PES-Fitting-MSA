@@ -20,7 +20,7 @@ def build_network_yaml(architecture, input_features, builder=Builder(torch.nn.__
     activation  = architecture['ACTIVATION']
     bias        = architecture.get('BIAS', True)
     BN          = architecture.get('BN', False)
-    dropout     = architecture.get('DROUPOUT', 0.0)
+    dropout     = architecture.get('DROPOUT', 0.0)
 
     in_features = input_features
     out_features = input_features
