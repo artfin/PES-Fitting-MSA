@@ -230,7 +230,9 @@ class Training:
         if writer_dir is not None:
             self.writer = SummaryWriter(log_dir=writer_dir)
         else:
-            self.writer = SummaryWriter()
+            model_name = os.path.split(cfg['OUTPUT_PATH'])[1]
+            log_dir = os.path.join("runs", model_name)
+            self.writer = SummaryWriter(log_dir=log_dir)
 
         self.model = model
         self.cfg_solver = cfg['TRAINING']
