@@ -217,6 +217,14 @@ class EarlyStopping:
         }
         torch.save(checkpoint, self.chk_path)
 
+def count_params(model):
+    nparams = 0
+    for name, param in model.named_parameters():
+        params = torch.tensor(param.size())
+        nparams += torch.prod(params, 0)
+
+    return nparams
+
 class Training:
     def __init__(self, model, cfg, train, val, test, xscaler, yscaler, writer_dir=None):
         if writer_dir is not None:
@@ -560,7 +568,7 @@ if __name__ == "__main__":
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-4-L1")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
@@ -595,13 +603,15 @@ if __name__ == "__main__":
 
     cfg_model = cfg['MODEL']
     model = build_network_yaml(cfg_model, input_features=train.NPOLY)
+    nparams = count_params(model)
+    logging.info("Number of parameters: {}".format(nparams))
 
     t = Training(model, cfg, train, val, test, xscaler, yscaler)
 
-    chkpath = os.path.join(MODEL_FOLDER, "run-1.pt")
-    print("chkpath: {}".format(chkpath))
+    #chkpath = os.path.join(MODEL_FOLDER, "run-1.pt")
+    #print("chkpath: {}".format(chkpath))
 
-    model = t.continue_from_checkpoint(chkpath)
-    #model = t.train_model()
+    #model = t.continue_from_checkpoint(chkpath)
+    model = t.train_model()
     t.model_eval()
 

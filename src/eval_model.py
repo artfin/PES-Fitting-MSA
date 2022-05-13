@@ -44,31 +44,6 @@ Boltzmann = 1.380649e-23      # SI: J / K
 Hartree = 4.3597447222071e-18 # SI: J
 HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 
-#def retrieve_checkpoint(folder, fname):
-#    fpath = os.path.join(folder, fname)
-#    logging.info("Retrieving checkpoint from fpath={}".format(fpath))
-#
-#    checkpoint = torch.load(fpath)
-#    arch = checkpoint["architecture"]
-#    NPOLY = checkpoint["meta_info"]["NPOLY"]
-#
-#    activation = checkpoint["activation"]
-#    activation_instance = globals()[activation]()
-#
-#    model = define_model(architecture=arch, NPOLY=NPOLY, activation=activation_instance)
-#    model.double()
-#    model.load_state_dict(checkpoint["model"])
-#
-#    print(model)
-#
-#    model.eval()
-#
-#    xscaler = StandardScaler.from_precomputed(mean=checkpoint["X_mean"], std=checkpoint["X_std"])
-#    yscaler = StandardScaler.from_precomputed(mean=checkpoint["y_mean"], std=checkpoint["y_std"])
-#    meta_info = checkpoint["meta_info"]
-#
-#    return model, xscaler, yscaler, meta_info
-
 def summarize_optuna_run(optuna_folder):
     model_names = [f for f in os.listdir(optuna_folder) if os.path.isfile(os.path.join(optuna_folder, f))]
 
@@ -98,6 +73,8 @@ def load_published():
     data = np.loadtxt(fname)
     return data[:,1], data[:,2]
 
+from train_model import WRMSELoss_Boltzmann
+
 def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
     #inf_poly[0, 0] = 1.0
@@ -118,15 +95,15 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     ax = plt.gca()
 
     plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
-    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=0.5, label='val')
-    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=0.5, label='test')
+    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=0.5, label='val')
+    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=0.5, label='test')
     #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
     #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
     #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
-    plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
+    #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
     plt.xlim((-200.0, 2000.0))
-    plt.ylim((-30.0, 30.0))
+    plt.ylim((-20.0, 20.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -187,14 +164,21 @@ class Evaluator:
         return self.yscaler.inverse_transform(ytr.detach().numpy())
 
 
-def retrieve_checkpoint(cfg):
-    chk_path = os.path.join(cfg["OUTPUT_PATH"], "checkpoint.pt")
+def retrieve_checkpoint(cfg, chk_fname="checkpoint.pt"):
+    chk_path = os.path.join(cfg["OUTPUT_PATH"], chk_fname)
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
     cfg_model = cfg['MODEL']
     model = build_network_yaml(cfg_model, input_features=meta_info["NPOLY"])
     model.load_state_dict(checkpoint["model"])
+
+    nparams = 0
+    for name, param in model.named_parameters():
+        params = torch.tensor(param.size())
+        nparams += torch.prod(params, 0)
+
+    logging.info("Number of parameters: {}".format(nparams))
 
     xscaler        = StandardScaler()
     xscaler.mean_  = checkpoint['X_mean']
@@ -217,7 +201,11 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-3")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-2")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-5-L1")
 
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
@@ -236,7 +224,13 @@ if __name__ == '__main__':
     val   = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['VAL_DATA_PATH']))
     test  = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TEST_DATA_PATH']))
 
-    evaluator = retrieve_checkpoint(cfg)
+    evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
+    pred_train = evaluator(train.X)
+
+    mean_diff = torch.mean(torch.abs(train.y - evaluator(train.X)))
+    max_diff = torch.max(torch.abs(train.y - evaluator(train.X)))
+    print("mean diff: {}".format(mean_diff))
+    print("max diff: {}".format(max_diff))
 
     figpath = os.path.join(BASEDIR, cfg['OUTPUT_PATH'], "errors.png")
     plot_errors_from_checkpoint(evaluator, train, val, test, figpath=figpath)
