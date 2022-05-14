@@ -153,7 +153,7 @@ class WRMSELoss_PS(torch.nn.Module):
         yd_pred = y_pred * self.y_std + self.y_mean
 
         N = 1e-4
-        Ehat = torch.max(y, self.Emax.expand_as(y))
+        Ehat = torch.max(yd, self.Emax.expand_as(yd))
         w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
         wmse = (w * (y - y_pred)**2).mean()
 
@@ -567,10 +567,11 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
