@@ -65,7 +65,7 @@ if __name__ == "__main__":
     label = 0
 
     for xyz_path in XYZ_PATHS:
-        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=True)
+        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=False)
 
         if GLOBAL_SET:
             assert GLOBAL_NATOMS == dataset.NATOMS
@@ -99,14 +99,30 @@ if __name__ == "__main__":
     # splitting polynomials into train/val/test and saving
     #######################################################################
 
+    logging.info("> Performing stratified splitting.")
+    logging.info("Placing an energy limit in validation set; moving rejected points to test set")
+
+    VAL_ENERGY_LIMIT = 2000.0 # cm-1
+
     data_split = sklearn.model_selection.train_test_split
 
     X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=42, stratify=X[:, -1])
     X_val, X_test, y_val, y_test = data_split(X_test, y_test, test_size=0.5, random_state=42, stratify=X_test[:, -1])
 
+    indl, indm = (y_val < VAL_ENERGY_LIMIT).nonzero()[:, 0], (y_val >= VAL_ENERGY_LIMIT).nonzero()[:, 0]
+
+    y_test = torch.cat((y_test, y_val[indm]))
+    y_val  = y_val[indl]
+
+    X_test = torch.cat((X_test, X_val[indm]))
+    X_val  = X_val[indl]
+
     logging.info("X_train.size(): {}".format(X_train.size()))
     logging.info("X_val.size(): {}".format(X_val.size()))
     logging.info("X_test.size(): {}".format(X_test.size()))
+
+    sz = y_train.size()[0] + y_val.size()[0] + y_test.size()[0]
+    logging.info("Total number of configurations: {}".format(sz))
 
     labels = list(map(int, labels.squeeze().tolist()))
     for label_typ in set(labels):
@@ -124,11 +140,13 @@ if __name__ == "__main__":
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
 
+
     X_train = X_train[:, :-1]
     dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
                     symmetry=symmetry, order=order, X=X_train, y=y_train)
     train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train{}.pk".format(DATASET_POSTFIX))
     torch.save(dict_pk, train_interim_pk_fname)
+
 
     X_val = X_val[:, :-1]
     dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
