@@ -45,12 +45,22 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
         raise ValueError("unreachable")
 
     train.X = torch.from_numpy(xscaler.fit_transform(train.X))
-    val.X   = torch.from_numpy(xscaler.transform(val.X))
-    test.X  = torch.from_numpy(xscaler.transform(test.X))
+
+    try:
+        val.X   = torch.from_numpy(xscaler.transform(val.X))
+        test.X  = torch.from_numpy(xscaler.transform(test.X))
+    except ValueError:
+        val.X  = torch.empty((1, 1))
+        test.X = torch.empty((1, 1))
 
     train.y = torch.from_numpy(yscaler.fit_transform(train.y))
-    val.y   = torch.from_numpy(yscaler.transform(val.y))
-    test.y  = torch.from_numpy(yscaler.transform(test.y))
+
+    try:
+        val.y   = torch.from_numpy(yscaler.transform(val.y))
+        test.y  = torch.from_numpy(yscaler.transform(test.y))
+    except ValueError:
+        val.y = torch.empty(1)
+        test.y = torch.empty(1)
 
     return xscaler, yscaler
 
@@ -120,11 +130,23 @@ class WRMSELoss_Boltzmann(torch.nn.Module):
 class WRMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt = dwt
+        self.dwt    = dwt
+
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
     def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
         ymin = y.min()
-        w = self.dwt / (self.dwt + y - ymin)
+
+        w  = self.dwt / (self.dwt + y - ymin)
+        yd = y * self.y_std + self.y_mean
         wmse = (w * (y - y_pred)**2).mean()
 
         return torch.sqrt(wmse)
@@ -155,6 +177,7 @@ class WRMSELoss_PS(torch.nn.Module):
         N = 1e-4
         Ehat = torch.max(yd, self.Emax.expand_as(yd))
         w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
+        w /= w.max()
         wmse = (w * (y - y_pred)**2).mean()
 
         return torch.sqrt(wmse)
@@ -255,6 +278,8 @@ class Training:
         # so we pass (mean_, scale_) variables to perform inverse_transform
         #
         if isinstance(self.loss_fn, WRMSELoss_PS):
+            self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+        elif isinstance(self.loss_fn, WRMSELoss_Ratio):
             self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.pretraining = False
