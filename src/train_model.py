@@ -166,6 +166,9 @@ class WRMSELoss_PS(torch.nn.Module):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
         self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
+    def __repr__(self):
+        return "WRMSELoss_PS(Emax={})".format(self.Emax)
+
     def forward(self, y, y_pred):
         assert self.y_mean is not None
         assert self.y_std is not None
@@ -351,8 +354,7 @@ class Training:
         else:
             raise ValueError("unreachable")
 
-        logging.info("Build loss function:")
-        logging.info(" WEIGHT_TYPE:           {}".format(self.cfg_loss['WEIGHT_TYPE']))
+        logging.info("Build loss function: {}".format(loss_fn))
 
         return loss_fn
 
@@ -592,11 +594,13 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
+
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
