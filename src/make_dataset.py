@@ -105,13 +105,18 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=42, stratify=X[:, -1])
     X_val, X_test, y_val, y_test = data_split(X_test, y_test, test_size=0.5, random_state=42, stratify=X_test[:, -1])
 
-    #logging.info("Placing an energy limit in validation set; moving rejected points to test set")
-    #VAL_ENERGY_LIMIT = 2000.0 # cm-1
-    #indl, indm = (y_val < VAL_ENERGY_LIMIT).nonzero()[:, 0], (y_val >= VAL_ENERGY_LIMIT).nonzero()[:, 0]
-    #y_test = torch.cat((y_test, y_val[indm]))
-    #y_val  = y_val[indl]
-    #X_test = torch.cat((X_test, X_val[indm]))
-    #X_val  = X_val[indl]
+    logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
+    ENERGY_LIMIT = 2000.0 # cm-1
+
+    indl, indm = (y_train < ENERGY_LIMIT).nonzero()[:, 0], (y_train >= ENERGY_LIMIT).nonzero()[:, 0]
+    y_test = torch.cat((y_test, y_train[indm]))
+    X_test = torch.cat((X_test, X_train[indm]))
+    X_train, y_train = X_train[indl], y_train[indl]
+
+    indl, indm = (y_val < ENERGY_LIMIT).nonzero()[:, 0], (y_val >= ENERGY_LIMIT).nonzero()[:, 0]
+    y_test = torch.cat((y_test, y_val[indm]))
+    X_test = torch.cat((X_test, X_val[indm]))
+    X_val, y_val  = X_val[indl], y_val[indl]
 
     logging.info("X_train.size(): {}".format(X_train.size()))
     logging.info("X_val.size(): {}".format(X_val.size()))
