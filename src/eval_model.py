@@ -21,24 +21,16 @@ from genpip import cmdstat, cl
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-plt.rcParams["mathtext.fontset"] = "cm"
-mpl.rcParams['font.serif'] = 'Times'
+plt.style.use('science')
 
-latex_params = {
-    "pgf.texsystem": "pdflatex",
-    'figure.titlesize' : 'large',
-    "text.usetex": True,
+plt.rcParams.update({
     "font.family": "serif",
-    "font.serif": 'Times',
-    "font.monospace": [],
-    "axes.labelsize": 21,
-    "font.size": 21,
-    "legend.fontsize": 21,
-    "xtick.labelsize": 21,
-    "ytick.labelsize": 21,
-}
-mpl.rcParams.update(latex_params)
-plt.style.use('dark_background')
+    "font.serif" : ["Times"],
+    'figure.titlesize' : "Large",
+    "axes.labelsize" : 21,
+    "xtick.labelsize" : 18,
+    "ytick.labelsize" : 18,
+})
 
 Boltzmann = 1.380649e-23      # SI: J / K
 Hartree = 4.3597447222071e-18 # SI: J
@@ -73,8 +65,6 @@ def load_published():
     data = np.loadtxt(fname)
     return data[:,1], data[:,2]
 
-from train_model import WRMSELoss_Boltzmann
-
 def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
     #inf_poly[0, 0] = 1.0
@@ -94,16 +84,16 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     plt.figure(figsize=(10, 10))
     ax = plt.gca()
 
-    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
-    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=0.5, label='val')
-    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=0.5, label='test')
+    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
+    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
+    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
     #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
     #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
     #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
     #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
     plt.xlim((-200.0, 2000.0))
-    plt.ylim((-20.0, 20.0))
+    plt.ylim((-15.0, 15.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -118,9 +108,10 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     #ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
     #ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
-    #lgnd = plt.legend(fontsize=18)
-    #lgnd.legendHandles[0].set_lw(1.5)
-    #lgnd.legendHandles[1].set_lw(1.5)
+    lgnd = plt.legend(fontsize=18)
+    lgnd.legendHandles[0].set_lw(1.5)
+    lgnd.legendHandles[1].set_lw(1.5)
+    lgnd.legendHandles[2].set_lw(1.5)
 
     if figpath is not None:
         plt.savefig(figpath, format="png", dpi=300)
@@ -201,11 +192,27 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "exp11")
+
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-3")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-2")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-5-L1")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-no-reg")
+
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-no-reg")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-10")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-9")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-8")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-7")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-6")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-5")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
+
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-7-L1-lambda=1e-8")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-11")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-12")
+
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
 
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
@@ -225,12 +232,18 @@ if __name__ == '__main__':
     test  = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TEST_DATA_PATH']))
 
     evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
-    pred_train = evaluator(train.X)
 
-    mean_diff = torch.mean(torch.abs(train.y - evaluator(train.X)))
-    max_diff = torch.max(torch.abs(train.y - evaluator(train.X)))
-    print("mean diff: {}".format(mean_diff))
-    print("max diff: {}".format(max_diff))
+    pred_train = torch.from_numpy(evaluator(train.X))
+
+    ind = (train.y < 2000.0).nonzero()[:,0]
+    yf = train.y[ind]
+    predf = pred_train[ind]
+    diff = torch.abs(yf - predf)
+
+    mean_diff = torch.mean(diff)
+    max_diff = torch.max(diff)
+    logging.info("[< 2000 cm-1] mean diff: {}".format(mean_diff))
+    logging.info("[< 2000 cm-1] max diff: {}".format(max_diff))
 
     figpath = os.path.join(BASEDIR, cfg['OUTPUT_PATH'], "errors.png")
     plot_errors_from_checkpoint(evaluator, train, val, test, figpath=figpath)
