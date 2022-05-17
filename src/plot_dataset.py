@@ -127,10 +127,25 @@ class XYZPlotter:
 
         plt.hist(N2_energy, color='#88B04B', bins='auto')
 
-        plt.xlim((0.0, 700.0))
+        plt.xlim((0.0, 1000.0))
+
+        plt.xlabel(r'E(N$_2$), cm$^{-1}$')
+        plt.ylabel(r'\# configurations')
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(200.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(1000.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
         if figpath is not None:
-            assert False
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
 
         plt.show()
 
@@ -156,8 +171,25 @@ class XYZPlotter:
 
         plt.hist(ch4_energy, color='#88B04B', bins='auto')
 
+        plt.xlim((0.0, 3000.0))
+
+        plt.xlabel(r'E(CH$_4$), cm$^{-1}$')
+        plt.ylabel(r'\# configurations')
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
         if figpath is not None:
-            assert False
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
 
         plt.show()
 
@@ -178,8 +210,25 @@ class XYZPlotter:
         plt.hist(NN_dist, color='#88B04B', bins='auto')
         plt.axvline(NN_ref_dist, color='#FF6F61', linewidth=3)
 
+        plt.xlabel(r'N--N distance, \AA')
+        plt.ylabel(r'\# configurations')
+
+        plt.xlim((1.05, 1.15))
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(0.01))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(0.005))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
         if figpath is not None:
-            assert False
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
 
         plt.show()
 
@@ -210,14 +259,14 @@ class XYZPlotter:
         plt.hist(CH_dist, color='#88B04B', bins='auto')
         plt.axvline(CH_ref_dist, color='#FF6F61', linewidth=3)
 
-        plt.title("May 03; NCONFIGS={}".format(NCONFIGS))
         plt.xlabel(r'C--H distance, \AA')
+        plt.ylabel(r'\# configurations')
 
         plt.xlim((1.04, 1.14))
 
         ax.xaxis.set_major_locator(plt.MultipleLocator(0.03))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(0.01))
-        ax.yaxis.set_major_locator(plt.MultipleLocator(200.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(500.0))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
 
         ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
@@ -261,12 +310,14 @@ class XYZPlotter:
         plt.hist(HCH_angles, color='#88B04B', bins='auto')
         plt.axvline(HCH_ref_angle, color='#FF6F61', linewidth=3)
 
-        plt.title("May 03; NCONFIGS={}".format(NCONFIGS))
-        plt.xlabel(r"$\angle$ HCH angle")
+        plt.xlabel(r"$\angle$ HCH")
+        plt.ylabel(r'\# configurations')
+
+        plt.xlim((85.0, 135.0))
 
         ax.xaxis.set_major_locator(plt.MultipleLocator(10.0))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(5.0))
-        ax.yaxis.set_major_locator(plt.MultipleLocator(200.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(500.0))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(100.0))
 
         ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
@@ -277,6 +328,7 @@ class XYZPlotter:
         if figpath is not None:
             logging.info("Saving figure to figpath={}".format(figpath))
             plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
 
         plt.show()
 
@@ -297,10 +349,13 @@ class XYZPlotter:
         plt.bar(range(len(hist)), hist, width=0.8, color='#88B04B')
 
         ax.set_xticks([0.5 + i for i, _ in enumerate(hist)])
-        ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist[:-1])] + [''])
+        ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist[:-1])] + [r"$>$ 2000.0"])
         ax.tick_params(axis='x', which='major', labelsize=15, rotation=45)
 
-        plt.xlabel(r"Energy, cm$^{-1}$")
+        plt.xlabel(r"Intermolecular energy, cm$^{-1}$")
+        plt.ylabel(r'\# configurations')
+
+        plt.yscale('log')
 
         ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
         ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
@@ -308,7 +363,9 @@ class XYZPlotter:
         ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
         if figpath is not None:
-            plt.savefig(figpath, format='png', dpi=300)
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
 
         plt.show()
 
@@ -364,17 +421,15 @@ if __name__ == "__main__":
     ]
 
     plotter = XYZPlotter(*xyz_paths)
-    #plotter.make_histogram_N2_energy()
-    plotter.make_histogram_CH4_energy()
-    #plotter.make_histogram_intermolecular_energy()
-
-    #plotter.make_histogram_R()
-    #plotter.make_histogram_NN_distance()
-    #plotter.make_histogram_CH_distance()
-    #plotter.make_histogram_HCH_angle()
+    #plotter.make_histogram_CH4_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-energy.png"))
+    #plotter.make_histogram_N2_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "N2-energy.png"))
+    #plotter.make_histogram_intermolecular_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "intermolecular-energy.png"))
 
     #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
-    #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
+    plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
+    #plotter.make_histogram_NN_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "NN-distance.png"))
+
+    #plotter.make_histogram_R()
 
     #X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     #X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
