@@ -21,14 +21,17 @@ from typing import List, Optional
 
 @dataclass
 class PolyDataset_t:
-    NATOMS   : int
-    NMON     : int
-    NPOLY    : int
-    symmetry : str
-    order    : str
-    X        : torch.Tensor
-    y        : torch.Tensor
-    mask     : Optional[List[int]] = None
+    NATOMS       : int
+    NMON         : int
+    NPOLY        : int
+    symmetry     : str
+    order        : str
+    X            : torch.Tensor
+    y            : torch.Tensor
+    mask         : Optional[List[int]] = None
+    energy_limit : float = None
+    intermz      : bool = False
+
 
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
