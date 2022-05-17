@@ -576,8 +576,6 @@ def setup_google_folder():
             file.Upload()
 
 def load_dataset(cfg_dataset):
-    cfg_dataset = cfg['DATASET']
-
     order        = cfg_dataset['ORDER']
     typ          = cfg_dataset['TYPE'].lower()
     energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)

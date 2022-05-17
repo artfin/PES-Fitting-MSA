@@ -1,4 +1,5 @@
 import collections
+from itertools import combinations
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +23,10 @@ from train_model import load_dataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
+import sys
+sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
+from pybind_ch4 import Poten_CH4
+
 plt.style.use('science')
 
 plt.rcParams.update({
@@ -34,8 +39,9 @@ plt.rcParams.update({
 })
 
 Boltzmann = 1.380649e-23      # SI: J / K
-Hartree = 4.3597447222071e-18 # SI: J
-HkT = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
+Hartree   = 4.3597447222071e-18 # SI: J
+HkT       = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
+BOHRTOANG = 0.529177249
 
 def summarize_optuna_run(optuna_folder):
     model_names = [f for f in os.listdir(optuna_folder) if os.path.isfile(os.path.join(optuna_folder, f))]
@@ -177,6 +183,161 @@ def retrieve_checkpoint(cfg, chk_fname="checkpoint.pt"):
     evaluator = Evaluator(model, xscaler, yscaler, meta_info)
     return evaluator
 
+from collections import namedtuple
+XYZConfig = namedtuple('Config', ['atoms', 'energy'])
+
+class EvalFile:
+    a0     = 2.0 # bohrs
+    NATOMS = 7
+    NDIS   = 21
+
+    def __init__(self, evaluator, fpath):
+        self.evaluator = evaluator
+        self.fpath = fpath
+
+        self.xyz_configs = self.load_xyz(fpath)
+        self.setup_fortran_procs()
+
+        self.set_intermolecular_to_zero = False
+        logging.info("preparing atomic distances..")
+        self.yij = self.make_yij(self.xyz_configs)
+        logging.info("Done.")
+
+    def make_yij(self, xyz_configs):
+        if self.set_intermolecular_to_zero:
+            logging.info("setting intermolecular Morse variables to zero")
+
+        NCONFIGS = len(xyz_configs)
+
+        yij = np.zeros((NCONFIGS, self.NDIS), order="F")
+
+        for n in range(NCONFIGS):
+            c = xyz_configs[n]
+
+            k = 0
+            for i, j in combinations(range(self.NATOMS), 2):
+                # CH4-N2
+                if self.set_intermolecular_to_zero:
+                    if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
+                    if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
+                    if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
+                    if i == 1 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H2 H3
+                    if i == 1 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H2 H4
+                    if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H3 H4
+                    if i == 0 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H1 C
+                    if i == 1 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H2 C
+                    if i == 2 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H3 C
+                    if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
+                    if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
+
+                yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
+                yij[n][k] = np.exp(-yij[n, k] / self.a0)
+                k = k + 1
+
+        return yij
+
+    def make_histogram_CH4_energy_vs_error(self):
+        pes = Poten_CH4(libpath=os.path.join(BASEDIR, "external", "pes", "xy4.so"))
+
+        NMON = 2892
+        NPOLY = 650
+        logging.info("USING NMON={}".format(NMON))
+        logging.info("USING NPOLY={}".format(NPOLY))
+
+        x = np.zeros((self.NDIS, 1))
+        m = np.zeros((NMON, 1))
+        p = np.zeros((NPOLY, 1))
+
+        NCONFIGS = len(self.xyz_configs)
+
+        error           = np.zeros((NCONFIGS, 1))
+        intermol_energy = np.zeros((NCONFIGS, 1))
+        ch4_energy      = np.zeros((NCONFIGS, 1))
+
+        for n in range(0, NCONFIGS):
+            x = self.yij[n, :].copy()
+            self.evmono(x, m)
+            self.evpoly(m, p)
+
+            pred               = evaluator(p.reshape((1, NPOLY)))[0][0]
+            intermol_energy[n] = self.xyz_configs[n].energy
+            error[n]           = pred - intermol_energy[n]
+
+            xyz_config = self.xyz_configs[n]
+            CH4_config = np.array([
+                *xyz_config.atoms[6, :] * BOHRTOANG, # C
+                *xyz_config.atoms[0, :] * BOHRTOANG, # H1
+                *xyz_config.atoms[1, :] * BOHRTOANG, # H2
+                *xyz_config.atoms[2, :] * BOHRTOANG, # H3
+                *xyz_config.atoms[3, :] * BOHRTOANG, # H4
+            ])
+
+            ch4_energy[n] = pes.eval(CH4_config)
+            print(n)
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        plt.scatter(intermol_energy, error, color='#88B04B', facecolor='none', lw=1.5)
+
+        plt.xlim((-200.0, 2000.0))
+        plt.ylim((-15.0, 15.0))
+
+        plt.title(r"CH$_4$: 1000 -- 2000 cm$^{-1}$")
+        plt.xlabel(r"Intermolecular energy, cm$^{-1}$")
+        plt.ylabel(r"$\Delta$ E, cm$^{-1}$")
+
+        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(5.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        plt.show()
+
+
+    def setup_fortran_procs(self):
+        import ctypes as ct
+        F_LIBNAME = os.path.join(BASEDIR, "datasets", "external", "f_basis_4_2_1_4.so")
+        logging.info("Loading and setting up Fortran procedures from LIBNAME: {}".format(F_LIBNAME))
+        basislib = ct.CDLL(F_LIBNAME)
+
+        self.evmono = basislib.c_evmono
+        self.evpoly = basislib.c_evpoly
+
+        from numpy.ctypeslib import ndpointer
+        self.evmono.argtypes = [ndpointer(ct.c_double, flags="F_CONTIGUOUS"), ndpointer(ct.c_double, flags="F_CONTIGUOUS")]
+        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="F_CONTIGUOUS"), ndpointer(ct.c_double, flags="F_CONTIGUOUS")]
+
+    def load_xyz(self, fpath):
+        nlines = sum(1 for line in open(fpath, mode='r'))
+        NATOMS = int(open(fpath, mode='r').readline())
+        logging.info("detected NATOMS = {}".format(NATOMS))
+
+        NCONFIGS = nlines // (NATOMS + 2)
+        logging.info("detected NCONFIGS = {}".format(NCONFIGS))
+
+        xyz_configs = []
+        with open(fpath, mode='r') as inp:
+            for i in range(NCONFIGS):
+                line = inp.readline()
+                energy = float(inp.readline())
+
+                atoms = np.zeros((NCONFIGS, 3))
+                for natom in range(NATOMS):
+                    words = inp.readline().split()
+                    atoms[natom, :] = list(map(float, words[1:]))
+
+                c = XYZConfig(atoms=atoms, energy=energy)
+                xyz_configs.append(c)
+
+        return xyz_configs
+
+
 
 if __name__ == '__main__':
     logger = logging.getLogger()
@@ -188,7 +349,7 @@ if __name__ == '__main__':
     logger.addHandler(ch)
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "exp11")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-2")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-2")
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-3")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-2")
@@ -206,9 +367,7 @@ if __name__ == '__main__':
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-7-L1-lambda=1e-8")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-11")
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-12")
-
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-12")
 
     cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
     with open(cfg_path, mode="r") as stream:
@@ -219,10 +378,17 @@ if __name__ == '__main__':
 
     logging.info("loaded configuration file from {}".format(cfg_path))
 
+    evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
+
+    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"))
+    ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"))
+    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"))
+    ef.make_histogram_CH4_energy_vs_error()
+
+    assert False
+
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
-
-    evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
 
     pred_train = torch.from_numpy(evaluator(train.X))
 
