@@ -575,6 +575,51 @@ def setup_google_folder():
             file.SetContentFile('README.md')
             file.Upload()
 
+def load_dataset(cfg_dataset):
+    cfg_dataset = cfg['DATASET']
+
+    order        = cfg_dataset['ORDER']
+    typ          = cfg_dataset['TYPE'].lower()
+    energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)
+    intermz      = cfg_dataset.get('INTERMOLECULAR_TO_ZERO', False)
+
+    logging.info("order:        {}".format(order))
+    logging.info("energy_limit: {}".format(energy_limit))
+    logging.info("intermz: {}".format(intermz))
+
+    if energy_limit is not None:
+        enlim_str = "-enlim={:.0f}".format(energy_limit)
+    else:
+        enlim_str = ""
+
+    if intermz:
+        intermz_str = "-intermz=true"
+    else:
+        intermz_str = "-intermz=false"
+
+    datasets_folder = os.path.join(BASEDIR, "datasets", "interim")
+
+    train_fpath = os.path.join(datasets_folder, f"poly_4_2_1_{order}-train-{typ}{enlim_str}{intermz_str}.pk")
+    val_fpath   = os.path.join(datasets_folder, f"poly_4_2_1_{order}-val-{typ}{enlim_str}{intermz_str}.pk")
+    test_fpath  = os.path.join(datasets_folder, f"poly_4_2_1_{order}-test-{typ}{enlim_str}{intermz_str}.pk")
+
+    logging.info("Loading training dataset:   {}".format(train_fpath))
+    logging.info("Loading validation dataset: {}".format(val_fpath))
+    logging.info("Loading testing dataset:    {}".format(test_fpath))
+
+    train = PolyDataset.from_pickle(train_fpath)
+    assert train.energy_limit == energy_limit
+    assert train.intermz      == intermz
+
+    val   = PolyDataset.from_pickle(val_fpath)
+    assert val.energy_limit == energy_limit
+    assert val.intermz      == intermz
+
+    test  = PolyDataset.from_pickle(test_fpath)
+    assert test.energy_limit == energy_limit
+    assert test.intermz      == intermz
+
+    return train, val, test
 
 if __name__ == "__main__":
     logger = logging.getLogger()
@@ -600,7 +645,8 @@ if __name__ == "__main__":
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-silu")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
@@ -620,18 +666,12 @@ if __name__ == "__main__":
     logging.info("loaded configuration file from {}".format(cfg_path))
 
     cfg_dataset = cfg['DATASET']
-    logging.info("Loading training dataset from TRAIN_DATA_PATH={}".format(cfg_dataset['TRAIN_DATA_PATH']))
-    logging.info("Loading validation dataset from VAL_DATA_PATH={}".format(cfg_dataset['VAL_DATA_PATH']))
-    logging.info("Loading testing dataset from TEST_DATA_PATH={}".format(cfg_dataset['TEST_DATA_PATH']))
-    train = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TRAIN_DATA_PATH']))
-    val   = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['VAL_DATA_PATH']))
-    test  = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TEST_DATA_PATH']))
-
+    train, val, test = load_dataset(cfg_dataset)
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
-    logging.info(" xscaler.mean:  {}".format(xscaler.mean_))
-    logging.info(" xscaler.scale: {}".format(xscaler.scale_))
-    logging.info(" yscaler.mean:  {}".format(yscaler.mean_))
-    logging.info(" yscaler.scale: {}".format(yscaler.scale_))
+    #logging.info(" xscaler.mean:  {}".format(xscaler.mean_))
+    #logging.info(" xscaler.scale: {}".format(xscaler.scale_))
+    #logging.info(" yscaler.mean:  {}".format(yscaler.mean_))
+    #logging.info(" yscaler.scale: {}".format(yscaler.scale_))
 
     cfg_model = cfg['MODEL']
     model = build_network_yaml(cfg_model, input_features=train.NPOLY)

@@ -11,22 +11,35 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-DATASET_POSTFIX = "-nonrigid"
-XYZ_PATHS = [
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-]
-
-#DATASET_POSTFIX = "-rigid"
-#XYZ_PATHS = {
+#DATASET_POSTFIX = "-nonrigid"
+#XYZ_PATHS = [
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#}
+#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+#]
+
+DATASET_POSTFIX = "-rigid"
+XYZ_PATHS = {
+    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+}
 
 order     = "4"
 wdir      = "datasets/external"
 symmetry  = "4 2 1"
+
+PLACE_ENERGY_LIMIT = True
+if PLACE_ENERGY_LIMIT:
+    ENERGY_LIMIT = 2000.0 # cm-1
+    ENERGY_LIMIT_POSTFIX = "-enlim={:.0f}".format(ENERGY_LIMIT)
+else:
+    ENERGY_LIMIT_POSTFIX = ""
+
+INTERMOLECULAR_TO_ZERO = False
+if INTERMOLECULAR_TO_ZERO:
+    INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=true"
+else:
+    INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=false"
 
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -65,7 +78,7 @@ if __name__ == "__main__":
     label = 0
 
     for xyz_path in XYZ_PATHS:
-        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=False)
+        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=INTERMOLECULAR_TO_ZERO)
 
         if GLOBAL_SET:
             assert GLOBAL_NATOMS == dataset.NATOMS
@@ -105,18 +118,18 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=42, stratify=X[:, -1])
     X_val, X_test, y_val, y_test = data_split(X_test, y_test, test_size=0.5, random_state=42, stratify=X_test[:, -1])
 
-    logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
-    ENERGY_LIMIT = 2000.0 # cm-1
+    if PLACE_ENERGY_LIMIT:
+        logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
 
-    indl, indm = (y_train < ENERGY_LIMIT).nonzero()[:, 0], (y_train >= ENERGY_LIMIT).nonzero()[:, 0]
-    y_test = torch.cat((y_test, y_train[indm]))
-    X_test = torch.cat((X_test, X_train[indm]))
-    X_train, y_train = X_train[indl], y_train[indl]
+        indl, indm = (y_train < ENERGY_LIMIT).nonzero()[:, 0], (y_train >= ENERGY_LIMIT).nonzero()[:, 0]
+        y_test = torch.cat((y_test, y_train[indm]))
+        X_test = torch.cat((X_test, X_train[indm]))
+        X_train, y_train = X_train[indl], y_train[indl]
 
-    indl, indm = (y_val < ENERGY_LIMIT).nonzero()[:, 0], (y_val >= ENERGY_LIMIT).nonzero()[:, 0]
-    y_test = torch.cat((y_test, y_val[indm]))
-    X_test = torch.cat((X_test, X_val[indm]))
-    X_val, y_val  = X_val[indl], y_val[indl]
+        indl, indm = (y_val < ENERGY_LIMIT).nonzero()[:, 0], (y_val >= ENERGY_LIMIT).nonzero()[:, 0]
+        y_test = torch.cat((y_test, y_val[indm]))
+        X_test = torch.cat((X_test, X_val[indm]))
+        X_val, y_val  = X_val[indl], y_val[indl]
 
     logging.info("X_train.size(): {}".format(X_train.size()))
     logging.info("X_val.size(): {}".format(X_val.size()))
@@ -141,22 +154,56 @@ if __name__ == "__main__":
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
 
-
     X_train = X_train[:, :-1]
-    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
-                    symmetry=symmetry, order=order, X=X_train, y=y_train)
-    train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train{}.pk".format(DATASET_POSTFIX))
+    dict_pk  = dict(
+        NATOMS=GLOBAL_NATOMS,
+        NMON=GLOBAL_NMON,
+        NPOLY=GLOBAL_NPOLY,
+        symmetry=symmetry,
+        order=order,
+        energy_limit=ENERGY_LIMIT,
+        intermz=INTERMOLECULAR_TO_ZERO,
+        X=X_train,
+        y=y_train
+    )
+    train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train{}{}{}.pk".format(
+        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
+    ))
+    logging.info("Saving training dataset to: {}".format(train_interim_pk_fname))
     torch.save(dict_pk, train_interim_pk_fname)
 
-
     X_val = X_val[:, :-1]
-    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
-                    symmetry=symmetry, order=order, X=X_val, y=y_val)
-    val_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-val{}.pk".format(DATASET_POSTFIX))
+    dict_pk  = dict(
+        NATOMS=GLOBAL_NATOMS,
+        NMON=GLOBAL_NMON,
+        NPOLY=GLOBAL_NPOLY,
+        symmetry=symmetry,
+        order=order,
+        energy_limit=ENERGY_LIMIT,
+        intermz=INTERMOLECULAR_TO_ZERO,
+        X=X_val,
+        y=y_val
+    )
+    val_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-val{}{}{}.pk".format(
+        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
+    ))
+    logging.info("Saving validation dataset to: {}".format(val_interim_pk_fname))
     torch.save(dict_pk, val_interim_pk_fname)
 
     X_test = X_test[:, :-1]
-    dict_pk  = dict(NATOMS=GLOBAL_NATOMS, NMON=GLOBAL_NMON, NPOLY=GLOBAL_NPOLY,
-                    symmetry=symmetry, order=order, X=X_test, y=y_test)
-    test_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-test{}.pk".format(DATASET_POSTFIX))
+    dict_pk  = dict(
+        NATOMS=GLOBAL_NATOMS,
+        NMON=GLOBAL_NMON,
+        NPOLY=GLOBAL_NPOLY,
+        symmetry=symmetry,
+        order=order,
+        energy_limit=ENERGY_LIMIT,
+        intermz=INTERMOLECULAR_TO_ZERO,
+        X=X_test,
+        y=y_test
+    )
+    test_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-test{}{}{}.pk".format(
+        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
+    ))
+    logging.info("Saving testing dataset to: {}".format(test_interim_pk_fname))
     torch.save(dict_pk, test_interim_pk_fname)
