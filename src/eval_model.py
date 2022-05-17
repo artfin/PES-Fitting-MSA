@@ -17,6 +17,7 @@ from matplotlib.ticker import ScalarFormatter
 from build_model import build_network_yaml
 from dataset import PolyDataset
 from genpip import cmdstat, cl
+from train_model import load_dataset
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -54,12 +55,6 @@ def summarize_optuna_run(optuna_folder):
         logging.info("model: {}; full dataset RMSE: {} cm-1".format(model_name, rmse_full))
 
 
-def load_dataset(fpath):
-    logging.info("Loading dataset from fpath={}".format(fpath))
-    d = torch.load(fpath)
-    X, y = d["X"], d["y"]
-    return X, y
-
 def load_published():
     fname = "CH4-N2/published-pes/symm-adapted-published-pes-opt1.txt"
     data = np.loadtxt(fname)
@@ -84,16 +79,16 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     plt.figure(figsize=(10, 10))
     ax = plt.gca()
 
+    #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
     plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
     plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
     plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
     #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
     #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
     #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
-    #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
 
     plt.xlim((-200.0, 2000.0))
-    plt.ylim((-15.0, 15.0))
+    plt.ylim((-5.0, 5.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
@@ -192,7 +187,8 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "exp11")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "exp11")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-2")
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-3")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-2")
@@ -224,12 +220,7 @@ if __name__ == '__main__':
     logging.info("loaded configuration file from {}".format(cfg_path))
 
     cfg_dataset = cfg['DATASET']
-    logging.info("Loading training dataset from TRAIN_DATA_PATH={}".format(cfg_dataset['TRAIN_DATA_PATH']))
-    logging.info("Loading validation dataset from VAL_DATA_PATH={}".format(cfg_dataset['VAL_DATA_PATH']))
-    logging.info("Loading testing dataset from TEST_DATA_PATH={}".format(cfg_dataset['TEST_DATA_PATH']))
-    train = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TRAIN_DATA_PATH']))
-    val   = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['VAL_DATA_PATH']))
-    test  = PolyDataset.from_pickle(os.path.join(BASEDIR, cfg_dataset['TEST_DATA_PATH']))
+    train, val, test = load_dataset(cfg_dataset)
 
     evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
 
