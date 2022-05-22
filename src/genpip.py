@@ -11,6 +11,9 @@ if sys.version_info > (3, 0):
 from collections import namedtuple
 cmdstat = namedtuple('cmdstat', ['stdout', 'stderr', 'returncode'])
 
+import pathlib
+BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
+
 def cl(command):
     p = Popen(command, stdout=PIPE, shell=True)
     stdout, stderr = p.communicate()
@@ -26,7 +29,8 @@ def cl(command):
     return cmdstat(stdout, stderr, returncode)
 
 def build_lib():
-    st = cl('cd src; make msa')
+    c_src = os.path.join(BASEDIR, "c_src")
+    st = cl('cd {}; make msa'.format(c_src))
 
     if st.returncode == 0:
         logging.info(st.stdout)
@@ -36,7 +40,8 @@ def build_lib():
         sys.exit(1)
 
 def run_msa(order, symmetry, wdir):
-    cmd = './src/msa {} {}'.format(order, symmetry)
+    exe = os.path.join(BASEDIR, "c_src", "msa")
+    cmd = '{} {} {}'.format(exe, order, symmetry)
     logging.info("cmd: {}".format(cmd))
     st = cl(cmd)
     logging.info(st.stdout)
@@ -57,7 +62,9 @@ def run_msa(order, symmetry, wdir):
 
 def compile_dlib(order, symmetry, wdir):
     logging.info("postmsa.pl generates Fortran code...")
-    cl('perl postmsa.pl {0} {1} {2}'.format(wdir, order, symmetry))
+
+    perl_script = os.path.join(BASEDIR, "src", "postmsa.pl")
+    cl('perl {0} {1} {2} {3}'.format(perl_script, wdir, order, symmetry))
 
     logging.info("compiling dynamic lib...")
     fname = "basis_{}_{}".format(symmetry.replace(' ', '_'), order)
