@@ -14,11 +14,14 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 DATASET_POSTFIX = "-nonrigid"
 XYZ_PATHS = [
     {
+        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+    },
+    {
         "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-TRUNCATED.xyz"),
         "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
     }
 ]
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
 
