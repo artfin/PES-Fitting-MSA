@@ -11,18 +11,21 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-#DATASET_POSTFIX = "-nonrigid"
-#XYZ_PATHS = [
+DATASET_POSTFIX = "-nonrigid"
+XYZ_PATHS = [
+    {
+        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-TRUNCATED.xyz"),
+        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+    }
+]
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
 #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-#]
 
-DATASET_POSTFIX = "-rigid"
-XYZ_PATHS = {
-    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-}
+#DATASET_POSTFIX = "-rigid"
+#XYZ_PATHS = {
+#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#}
 
 order     = "4"
 wdir      = "datasets/external"
@@ -33,9 +36,10 @@ if PLACE_ENERGY_LIMIT:
     ENERGY_LIMIT = 2000.0 # cm-1
     ENERGY_LIMIT_POSTFIX = "-enlim={:.0f}".format(ENERGY_LIMIT)
 else:
+    ENERGY_LIMIT = None
     ENERGY_LIMIT_POSTFIX = ""
 
-INTERMOLECULAR_TO_ZERO = False
+INTERMOLECULAR_TO_ZERO = True
 if INTERMOLECULAR_TO_ZERO:
     INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=true"
 else:
@@ -77,8 +81,9 @@ if __name__ == "__main__":
     labels = []
     label = 0
 
-    for xyz_path in XYZ_PATHS:
-        dataset = PolyDataset(wdir=wdir, xyz_file=xyz_path, order=order, symmetry=symmetry, set_intermolecular_to_zero=INTERMOLECULAR_TO_ZERO)
+    for block in XYZ_PATHS:
+        dataset = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order, symmetry=symmetry,
+                              set_intermolecular_to_zero=INTERMOLECULAR_TO_ZERO)
 
         if GLOBAL_SET:
             assert GLOBAL_NATOMS == dataset.NATOMS

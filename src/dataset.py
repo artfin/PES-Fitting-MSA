@@ -13,11 +13,17 @@ from genpip import cl
 import torch
 from torch.utils.data import Dataset
 
-from collections import namedtuple
-XYZConfig = namedtuple('Config', ['atoms', 'energy'])
-
 from dataclasses import dataclass
 from typing import List, Optional
+
+# parameter inside the `yij` exp(...)
+a0 = 2.0 # bohrs
+POLYNOMIAL_LIB = "MSA"
+
+@dataclass
+class XYZConfig:
+    atoms  : np.array
+    energy : float
 
 @dataclass
 class PolyDataset_t:
@@ -32,13 +38,47 @@ class PolyDataset_t:
     energy_limit : float = None
     intermz      : bool = False
 
+def check_config(xyz_config):
+    C  = xyz_config.atoms[6, :]
+    H1 = xyz_config.atoms[0, :]
+    H2 = xyz_config.atoms[1, :]
+    H3 = xyz_config.atoms[2, :]
+    H4 = xyz_config.atoms[3, :]
 
-# parameter inside the `yij` exp(...)
-a0 = 2.0 # bohrs
-POLYNOMIAL_LIB = "MSA"
+    r1 = np.linalg.norm(C - H1)
+    r2 = np.linalg.norm(C - H2)
+    r3 = np.linalg.norm(C - H3)
+    r4 = np.linalg.norm(C - H4)
+    rr = np.array([r1, r2, r3, r4])
+
+    MIN_CH = 1.88 # BOHR
+    MAX_CH = 2.5  # BOHR
+    assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
+
+def load_xyz(fpath):
+    nlines = sum(1 for line in open(fpath, mode='r'))
+    NATOMS = int(open(fpath, mode='r').readline())
+    NCONFIGS = nlines // (NATOMS + 2)
+
+    xyz_configs = []
+    with open(fpath, mode='r') as inp:
+        for i in range(NCONFIGS):
+            line = inp.readline()
+            energy = float(inp.readline())
+
+            atoms = np.zeros((NATOMS, 3))
+            for natom in range(NATOMS):
+                words = inp.readline().split()
+                atoms[natom, :] = list(map(float, words[1:]))
+
+            c = XYZConfig(atoms=atoms, energy=energy)
+            check_config(c)
+            xyz_configs.append(c)
+
+    return NATOMS, NCONFIGS, xyz_configs
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, xyz_file, order, symmetry, set_intermolecular_to_zero=True): #, lr_model=None):
+    def __init__(self, wdir, xyz_file, limit_file=None, order=None, symmetry=None, set_intermolecular_to_zero=True): #, lr_model=None):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
@@ -48,7 +88,37 @@ class PolyDataset(Dataset):
 
         logging.info("Loading configurations from xyz_file: {}".format(xyz_file))
 
-        xyz_configs = self.load_xyz(xyz_file)
+        NATOMS, NCONFIGS, xyz_configs = load_xyz(xyz_file)
+        self.NATOMS   = NATOMS
+        self.NCONFIGS = NCONFIGS
+
+        logging.info("Detected NATOMS = {}".format(self.NATOMS))
+        logging.info("Detected NCONFIGS = {}".format(NCONFIGS))
+
+        if limit_file is not None:
+            logging.info("Loading configurations from limit_file: {}".format(limit_file))
+            NATOMS, NCONFIGS, limit_configs = load_xyz(limit_file)
+            assert NATOMS   == self.NATOMS
+            assert NCONFIGS == self.NCONFIGS
+
+            for n in range(NCONFIGS):
+                xyz_config   = xyz_configs[n]
+                limit_config = limit_configs[n]
+
+                np.testing.assert_almost_equal(xyz_config.atoms[0, :], limit_config.atoms[0, :])
+                np.testing.assert_almost_equal(xyz_config.atoms[1, :], limit_config.atoms[1, :])
+                np.testing.assert_almost_equal(xyz_config.atoms[2, :], limit_config.atoms[2, :])
+                np.testing.assert_almost_equal(xyz_config.atoms[3, :], limit_config.atoms[3, :])
+                np.testing.assert_almost_equal(xyz_config.atoms[6, :], limit_config.atoms[6, :])
+
+                xyz_NN   = np.linalg.norm(xyz_config.atoms[4, :]   - xyz_config.atoms[5, :])
+                limit_NN = np.linalg.norm(limit_config.atoms[4, :] - limit_config.atoms[5, :])
+                np.testing.assert_almost_equal(xyz_NN, limit_NN)
+
+                xyz_configs[n].energy -= limit_configs[n].energy
+
+            logging.info("Subtracted asymptotic energies")
+
         X, y = self.prepare_dataset_from_configs(xyz_configs)
 
         if POLYNOMIAL_LIB == "MSA":
@@ -166,54 +236,7 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
-    def check_config(self, xyz_config):
-        C  = xyz_config.atoms[6, :]
-        H1 = xyz_config.atoms[0, :]
-        H2 = xyz_config.atoms[1, :]
-        H3 = xyz_config.atoms[2, :]
-        H4 = xyz_config.atoms[3, :]
 
-        r1 = np.linalg.norm(C - H1)
-        r2 = np.linalg.norm(C - H2)
-        r3 = np.linalg.norm(C - H3)
-        r4 = np.linalg.norm(C - H4)
-        rr = np.array([r1, r2, r3, r4])
-
-        MIN_CH = 1.88 # BOHR
-        MAX_CH = 2.5  # BOHR
-        assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
-
-    def load_xyz(self, fpath):
-        nlines = sum(1 for line in open(fpath, mode='r'))
-        NATOMS = int(open(fpath, mode='r').readline())
-        if hasattr(self, 'NATOMS'):
-            assert self.NATOMS == NATOMS
-            logging.info("NATOMS is consistent.")
-        else:
-            self.NATOMS = NATOMS
-            logging.info("Setting NATOMS attribute.")
-
-        logging.info("detected NATOMS = {}".format(self.NATOMS))
-
-        NCONFIGS = nlines // (self.NATOMS + 2)
-        logging.info("detected NCONFIGS = {}".format(NCONFIGS))
-
-        xyz_configs = []
-        with open(fpath, mode='r') as inp:
-            for i in range(NCONFIGS):
-                line = inp.readline()
-                energy = float(inp.readline())
-
-                atoms = np.zeros((NCONFIGS, 3))
-                for natom in range(self.NATOMS):
-                    words = inp.readline().split()
-                    atoms[natom, :] = list(map(float, words[1:]))
-
-                c = XYZConfig(atoms=atoms, energy=energy)
-                self.check_config(c)
-                xyz_configs.append(c)
-
-        return xyz_configs
 
     def make_yij(self, xyz_configs):
         if self.set_intermolecular_to_zero:

@@ -263,27 +263,27 @@ class EvalFile:
             intermol_energy[n] = self.xyz_configs[n].energy
             error[n]           = pred - intermol_energy[n]
 
-            xyz_config = self.xyz_configs[n]
-            CH4_config = np.array([
-                *xyz_config.atoms[6, :] * BOHRTOANG, # C
-                *xyz_config.atoms[0, :] * BOHRTOANG, # H1
-                *xyz_config.atoms[1, :] * BOHRTOANG, # H2
-                *xyz_config.atoms[2, :] * BOHRTOANG, # H3
-                *xyz_config.atoms[3, :] * BOHRTOANG, # H4
-            ])
-
-            ch4_energy[n] = pes.eval(CH4_config)
+            #xyz_config = self.xyz_configs[n]
+            #CH4_config = np.array([
+            #    *xyz_config.atoms[6, :] * BOHRTOANG, # C
+            #    *xyz_config.atoms[0, :] * BOHRTOANG, # H1
+            #    *xyz_config.atoms[1, :] * BOHRTOANG, # H2
+            #    *xyz_config.atoms[2, :] * BOHRTOANG, # H3
+            #    *xyz_config.atoms[3, :] * BOHRTOANG, # H4
+            #])
+            #ch4_energy[n] = pes.eval(CH4_config)
             print(n)
 
         plt.figure(figsize=(10, 10))
         ax = plt.subplot(1, 1, 1)
 
-        plt.scatter(intermol_energy, error, color='#88B04B', facecolor='none', lw=1.5)
+        ind = intermol_energy < 2000.0
+        plt.scatter(intermol_energy[ind], error[ind], color='#88B04B', facecolor='none', lw=1.5)
 
         plt.xlim((-200.0, 2000.0))
         plt.ylim((-15.0, 15.0))
 
-        plt.title(r"CH$_4$: 1000 -- 2000 cm$^{-1}$")
+        plt.title(r"CH$_4$: 0 cm$^{-1}$")
         plt.xlabel(r"Intermolecular energy, cm$^{-1}$")
         plt.ylabel(r"$\Delta$ E, cm$^{-1}$")
 
@@ -380,8 +380,9 @@ if __name__ == '__main__':
 
     evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
 
-    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"))
-    ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"))
+    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"))
+    ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"))
+    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"))
     #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"))
     ef.make_histogram_CH4_energy_vs_error()
 
