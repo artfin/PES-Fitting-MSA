@@ -7,4 +7,4 @@ nonrigid/*
 
 rigid/*
 !rigid/
-!rigid/L1/L1-tanh/config.yaml
+!rigid/best-model/
