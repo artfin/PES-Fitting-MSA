@@ -77,6 +77,21 @@ def load_xyz(fpath):
 
     return NATOMS, NCONFIGS, xyz_configs
 
+def write_xyz(xyz_path, xyz_configs):
+    natoms = xyz_configs[0].atoms.shape[0]
+
+    with open(xyz_path, mode='w') as fd:
+        for xyz_config in xyz_configs:
+            fd.write("    {}\n".format(natoms))
+            fd.write("    {:.10f}\n".format(xyz_config.energy))
+            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[0, 0], xyz_config.atoms[0, 1], xyz_config.atoms[0, 2]))
+            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[1, 0], xyz_config.atoms[1, 1], xyz_config.atoms[1, 2]))
+            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[2, 0], xyz_config.atoms[2, 1], xyz_config.atoms[2, 2]))
+            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[3, 0], xyz_config.atoms[3, 1], xyz_config.atoms[3, 2]))
+            fd.write("N \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[4, 0], xyz_config.atoms[4, 1], xyz_config.atoms[4, 2]))
+            fd.write("N \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[5, 0], xyz_config.atoms[5, 1], xyz_config.atoms[5, 2]))
+            fd.write("C \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[6, 0], xyz_config.atoms[6, 1], xyz_config.atoms[6, 2]))
+
 class PolyDataset(Dataset):
     def __init__(self, wdir, xyz_file, limit_file=None, order=None, symmetry=None, set_intermolecular_to_zero=True): #, lr_model=None):
         self.wdir = wdir

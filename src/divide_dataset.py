@@ -56,11 +56,7 @@ if __name__ == "__main__":
     logger.addHandler(ch)
 
     fpaths = [
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-1.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-2.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-3.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-4.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-5.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-UNCORR.xyz"),
     ]
 
     xyz_configs = list(itertools.chain.from_iterable(load_xyz(fpath) for fpath in fpaths))
