@@ -114,23 +114,10 @@ class L2Regularization(torch.nn.Module):
             l2_norm += (p**2).sum()
         return self.lambda_ * l2_norm
 
-
-class WRMSELoss_Boltzmann(torch.nn.Module):
-    def __init__(self, e_factor):
+class WMSELoss_Boltzmann(torch.nn.Module):
+    def __init__(self, Eref):
         super().__init__()
-        self.e_factor = torch.tensor(e_factor).to(DEVICE)
-
-    def forward(self, y, y_pred):
-        w = torch.exp(-y * self.e_factor)
-        w = w / w.max()
-        wmse = (w * (y - y_pred)**2).mean()
-
-        return torch.sqrt(wmse)
-
-class WRMSELoss_Ratio(torch.nn.Module):
-    def __init__(self, dwt=1.0):
-        super().__init__()
-        self.dwt    = dwt
+        self.Eref = torch.tensor(Eref).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -139,17 +126,144 @@ class WRMSELoss_Ratio(torch.nn.Module):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
         self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
+    def __repr__(self):
+        return "WMSELoss_Boltzmann(Eref={})".format(self.Eref)
+
     def forward(self, y, y_pred):
         assert self.y_mean is not None
         assert self.y_std is not None
 
-        ymin = y.min()
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
 
-        w  = self.dwt / (self.dwt + y - ymin)
-        yd = y * self.y_std + self.y_mean
-        wmse = (w * (y - y_pred)**2).mean()
+        w = torch.exp(-yd / self.Eref)
+        w = w / w.max()
+
+        wmse = (w * (yd - yd_pred)**2).mean()
+        return wmse
+
+class WRMSELoss_Boltzmann(torch.nn.Module):
+    def __init__(self, Eref):
+        super().__init__()
+        self.Eref = torch.tensor(Eref).to(DEVICE)
+
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
+
+    def __repr__(self):
+        return "WRMSELoss_Boltzmann(Eref={})".format(self.Eref)
+
+    def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
+
+        w = torch.exp(-yd / self.Eref)
+        w = w / w.max()
+
+        wmse = (w * (yd - yd_pred)**2).mean()
+        return torch.sqrt(wmse)
+
+class WMSELoss_Ratio(torch.nn.Module):
+    def __init__(self, dwt=1.0):
+        super().__init__()
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
+
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
+
+    def __repr__(self):
+        return "WMSELoss_Ratio(dwt={})".format(self.dwt)
+
+    def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
+
+        ymin = yd.min()
+
+        w  = self.dwt / (self.dwt + yd - ymin)
+        wmse = (w * (yd - yd_pred)**2).mean()
+        return wmse
+
+class WRMSELoss_Ratio(torch.nn.Module):
+    def __init__(self, dwt=1.0):
+        super().__init__()
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
+
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
+
+    def __repr__(self):
+        return "WRMSELoss_Ratio(dwt={})".format(self.dwt)
+
+    def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
+
+        ymin = yd.min()
+
+        w  = self.dwt / (self.dwt + yd - ymin)
+        wmse = (w * (yd - yd_pred)**2).mean()
 
         return torch.sqrt(wmse)
+
+class WMSELoss_PS(torch.nn.Module):
+    """
+    Weighted mean-squared error with
+    weight factors suggested by Partridge and Schwenke
+    H. Partridge, D. W. Schwenke, J. Chem. Phys. 106, 4618 (1997)
+    """
+    def __init__(self, Emax=2000.0):
+        super().__init__()
+        self.Emax   = torch.FloatTensor([Emax]).to(DEVICE)
+        self.y_mean = None
+        self.y_std  = None
+
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
+
+    def __repr__(self):
+        return "WMSELoss_PS(Emax={})".format(self.Emax)
+
+    def forward(self, y, y_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale energies
+        yd      = y      * self.y_std + self.y_mean
+        yd_pred = y_pred * self.y_std + self.y_mean
+
+        Ehat = torch.max(yd, self.Emax.expand_as(yd))
+        w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.0) / 2.0 / Ehat
+        w /= w.max()
+        wmse = (w * (yd - yd_pred)**2).mean()
+
+        return wmse
 
 class WRMSELoss_PS(torch.nn.Module):
     """
@@ -181,7 +295,7 @@ class WRMSELoss_PS(torch.nn.Module):
         Ehat = torch.max(yd, self.Emax.expand_as(yd))
         w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
         w /= w.max()
-        wmse = (w * (y - y_pred)**2).mean()
+        wmse = (w * (yd - yd_pred)**2).mean()
 
         return torch.sqrt(wmse)
 
@@ -276,14 +390,8 @@ class Training:
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
 
-        # 
-        # Partridge-Schwenke loss function requires absolute energies not normalized ones
-        # so we pass (mean_, scale_) variables to perform inverse_transform
-        #
-        if isinstance(self.loss_fn, WRMSELoss_PS):
-            self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
-        elif isinstance(self.loss_fn, WRMSELoss_Ratio):
-            self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+        # passing mean and scale of energies to obtain absolute energies from normalized
+        self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.pretraining = False
         if cfg.get('PRETRAINING'):
@@ -343,15 +451,25 @@ class Training:
 
     def build_loss(self):
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
-            eff_temperature = self.cfg_loss.get('EFFECTIVE_TEMPERATURE', 2000.0)
-            loss_fn = WRMSELoss_Boltzmann(e_factor=self.yscaler.scale_ / eff_temperature)
+            Eref = self.cfg_loss.get('EREF', 2000.0)
+            loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
+            Eref = self.cfg_loss.get('EREF', 2000.0)
+            loss_fn = WMSELoss_Boltzmann(Eref=Eref)
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio':
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WMSELoss_Ratio(dwt=dwt)
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS':
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS':
+            Emax = self.cfg_loss.get('EMAX', 2000.0)
+            loss_fn = WMSELoss_PS(Emax=Emax)
         else:
+            print(self.cfg_loss)
             raise ValueError("unreachable")
 
         logging.info("Build loss function: {}".format(loss_fn))
@@ -395,16 +513,6 @@ class Training:
         es = EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
         return es
 
-    def get_metric(self, loss):
-        loss_value = loss.detach().item()
-        #logging.info("loss_value: {}".format(loss_value))
-
-        if self.cfg_loss['NAME'] == 'WRMSE':
-            descaler = self.yscaler.scale_[0]
-            return loss_value * descaler
-        else:
-            raise ValueError("unreachable")
-
     def reset_weights(self):
         for layer in self.model.children():
             if hasattr(layer, 'reset_parameters'):
@@ -421,8 +529,10 @@ class Training:
         logging.info("----------- Running pretraining -----------------")
         logging.info("-------------------------------------------------")
 
+        raise NotImplementedError
+
         for epoch in range(self.pretraining_epochs):
-            self.train_epoch(epoch, self.pretraining_optimizer)
+            loss_train = self.train_epoch(epoch, self.pretraining_optimizer)
 
             with torch.no_grad():
                 self.model.eval()
@@ -472,23 +582,22 @@ class Training:
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
         for epoch in range(MAX_EPOCHS):
-            self.train_epoch(epoch, self.optimizer)
+            loss_train = self.train_epoch(epoch, self.optimizer)
 
             with torch.no_grad():
                 self.model.eval()
 
                 pred_val = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, pred_val)
-                self.metric_val = self.get_metric(loss_val)
-                self.writer.add_scalar("loss/val", self.metric_val, epoch)
+                self.writer.add_scalar("loss/val", loss_val, epoch)
 
-            self.scheduler.step(self.metric_val)
+            self.scheduler.step(loss_val)
             current_lr = self.optimizer.param_groups[0]['lr']
 
             if epoch % PRINT_TRAINING_STEPS == 0:
                 logging.info("Current learning rate: {:.2e}".format(current_lr))
-                logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
-                    epoch, self.metric_train, self.metric_val
+                logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(
+                    epoch, loss_train, loss_val 
                 ))
 
                 end = time.time()
@@ -497,7 +606,7 @@ class Training:
             # writing all pending events to disk
             self.writer.flush()
 
-            self.es(epoch, self.metric_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+            self.es(epoch, loss_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
             if self.es.status:
                 logging.info("Invoking early stop.")
                 break
@@ -523,15 +632,14 @@ class Training:
                 loss = loss + self.regularization(self.model)
 
             loss.backward()
-
             return loss
 
         self.model.train()
         optimizer.step(closure)
         loss_train = closure()
 
-        self.metric_train = self.get_metric(loss_train)
-        self.writer.add_scalar("loss/train", self.metric_train, epoch)
+        self.writer.add_scalar("loss/train", loss_train, epoch)
+        return loss_train
 
     def model_eval(self):
         self.test.X = self.test.X.to(DEVICE)
@@ -542,20 +650,17 @@ class Training:
 
             pred_train        = self.model(self.train.X)
             loss_train        = self.loss_fn(self.train.y, pred_train)
-            self.metric_train = self.get_metric(loss_train)
 
             pred_val        = self.model(self.val.X)
             loss_val        = self.loss_fn(self.val.y, pred_val)
-            self.metric_val = self.get_metric(loss_val)
 
             pred_test        = self.model(self.test.X)
             loss_test        = self.loss_fn(self.test.y, pred_test)
-            self.metric_test = self.get_metric(loss_test)
 
         logging.info("Model evaluation after training:")
-        logging.info("Train      RMSE: {:.2f} cm-1".format(self.metric_train))
-        logging.info("Validation RMSE: {:.2f} cm-1".format(self.metric_val))
-        logging.info("Test       RMSE: {:.2f} cm-1".format(self.metric_test))
+        logging.info("Train      loss: {:.2f} cm-1".format(loss_train))
+        logging.info("Validation loss: {:.2f} cm-1".format(loss_val))
+        logging.info("Test       loss: {:.2f} cm-1".format(loss_test))
 
 def setup_google_folder():
     assert os.path.exists('client_secrets.json')
@@ -644,7 +749,7 @@ if __name__ == "__main__":
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-silu")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
 
     log_path = os.path.join(MODEL_FOLDER, "logs.log")
     file_handler = logging.FileHandler(log_path)
@@ -654,7 +759,7 @@ if __name__ == "__main__":
     logger.addHandler(stdout_handler)
     logger.addHandler(file_handler)
 
-    cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
+    cfg_path = os.path.join(MODEL_FOLDER, "WRMSE-Boltzmann.yaml")
     with open(cfg_path, mode="r") as stream:
         try:
             cfg = yaml.safe_load(stream)

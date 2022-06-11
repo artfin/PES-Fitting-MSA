@@ -18,17 +18,26 @@ XYZ_PATHS = [
         "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
     },
     {
-        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-TRUNCATED.xyz"),
+        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
         "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+    },
+    {
+        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+    },
+    {
+        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
     }
 ]
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
 
 #DATASET_POSTFIX = "-rigid"
-#XYZ_PATHS = {
-#    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#}
+#XYZ_PATHS = [
+#    {
+#        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+#    }
+#]
 
 order     = "4"
 wdir      = "datasets/external"
@@ -36,13 +45,13 @@ symmetry  = "4 2 1"
 
 PLACE_ENERGY_LIMIT = True
 if PLACE_ENERGY_LIMIT:
-    ENERGY_LIMIT = 2000.0 # cm-1
+    ENERGY_LIMIT = 3000.0 # cm-1
     ENERGY_LIMIT_POSTFIX = "-enlim={:.0f}".format(ENERGY_LIMIT)
 else:
     ENERGY_LIMIT = None
     ENERGY_LIMIT_POSTFIX = ""
 
-INTERMOLECULAR_TO_ZERO = True
+INTERMOLECULAR_TO_ZERO = False
 if INTERMOLECULAR_TO_ZERO:
     INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=true"
 else:
@@ -153,16 +162,15 @@ if __name__ == "__main__":
         p_test  = sum(X_test[:, -1] == label_typ) / X_test.size()[0] * 100.0
         logging.info("[label_typ={}] train: {:.2f}%; val: {:.2f}%; test: {:.2f}%".format(label_typ, p_train, p_val, p_test))
 
+    X_train = X_train[:, :-1]
 
     #print("Size of training dataset: {}".format(X_train.size()))
     #train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
-
-    #print("Indeces of training elements: {}".format(train_index))
+    #print("Indices of training elements: {}".format(train_index))
     #train_index_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train-index.json")
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
 
-    X_train = X_train[:, :-1]
     dict_pk  = dict(
         NATOMS=GLOBAL_NATOMS,
         NMON=GLOBAL_NMON,
