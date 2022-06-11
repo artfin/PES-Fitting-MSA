@@ -611,7 +611,7 @@ class Training:
                 logging.info("Invoking early stop.")
                 break
 
-        if self.metric_val < self.es.best_score:
+        if loss_val < self.es.best_score:
             self.es.save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
         logging.info("\nReloading best model from the last checkpoint")
@@ -751,7 +751,9 @@ if __name__ == "__main__":
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
     MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
 
-    log_path = os.path.join(MODEL_FOLDER, "logs.log")
+    MODEL = "WRMSE-PS"
+
+    log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
@@ -759,7 +761,7 @@ if __name__ == "__main__":
     logger.addHandler(stdout_handler)
     logger.addHandler(file_handler)
 
-    cfg_path = os.path.join(MODEL_FOLDER, "WRMSE-Boltzmann.yaml")
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
     with open(cfg_path, mode="r") as stream:
         try:
             cfg = yaml.safe_load(stream)
@@ -790,3 +792,4 @@ if __name__ == "__main__":
     model = t.train_model()
     t.model_eval()
 
+    os.rename(os.path.join(MODEL_FOLDER, "checkpoint.pt"), os.path.join(MODEL_FOLDER, MODEL+'.pt'))
