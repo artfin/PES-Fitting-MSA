@@ -66,15 +66,8 @@ def load_published():
     data = np.loadtxt(fname)
     return data[:,1], data[:,2]
 
-def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
-    #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
-    #inf_poly[0, 0] = 1.0
-    #inf_poly = xscaler.transform(inf_poly)
-    #inf_pred = model(inf_poly)
-    #inf_pred = inf_pred * y_std + y_mean
-    #print("inf_pred: {}".format(inf_pred))
-    #inf_pred = torch.ones(len(X), 1, dtype=torch.double) * inf_pred
 
+def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     error_train = (train.y - evaluator(train.X)).detach().numpy()
     error_val   = (val.y - evaluator(val.X)).detach().numpy()
     error_test  = (test.y - evaluator(test.X)).detach().numpy()
@@ -82,32 +75,44 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, figpath=None):
     calc, published_fit = load_published()
     published_abs_error = calc - published_fit
 
-    plt.figure(figsize=(10, 10))
-    ax = plt.gca()
+    RANGE1 = False
+    RANGE2 = True
 
-    #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=0.5, label='Symmetry-adapted angular basis')
+    plt.figure(figsize=(10, 10))
+    ax = plt.subplot(1, 1, 1)
+
+    plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=1.0, label='Symmetry-adapted angular basis')
     plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
     plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
     plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
-    #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='train')
-    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='val')
-    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=0.5, label='test')
 
-    plt.xlim((-200.0, 2000.0))
-    plt.ylim((-5.0, 5.0))
+    if RANGE1:
+        plt.xlim((-200.0, 2000.0))
+        plt.ylim((-4.0, 4.0))
+
+    if RANGE2:
+        plt.xlim((-200.0, 10000.0))
+        plt.ylim((-12.0, 12.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
 
-    #ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
-    #ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
-    #ax.yaxis.set_major_locator(plt.MultipleLocator(10.0))
-    #ax.yaxis.set_minor_locator(plt.MultipleLocator(2.0))
+    if RANGE1:
+        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(1.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(0.5))
 
-    #ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
-    #ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
-    #ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
-    #ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+    if RANGE2:
+        ax.xaxis.set_major_locator(plt.MultipleLocator(1000.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(500.0))
+        ax.yaxis.set_major_locator(plt.MultipleLocator(2.0))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+
+    ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+    ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+    ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+    ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
 
     lgnd = plt.legend(fontsize=18)
     lgnd.legendHandles[0].set_lw(1.5)
@@ -348,7 +353,7 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "exp11")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "best-model")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "L1", "L1-2")
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-3")
@@ -367,9 +372,14 @@ if __name__ == '__main__':
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-7-L1-lambda=1e-8")
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-11")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-12")
+    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-12")
 
-    cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
+    CONFIG       = "WMSE-Boltzmann.yaml"
+    CHK_FNAME    = "WMSE-Boltzmann.pt"
+    ERRORS_PNG   = "WMSE-Boltzmann-EMAX=10000.png"
+
+    cfg_path = os.path.join(MODEL_FOLDER, CONFIG)
     with open(cfg_path, mode="r") as stream:
         try:
             cfg = yaml.safe_load(stream)
@@ -378,52 +388,33 @@ if __name__ == '__main__':
 
     logging.info("loaded configuration file from {}".format(cfg_path))
 
-    evaluator = retrieve_checkpoint(cfg, chk_fname="checkpoint.pt")
+    evaluator = retrieve_checkpoint(cfg, chk_fname=CHK_FNAME)
 
     #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"))
-    ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"))
+    #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"))
     #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"))
     #ef = EvalFile(evaluator, fpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"))
-    ef.make_histogram_CH4_energy_vs_error()
-
-    assert False
+    #ef.make_histogram_CH4_energy_vs_error()
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
 
     pred_train = torch.from_numpy(evaluator(train.X))
 
-    ind = (train.y < 2000.0).nonzero()[:,0]
+    EMAX = 2000.0
+    ind = (train.y < EMAX).nonzero()[:,0]
     yf = train.y[ind]
     predf = pred_train[ind]
     diff = torch.abs(yf - predf)
 
     mean_diff = torch.mean(diff)
     max_diff = torch.max(diff)
-    logging.info("[< 2000 cm-1] mean diff: {}".format(mean_diff))
-    logging.info("[< 2000 cm-1] max diff: {}".format(max_diff))
+    logging.info("[< {:.0f} cm-1] mean diff: {}".format(EMAX, mean_diff))
+    logging.info("[< {:.0f} cm-1] max diff: {}".format(EMAX, max_diff))
 
-    figpath = os.path.join(BASEDIR, cfg['OUTPUT_PATH'], "errors.png")
+    figpath = os.path.join(BASEDIR, cfg['OUTPUT_PATH'], ERRORS_PNG)
+    logging.info("figpath: {}".format(figpath))
     plot_errors_from_checkpoint(evaluator, train, val, test, figpath=figpath)
-
-
-    #EMIN = torch.abs(y.min())
-    #r = 0.005
-    #w = r / (r + y + EMIN)
-    #we = torch.exp(-y * HkT / 2000.0)
-    #f = yscaler.std * HTOCM / 2000.0
-    #w = torch.exp(-ytr * f)
-    #w = w / w.max()
-
-    #plt.figure(figsize=(10, 10))
-
-    #plt.scatter(y * HTOCM, w, color='k', s=10, facecolors='none')
-    #plt.scatter(y * HTOCM, we, color='r', s=10)
-
-    #plt.xlim((-400, 2000.0))
-
-    #plt.show()
-    ###
 
 
     ############## 

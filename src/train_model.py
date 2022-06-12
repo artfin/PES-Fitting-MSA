@@ -199,6 +199,7 @@ class WMSELoss_Ratio(torch.nn.Module):
 
         w  = self.dwt / (self.dwt + yd - ymin)
         wmse = (w * (yd - yd_pred)**2).mean()
+
         return wmse
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -297,6 +298,7 @@ class WRMSELoss_PS(torch.nn.Module):
         w /= w.max()
         wmse = (w * (yd - yd_pred)**2).mean()
 
+
         return torch.sqrt(wmse)
 
 class EarlyStopping:
@@ -366,13 +368,12 @@ def count_params(model):
     return nparams
 
 class Training:
-    def __init__(self, model, cfg, train, val, test, xscaler, yscaler, writer_dir=None):
-        if writer_dir is not None:
-            self.writer = SummaryWriter(log_dir=writer_dir)
-        else:
+    def __init__(self, model, cfg, train, val, test, xscaler, yscaler, model_name=None):
+        if model_name is None:
             model_name = os.path.split(cfg['OUTPUT_PATH'])[1]
-            log_dir = os.path.join("runs", model_name)
-            self.writer = SummaryWriter(log_dir=log_dir)
+
+        log_dir = os.path.join("runs", model_name)
+        self.writer = SummaryWriter(log_dir=log_dir)
 
         self.model = model
         self.cfg_solver = cfg['TRAINING']
@@ -390,7 +391,7 @@ class Training:
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
 
-        # passing mean and scale of energies to obtain absolute energies from normalized
+        # passing mean and scale of energies to obtain absolute energies from normalized ones
         self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.pretraining = False
@@ -749,9 +750,9 @@ if __name__ == "__main__":
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
 
     #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
 
-    MODEL = "WRMSE-PS"
+    MODEL = "WRMSE-Ratio"
+    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
 
     log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
     file_handler = logging.FileHandler(log_path)

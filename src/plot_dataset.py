@@ -332,9 +332,40 @@ class XYZPlotter:
 
         plt.show()
 
+    def make_histogram_asymptotic_energy(self, figpath=None):
+        NCONFIGS = len(self.xyz_configs)
+        energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.subplot(1, 1, 1)
+
+        bins = list(x/2.0 for x in range(10, 20))
+        hist, bind_edges = np.histogram(energy, bins)
+
+        plt.bar(range(len(hist)), hist, width=0.8, color='#88B04B')
+
+        ax.set_xticks([0.5 + i for i, _ in enumerate(hist)])
+        ax.set_xticklabels(['{}'.format(bins[i+1]) for i, _ in enumerate(hist)])
+        ax.tick_params(axis='x', which='major', labelsize=15)
+
+        ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
+        ax.tick_params(axis='y', which='major', width=1.0, length=6.0)
+        ax.tick_params(axis='y', which='minor', width=0.5, length=3.0)
+
+        plt.xlabel(r"Asymptotic energy, cm$^{-1}$")
+        plt.ylabel(r'\# configurations')
+
+        if figpath is not None:
+            logging.info("Saving figure to figpath={}".format(figpath))
+            plt.savefig(figpath, format="png", dpi=300)
+            self.trim_png(figpath)
+
+        plt.show()
+
+
     def make_histogram_intermolecular_energy(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
-
         energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
 
         plt.figure(figsize=(10, 10))
@@ -415,18 +446,21 @@ if __name__ == "__main__":
     logger.addHandler(ch)
 
     xyz_paths = [
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
     ]
 
     plotter = XYZPlotter(*xyz_paths)
+
+    plotter.make_histogram_asymptotic_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "asymptotic-energy.png"))
+
     #plotter.make_histogram_CH4_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-energy.png"))
     #plotter.make_histogram_N2_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "N2-energy.png"))
     #plotter.make_histogram_intermolecular_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "intermolecular-energy.png"))
 
     #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
-    plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
+    #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))
     #plotter.make_histogram_NN_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "NN-distance.png"))
 
     #plotter.make_histogram_R()
