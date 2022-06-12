@@ -36,7 +36,8 @@ class PolyDataset_t:
     y            : torch.Tensor
     mask         : Optional[List[int]] = None
     energy_limit : float = None
-    intermz      : bool = False
+    intramz      : bool  = False
+    purify       : bool  = False
 
 def check_config(xyz_config):
     C  = xyz_config.atoms[6, :]
@@ -93,17 +94,18 @@ def write_xyz(xyz_path, xyz_configs):
             fd.write("C \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[6, 0], xyz_config.atoms[6, 1], xyz_config.atoms[6, 2]))
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, xyz_file, limit_file=None, order=None, symmetry=None, set_intermolecular_to_zero=True): #, lr_model=None):
+    def __init__(self, wdir, xyz_file, limit_file=None, order=None, symmetry=None, intramz=False, purify=False):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
-        self.order = order
+        self.order    = order
         self.symmetry = symmetry
-        self.set_intermolecular_to_zero = set_intermolecular_to_zero
+        self.intramz  = intramz
+        self.purify   = purify
 
         logging.info("Loading configurations from xyz_file: {}".format(xyz_file))
-
         NATOMS, NCONFIGS, xyz_configs = load_xyz(xyz_file)
+
         self.NATOMS   = NATOMS
         self.NCONFIGS = NCONFIGS
 
@@ -251,11 +253,9 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
-
-
     def make_yij(self, xyz_configs):
-        if self.set_intermolecular_to_zero:
-            logging.info("setting intermolecular Morse variables to zero")
+        if self.intramz:
+            logging.info("setting intramolecular Morse variables to zero")
 
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")
@@ -266,7 +266,7 @@ class PolyDataset(Dataset):
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
                 # CH4-N2
-                if self.set_intermolecular_to_zero:
+                if self.intramz:
                     if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
                     if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
                     if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
@@ -279,11 +279,9 @@ class PolyDataset(Dataset):
                     if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
                     if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
 
-                # H2-H2O (makes the fitting significantly worse)
-                #if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue # H1 H2 (H2)
-                #if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue # H1 H2 (H2O)
-                #if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H1 O  (H2O)
-                #if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue # H2 O  (H2O)
+                if self.purify:
+                    assert False
+
                 yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
                 yij[n][k] = np.exp(-yij[n, k] / a0)
                 k = k + 1

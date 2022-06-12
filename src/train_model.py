@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
 from dataset import PolyDataset
+from make_dataset import make_dataset, make_dataset_fpaths
 from build_model import build_network_yaml
 
 import pathlib
@@ -683,30 +684,35 @@ def setup_google_folder():
             file.Upload()
 
 def load_dataset(cfg_dataset):
+    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
+
+    for option in cfg_dataset.keys():
+        assert option in known_options, "Unknown option: {}".format(option)
+
     order        = cfg_dataset['ORDER']
+    symmetry     = cfg_dataset['SYMMETRY']
     typ          = cfg_dataset['TYPE'].lower()
     energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)
-    intermz      = cfg_dataset.get('INTERMOLECULAR_TO_ZERO', False)
+    intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
+    purify       = cfg_dataset.get('PURIFY', False)
 
+    assert order in (4, )
+    assert typ in ('rigid', 'nonrigid')
+
+    logging.info("Dataset options:")
     logging.info("order:        {}".format(order))
+    logging.info("symmetry:     {}".format(symmetry))
+    logging.info("typ:          {}".format(typ))
     logging.info("energy_limit: {}".format(energy_limit))
-    logging.info("intermz: {}".format(intermz))
+    logging.info("intramz:      {}".format(intramz))
+    logging.info("purify:       {}".format(purify))
 
-    if energy_limit is not None:
-        enlim_str = "-enlim={:.0f}".format(energy_limit)
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify)
+    if not os.path.isfile(train_fpath) or not os.path.isfile(val_fpath) or not os.path.isfile(test_fpath):
+        logging.info("Invoking make_dataset to create polynomial dataset")
+        make_dataset(order=order, symmetry=symmetry, typ=typ, energy_limit=energy_limit, intramz=intramz, purify=purify)
     else:
-        enlim_str = ""
-
-    if intermz:
-        intermz_str = "-intermz=true"
-    else:
-        intermz_str = "-intermz=false"
-
-    datasets_folder = os.path.join(BASEDIR, "datasets", "interim")
-
-    train_fpath = os.path.join(datasets_folder, f"poly_4_2_1_{order}-train-{typ}{enlim_str}{intermz_str}.pk")
-    val_fpath   = os.path.join(datasets_folder, f"poly_4_2_1_{order}-val-{typ}{enlim_str}{intermz_str}.pk")
-    test_fpath  = os.path.join(datasets_folder, f"poly_4_2_1_{order}-test-{typ}{enlim_str}{intermz_str}.pk")
+        logging.info("Dataset found.")
 
     logging.info("Loading training dataset:   {}".format(train_fpath))
     logging.info("Loading validation dataset: {}".format(val_fpath))
@@ -714,21 +720,22 @@ def load_dataset(cfg_dataset):
 
     train = PolyDataset.from_pickle(train_fpath)
     assert train.energy_limit == energy_limit
-    assert train.intermz      == intermz
+    assert train.intramz      == intramz
+    assert train.purify       == purify
 
     val   = PolyDataset.from_pickle(val_fpath)
     assert val.energy_limit == energy_limit
-    assert val.intermz      == intermz
+    assert val.intramz      == intramz
+    assert val.purify       == purify
 
     test  = PolyDataset.from_pickle(test_fpath)
     assert test.energy_limit == energy_limit
-    assert test.intermz      == intermz
+    assert test.intramz      == intramz
+    assert test.purify       == purify
 
     return train, val, test
 
 if __name__ == "__main__":
-
-
     logger = logging.getLogger()
     logger.handlers = []
     logger.setLevel(logging.INFO)

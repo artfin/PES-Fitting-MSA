@@ -11,52 +11,6 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-DATASET_POSTFIX = "-nonrigid"
-XYZ_PATHS = [
-    {
-        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-    },
-    {
-        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-    },
-    {
-        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-    },
-    {
-        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-    }
-]
-
-#DATASET_POSTFIX = "-rigid"
-#XYZ_PATHS = [
-#    {
-#        "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#        "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-#    }
-#]
-
-order     = "4"
-wdir      = "datasets/external"
-symmetry  = "4 2 1"
-
-PLACE_ENERGY_LIMIT = True
-if PLACE_ENERGY_LIMIT:
-    ENERGY_LIMIT = 3000.0 # cm-1
-    ENERGY_LIMIT_POSTFIX = "-enlim={:.0f}".format(ENERGY_LIMIT)
-else:
-    ENERGY_LIMIT = None
-    ENERGY_LIMIT_POSTFIX = ""
-
-INTERMOLECULAR_TO_ZERO = False
-if INTERMOLECULAR_TO_ZERO:
-    INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=true"
-else:
-    INTERMOLECULAR_TO_ZERO_POSTFIX = "-intermz=false"
-
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -72,14 +26,65 @@ def save_json(d, fpath):
     with open(fpath, mode='w') as fp:
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
-if __name__ == "__main__":
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+def make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify):
+    dataset_folder = os.path.join(BASEDIR, "datasets", "interim")
 
-    ch = logging.StreamHandler()
-    formatter = logging.Formatter('[%(levelname)s] %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    if energy_limit is not None:
+        enlim_str = "-enlim={:.0f}".format(energy_limit)
+    else:
+        enlim_str = ""
+
+    if intramz:
+        intramz_str = "-intramz=true"
+    else:
+        intramz_str = ""
+
+    if purify:
+        purify_str = "-purify=true"
+    else:
+        purify_str = ""
+
+    symmetry_str = symmetry.replace(' ', '_')
+    train_fpath = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-train-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
+    val_fpath   = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-val-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
+    test_fpath  = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-test-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
+
+    return train_fpath, val_fpath, test_fpath
+
+def make_dataset(order, symmetry, typ, **kwargs):
+    wdir = "datasets/external"
+
+    intramz      = kwargs.get('intramz', False)
+    purify       = kwargs.get('purify', False)
+    energy_limit = kwargs.get("energy_limit", None)
+
+    dataset_postfix = '-' + typ
+    if typ == 'rigid':
+        xyz_paths = [
+            {
+                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+            }
+        ]
+    elif typ == 'nonrigid':
+        xyz_paths = [
+            {
+                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+            },
+            {
+                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+            },
+            {
+                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+            },
+            {
+                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+            }
+        ]
 
     GLOBAL_SET      = False
     GLOBAL_NATOMS   = None
@@ -93,9 +98,9 @@ if __name__ == "__main__":
     labels = []
     label = 0
 
-    for block in XYZ_PATHS:
-        dataset = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order, symmetry=symmetry,
-                              set_intermolecular_to_zero=INTERMOLECULAR_TO_ZERO)
+    for block in xyz_paths:
+        dataset = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order,
+                              symmetry=symmetry, intramz=intramz, purify=purify)
 
         if GLOBAL_SET:
             assert GLOBAL_NATOMS == dataset.NATOMS
@@ -122,12 +127,10 @@ if __name__ == "__main__":
     labels = torch.Tensor(labels).reshape((len(labels), 1))
     X = torch.cat((X, labels), dim=1)
 
-    DATASETS_INTERIM = "datasets/interim"
-    BASENAME = "poly_{}_{}".format(symmetry.replace(" ", "_"), order)
-
     #######################################################################
     # splitting polynomials into train/val/test and saving
     #######################################################################
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify)
 
     logging.info("Performing stratified splitting.")
     data_split = sklearn.model_selection.train_test_split
@@ -135,15 +138,15 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = data_split(X, y, test_size=0.2, random_state=42, stratify=X[:, -1])
     X_val, X_test, y_val, y_test = data_split(X_test, y_test, test_size=0.5, random_state=42, stratify=X_test[:, -1])
 
-    if PLACE_ENERGY_LIMIT:
+    if energy_limit is not None:
         logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
 
-        indl, indm = (y_train < ENERGY_LIMIT).nonzero()[:, 0], (y_train >= ENERGY_LIMIT).nonzero()[:, 0]
+        indl, indm = (y_train < energy_limit).nonzero()[:, 0], (y_train >= energy_limit).nonzero()[:, 0]
         y_test = torch.cat((y_test, y_train[indm]))
         X_test = torch.cat((X_test, X_train[indm]))
         X_train, y_train = X_train[indl], y_train[indl]
 
-        indl, indm = (y_val < ENERGY_LIMIT).nonzero()[:, 0], (y_val >= ENERGY_LIMIT).nonzero()[:, 0]
+        indl, indm = (y_val < energy_limit).nonzero()[:, 0], (y_val >= energy_limit).nonzero()[:, 0]
         y_test = torch.cat((y_test, y_val[indm]))
         X_test = torch.cat((X_test, X_val[indm]))
         X_val, y_val  = X_val[indl], y_val[indl]
@@ -171,22 +174,21 @@ if __name__ == "__main__":
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
 
-    dict_pk  = dict(
+    dict_pk = dict(
         NATOMS=GLOBAL_NATOMS,
         NMON=GLOBAL_NMON,
         NPOLY=GLOBAL_NPOLY,
         symmetry=symmetry,
         order=order,
-        energy_limit=ENERGY_LIMIT,
-        intermz=INTERMOLECULAR_TO_ZERO,
+        energy_limit=energy_limit,
+        intramz=intramz,
+        purify=purify,
         X=X_train,
         y=y_train
     )
-    train_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train{}{}{}.pk".format(
-        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
-    ))
-    logging.info("Saving training dataset to: {}".format(train_interim_pk_fname))
-    torch.save(dict_pk, train_interim_pk_fname)
+
+    logging.info("Saving training dataset to: {}".format(train_fpath))
+    torch.save(dict_pk, train_fpath)
 
     X_val = X_val[:, :-1]
     dict_pk  = dict(
@@ -195,16 +197,14 @@ if __name__ == "__main__":
         NPOLY=GLOBAL_NPOLY,
         symmetry=symmetry,
         order=order,
-        energy_limit=ENERGY_LIMIT,
-        intermz=INTERMOLECULAR_TO_ZERO,
+        energy_limit=energy_limit,
+        intramz=intramz,
+        purify=purify,
         X=X_val,
         y=y_val
     )
-    val_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-val{}{}{}.pk".format(
-        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
-    ))
-    logging.info("Saving validation dataset to: {}".format(val_interim_pk_fname))
-    torch.save(dict_pk, val_interim_pk_fname)
+    logging.info("Saving validation dataset to: {}".format(val_fpath))
+    torch.save(dict_pk, val_fpath)
 
     X_test = X_test[:, :-1]
     dict_pk  = dict(
@@ -213,13 +213,14 @@ if __name__ == "__main__":
         NPOLY=GLOBAL_NPOLY,
         symmetry=symmetry,
         order=order,
-        energy_limit=ENERGY_LIMIT,
-        intermz=INTERMOLECULAR_TO_ZERO,
+        energy_limit=energy_limit,
+        intramz=intramz,
+        purify=purify,
         X=X_test,
         y=y_test
     )
-    test_interim_pk_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-test{}{}{}.pk".format(
-        DATASET_POSTFIX, ENERGY_LIMIT_POSTFIX, INTERMOLECULAR_TO_ZERO_POSTFIX
-    ))
-    logging.info("Saving testing dataset to: {}".format(test_interim_pk_fname))
-    torch.save(dict_pk, test_interim_pk_fname)
+    logging.info("Saving testing dataset to: {}".format(test_fpath))
+    torch.save(dict_pk, test_fpath)
+
+if __name__ == "__main__":
+    pass
