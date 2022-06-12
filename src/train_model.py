@@ -1,3 +1,4 @@
+import argparse
 import collections
 import json
 import logging
@@ -488,7 +489,7 @@ class Training:
         min_lr         = cfg_scheduler.get('MIN_LR', 1e-5)
 
         if cfg_scheduler['NAME'] == 'ReduceLROnPlateau':
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=factor, threshold=threshold, threshold_mode=threshold_mode, 
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=factor, threshold=threshold, threshold_mode=threshold_mode,
                                                                    patience=patience, cooldown=cooldown, min_lr=min_lr)
         else:
             raise ValueError("unreachable")
@@ -726,6 +727,8 @@ def load_dataset(cfg_dataset):
     return train, val, test
 
 if __name__ == "__main__":
+
+
     logger = logging.getLogger()
     logger.handlers = []
     logger.setLevel(logging.INFO)
@@ -736,23 +739,32 @@ if __name__ == "__main__":
     stdout_handler.setLevel(logging.INFO)
     stdout_handler.setFormatter(formatter)
 
-    seed_torch()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_folder", type=str, help="path to folder with YAML configuration file")
+    parser.add_argument("model_name", type=str, help="the name of the YAML configuration file [without extension]")
+    args = parser.parse_args()
 
+    MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
+    MODEL        = args.model_name
+
+    assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
+
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
+    assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
+
+    seed_torch()
     if DEVICE.type == 'cuda':
         logging.info(torch.cuda.get_device_name(0))
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-tanh")
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4-reg")
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-6-L1")
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-1-L1-lambda=1e-4")
+    with open(cfg_path, mode="r") as stream:
+        try:
+            cfg = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            logging.info(exc)
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-nonrigid-only")
-
-    MODEL = "WRMSE-Ratio"
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "rigid", "rmse-vs-mse")
+    logging.info("loaded configuration file from {}".format(cfg_path))
 
     log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
     file_handler = logging.FileHandler(log_path)
@@ -762,22 +774,9 @@ if __name__ == "__main__":
     logger.addHandler(stdout_handler)
     logger.addHandler(file_handler)
 
-    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
-    with open(cfg_path, mode="r") as stream:
-        try:
-            cfg = yaml.safe_load(stream)
-        except yaml.YAMLError as exc:
-            logging.info(exc)
-
-    logging.info("loaded configuration file from {}".format(cfg_path))
-
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
-    #logging.info(" xscaler.mean:  {}".format(xscaler.mean_))
-    #logging.info(" xscaler.scale: {}".format(xscaler.scale_))
-    #logging.info(" yscaler.mean:  {}".format(yscaler.mean_))
-    #logging.info(" yscaler.scale: {}".format(yscaler.scale_))
 
     cfg_model = cfg['MODEL']
     model = build_network_yaml(cfg_model, input_features=train.NPOLY)
@@ -786,11 +785,7 @@ if __name__ == "__main__":
 
     t = Training(model, cfg, train, val, test, xscaler, yscaler)
 
-    #chkpath = os.path.join(MODEL_FOLDER, "run-1.pt")
-    #print("chkpath: {}".format(chkpath))
-
-    #model = t.continue_from_checkpoint(chkpath)
     model = t.train_model()
     t.model_eval()
 
-    os.rename(os.path.join(MODEL_FOLDER, "checkpoint.pt"), os.path.join(MODEL_FOLDER, MODEL+'.pt'))
+    os.rename(os.path.join(MODEL_FOLDER, "checkpoint.pt"), os.path.join(MODEL_FOLDER, MODEL + '.pt'))
