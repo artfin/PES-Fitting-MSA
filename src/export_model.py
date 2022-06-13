@@ -1,3 +1,4 @@
+import argparse
 import logging
 from pathlib import Path
 import os
@@ -7,6 +8,7 @@ import yaml
 from build_model import build_network_yaml
 from dataset import PolyDataset
 from genpip import cl
+from train_model import load_dataset
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -39,8 +41,7 @@ class Evaluator(torch.nn.Module):
         return self.yscaler.inverse_transform(ytr)
 
 
-def retrieve_checkpoint(cfg):
-    chk_path = os.path.join(cfg["OUTPUT_PATH"], "checkpoint.pt")
+def retrieve_checkpoint(cfg, chk_path):
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
@@ -60,25 +61,14 @@ def retrieve_checkpoint(cfg):
     return evaluator
 
 class Export:
-    DATASETS_EXTERNAL        = "datasets/external"
+    DATASETS_EXTERNAL = "datasets/external"
 
     def __init__(self, cfg, evaluator, poly_source="CUSTOM"):
         self.evaluator   = evaluator
         self.poly_source = poly_source
 
-        self.export_wd           = cfg['OUTPUT_PATH']
-        DEFAULT_TORCHSCRIPT_PATH = os.path.join(self.export_wd, "torchscript-model.pt")
-        DEFAULT_CPP_PATH         = os.path.join(self.export_wd, "load_model.hpp")
-
-        cfg_export = cfg.get('EXPORT', None)
-        if cfg_export is not None:
-            self.torchscript_path     = cfg_export.get('TORCHSCRIPT_PATH', DEFAULT_TORCHSCRIPT_PATH)
-            self.cpp_path             = cfg_export.get('CPP_PATH', DEFAULT_CPP_PATH)
-        else:
-            self.torchscript_path = DEFAULT_TORCHSCRIPT_PATH
-            self.cpp_path         = DEFAULT_CPP_PATH
-
-        self.torchscript_filename = self.torchscript_path.split('/')[-1]
+        self.export_wd        = cfg['OUTPUT_PATH']
+        self.DEFAULT_CPP_PATH = os.path.join(self.export_wd, "load_model.hpp")
 
         #LR_CPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.cpp")
         #LR_HPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.hpp")
@@ -101,14 +91,18 @@ class Export:
         cl(f"cp {basis_fpath} {self.export_wd}")
         #self.generate_cmake(basis_fname)
 
-    def generate_torchscript(self):
-        logging.info("Tracing the model and saving the torchscript to {}".format(self.torchscript_path))
+    def generate_torchscript(self, torchscript_fname=None):
+        if torchscript_fname is None:
+            torchscript_fname = "torchscript-model.pt"
+
+        torchscript_fpath = os.path.join(self.export_wd, torchscript_fname)
+
+        logging.info("Tracing the model and saving the torchscript to {}".format(torchscript_fpath))
         NPOLY = self.evaluator.meta_info["NPOLY"]
         dummy = torch.rand(1, NPOLY, dtype=torch.float64)
 
         traced_script_module = torch.jit.trace(self.evaluator, dummy)
-        traced_script_module.save(self.torchscript_path)
-
+        traced_script_module.save(torchscript_fpath)
 
     def generate_cpp(self):
         logging.info("Saving generated cpp code to {}".format(self.cpp_path))
@@ -136,7 +130,7 @@ class Export:
 
             NPOLY = self.evaluator.meta_info["NPOLY"]
             NMON  = self.evaluator.meta_info["NMON"]
-            decl_apply_mask = "" 
+            decl_apply_mask = ""
             body_apply_mask = ""
             decl_extern_poly = """
 extern "C" {
@@ -487,10 +481,19 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    #MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L1", "L1-4")
-    MODEL_FOLDER = os.path.join(BASEDIR, "models", "nonrigid", "L2", "L2-2-silu")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_folder", type=str, help="path to folder with YAML configuration file")
+    parser.add_argument("model_name", type=str, help="the name of the YAML configuration file [without extension]")
+    args = parser.parse_args()
 
-    cfg_path = os.path.join(MODEL_FOLDER, "config.yaml")
+    MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
+    MODEL        = args.model_name
+
+    assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
+
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
+    assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
+
     with open(cfg_path, mode="r") as stream:
         try:
             cfg = yaml.safe_load(stream)
@@ -499,22 +502,20 @@ if __name__ == "__main__":
 
     logging.info("loaded configuration file from {}".format(cfg_path))
 
-    evaluator = retrieve_checkpoint(cfg)
+    chk_path = os.path.join(MODEL_FOLDER, MODEL + ".pt")
+    evaluator = retrieve_checkpoint(cfg, chk_path)
 
-    Export(cfg, evaluator, poly_source="MSA").run()
+    torchscript_fname = MODEL + "-torchscript.pt"
+    Export(cfg, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
 
     cfg_dataset = cfg['DATASET']
-    logging.info("Loading training dataset from TRAIN_DATA_PATH={}".format(cfg_dataset['TRAIN_DATA_PATH']))
-    logging.info("Loading validation dataset from VAL_DATA_PATH={}".format(cfg_dataset['VAL_DATA_PATH']))
-    logging.info("Loading testing dataset from TEST_DATA_PATH={}".format(cfg_dataset['TEST_DATA_PATH']))
-    train = PolyDataset.from_pickle(cfg_dataset['TRAIN_DATA_PATH'])
-    val   = PolyDataset.from_pickle(cfg_dataset['VAL_DATA_PATH'])
-    test  = PolyDataset.from_pickle(cfg_dataset['TEST_DATA_PATH'])
+    train, val, test = load_dataset(cfg_dataset)
 
     X0 = train.X[0].view((1, train.NPOLY))
+
     y0 = evaluator(X0)
     logging.info("Expected output of the exported model on the first configuration: {}".format(y0.item()))
-    logging.info("Dataset energy value: {}".format(train.y[0]))
+    logging.info("Dataset energy value: {:.10f}".format(train.y[0].item()))
 
 
     #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)
