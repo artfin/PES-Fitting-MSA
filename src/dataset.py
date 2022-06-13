@@ -25,6 +25,23 @@ class XYZConfig:
     atoms  : np.array
     energy : float
 
+    def check():
+        C  = xyz_config.atoms[6, :]
+        H1 = xyz_config.atoms[0, :]
+        H2 = xyz_config.atoms[1, :]
+        H3 = xyz_config.atoms[2, :]
+        H4 = xyz_config.atoms[3, :]
+
+        r1 = np.linalg.norm(C - H1)
+        r2 = np.linalg.norm(C - H2)
+        r3 = np.linalg.norm(C - H3)
+        r4 = np.linalg.norm(C - H4)
+        rr = np.array([r1, r2, r3, r4])
+
+        MIN_CH = 1.88 # BOHR
+        MAX_CH = 2.5  # BOHR
+        assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
+
 @dataclass
 class PolyDataset_t:
     NATOMS       : int
@@ -39,22 +56,6 @@ class PolyDataset_t:
     intramz      : bool  = False
     purify       : bool  = False
 
-def check_config(xyz_config):
-    C  = xyz_config.atoms[6, :]
-    H1 = xyz_config.atoms[0, :]
-    H2 = xyz_config.atoms[1, :]
-    H3 = xyz_config.atoms[2, :]
-    H4 = xyz_config.atoms[3, :]
-
-    r1 = np.linalg.norm(C - H1)
-    r2 = np.linalg.norm(C - H2)
-    r3 = np.linalg.norm(C - H3)
-    r4 = np.linalg.norm(C - H4)
-    rr = np.array([r1, r2, r3, r4])
-
-    MIN_CH = 1.88 # BOHR
-    MAX_CH = 2.5  # BOHR
-    assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
 
 def load_xyz(fpath):
     nlines = sum(1 for line in open(fpath, mode='r'))
@@ -73,7 +74,7 @@ def load_xyz(fpath):
                 atoms[natom, :] = list(map(float, words[1:]))
 
             c = XYZConfig(atoms=atoms, energy=energy)
-            check_config(c)
+            c.check()
             xyz_configs.append(c)
 
     return NATOMS, NCONFIGS, xyz_configs
