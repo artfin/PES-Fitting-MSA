@@ -107,10 +107,11 @@ class PolyDataset(Dataset):
         NATOMS, NCONFIGS, xyz_configs = load_xyz(xyz_file)
 
         self.NATOMS   = NATOMS
+        self.NDIS     = self.NATOMS * (self.NATOMS - 1) // 2
         self.NCONFIGS = NCONFIGS
 
-        logging.info("Detected NATOMS = {}".format(self.NATOMS))
-        logging.info("Detected NCONFIGS = {}".format(NCONFIGS))
+        logging.info("  NATOMS = {}".format(self.NATOMS))
+        logging.info("  NCONFIGS = {}".format(NCONFIGS))
 
         if limit_file is not None:
             logging.info("Loading configurations from limit_file: {}".format(limit_file))
@@ -136,7 +137,18 @@ class PolyDataset(Dataset):
 
             logging.info("Subtracted asymptotic energies")
 
+        self.prepare_poly_lib()
+        if self.purify:
+            if self.intramz:
+                raise ValueError("Conflicting options: PURIFY and INTRAMZ")
+
+            self.make_purify_mask(xyz_configs)
+
         X, y = self.prepare_dataset_from_configs(xyz_configs)
+
+        if self.purify:
+            self.NPOLY = self.purify_mask.sum()
+            X = X[:, self.purify_mask.astype(np.bool)]
 
         if POLYNOMIAL_LIB == "MSA":
             self.mask = X.abs().sum(dim=0).bool().numpy().astype(int)
@@ -144,45 +156,33 @@ class PolyDataset(Dataset):
                 self.mask.sum(), len(self.mask)
             ))
 
-            nonzero_index = self.mask.nonzero()[0].tolist()
-            logging.info("indices of non-zero polynomials: {}".format(nonzero_index))
-            logging.info(json.dumps(nonzero_index))
+            #nonzero_index = self.mask.nonzero()[0].tolist()
+            #logging.info("indices of non-zero polynomials: {}".format(nonzero_index))
+            #logging.info(json.dumps(nonzero_index))
 
             self.NPOLY = self.mask.sum()
             X = X[:, self.mask.astype(np.bool)]
-
-            logging.info("New size of the X-array: {}".format(X.size()))
+            logging.info("Final size of the X-array: {}".format(X.size()))
 
         self.X, self.y = X, y
 
-    def prepare_dataset_from_configs(self, xyz_configs):
-        logging.info("preparing atomic distances..")
 
-        self.NDIS = self.NATOMS * (self.NATOMS - 1) // 2
-
-        yij = self.make_yij(xyz_configs)
-        logging.info("Done.")
+    def prepare_poly_lib(self):
+        logging.info("Preparing dynamic library to compute invariant polynomials: ")
+        logging.info("  [GLOBAL] POLYNOMIAL_LIB={}".format(POLYNOMIAL_LIB))
 
         if POLYNOMIAL_LIB == "MSA":
-            logging.info("using MSA dynamic library to compute invariant polynomials")
-
             stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             MONO_fname = os.path.join(self.wdir, 'MOL' + stub + '.MONO')
             POLY_fname = os.path.join(self.wdir, 'MOL' + stub + '.POLY')
             self.NMON  = sum(1 for line in open(MONO_fname))
             self.NPOLY = sum(1 for line in open(POLY_fname))
-            logging.info("detected NMON  = {}".format(self.NMON))
-            logging.info("detected NPOLY = {}".format(self.NPOLY))
 
             self.F_LIBNAME = os.path.join(self.wdir, 'f_basis' + stub + '.so')
+            assert os.path.isfile(self.F_LIBNAME), "No F_LIBRARY={} found".format(self.F_LIBNAME)
             self.setup_fortran_procs()
 
-            x = np.zeros((self.NDIS, 1))
-            m = np.zeros((self.NMON, 1))
-            p = np.zeros((self.NPOLY, 1))
-        elif POLYNOMIAL_LIB == "CUSTOM":
-            logging.info("using custom C dynamic library to compute invariant polynomials")
-
+        elif POLYNOMIAL_LIB == "MSA":
             stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             self.C_LIBNAME = os.path.join(self.wdir, 'c_basis' + stub + '.so')
             assert os.path.isfile(self.C_LIBNAME), "No C_LIBRARY={} found".format(self.C_LIBNAME)
@@ -192,39 +192,82 @@ class PolyDataset(Dataset):
             with open(C_LIBNAME_CODE, mode='r') as fp:
                 lines = "".join(fp.readlines())
 
-            pattern = "double p\[(\d+)\]"
-            found = re.findall(pattern, lines)
+            pattern    = "double p\[(\d+)\]"
+            found      = re.findall(pattern, lines)
             self.NPOLY = int(found[0])
-            self.NMON = None
+            self.NMON  = None
 
-            x = np.zeros((self.NDIS,  1))
-            p = np.zeros((self.NPOLY, 1))
         else:
             raise ValueError("unreachable")
 
+        logging.info(" [NUMBER OF MONOMIALS]   NMON  = {}".format(self.NMON))
+        logging.info(" [NUMBER OF POLYNOMIALS] NPOLY = {}".format(self.NPOLY))
+
+    def eval_poly(self, x):
+        p = np.zeros((self.NPOLY, 1))
+        if POLYNOMIAL_LIB == "MSA":
+            m = np.zeros((self.NMON, 1))
+
+            self.evmono(x, m)
+            self.evpoly(m, p)
+
+            assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
+            assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
+            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
+
+        elif POLYNOMIAL_LIB == "CUSTOM":
+            self.evpoly(x, p)
+
+            assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by C_evpoly"
+            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by C_evpoly"
+        else:
+            raise ValueError("unreachable")
+
+        return p
+
+    def make_purify_mask(self, xyz_configs):
+        # Calculate interatomic distances for each configuration 
+        # and zero out intermolecular coordinates 
+        logging.info("Preparing interatomic distances.")
+        yij = self.make_yij(xyz_configs, intermz=True)
+        logging.info("Done.")
+
         NCONFIGS = len(xyz_configs)
         poly = np.zeros((NCONFIGS, self.NPOLY))
+        x = np.zeros((self.NDIS, 1))
 
         logging.info("Computing polynomials...")
-
         for n in range(0, NCONFIGS):
             x = yij[n, :].copy()
+            p = self.eval_poly(x)
+            poly[n, :] = p.reshape((self.NPOLY, )).copy()
 
-            if POLYNOMIAL_LIB == "MSA":
-                self.evmono(x, m)
-                self.evpoly(m, p)
+        logging.info("Done.")
 
-                assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
-                assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
-                assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
-            elif POLYNOMIAL_LIB == "CUSTOM":
-                self.evpoly(x, p)
+        X = torch.from_numpy(poly)
+        self.purify_mask = 1 - X.abs().sum(dim=0).bool().numpy().astype(int)
+        logging.info("Selecting {} purified polynomials out of {} initially...".format(
+            self.purify_mask.sum(), len(self.purify_mask)
+        ))
 
-                assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by C_evpoly"
-                assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by C_evpoly"
-            else:
-                raise ValueError("unreachable")
+        #purify_index = self.purify_mask.nonzero()[0].tolist()
+        #logging.info("indices of purified polynomials: {}".format(purify_index))
+        #logging.info(json.dumps(purify_index))
 
+
+    def prepare_dataset_from_configs(self, xyz_configs):
+        logging.info("preparing interatomic distances..")
+        yij = self.make_yij(xyz_configs, intramz=self.intramz, intermz=False)
+        logging.info("Done.")
+
+        NCONFIGS = len(xyz_configs)
+        poly = np.zeros((NCONFIGS, self.NPOLY))
+        x = np.zeros((self.NDIS, 1))
+
+        logging.info("Computing polynomials...")
+        for n in range(0, NCONFIGS):
+            x = yij[n, :].copy()
+            p = self.eval_poly(x)
             poly[n, :] = p.reshape((self.NPOLY, )).copy()
 
         logging.info("Done.")
@@ -232,7 +275,8 @@ class PolyDataset(Dataset):
         energies = np.zeros((NCONFIGS, 1))
         for ind, xyz_config in enumerate(xyz_configs):
             energies[ind] = xyz_config.energy
-        # NOTE: LR-model is to added here
+
+        # NOTE: LR-model was added here
         #    if lr_model is not None:
         #        energies[ind] -= lr_model(ind)
 
@@ -240,6 +284,7 @@ class PolyDataset(Dataset):
         y = torch.from_numpy(energies)
 
         return X, y
+
 
     @classmethod
     def from_pickle(cls, path):
@@ -253,9 +298,10 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
-    def make_yij(self, xyz_configs):
-        if self.intramz:
-            logging.info("setting intramolecular Morse variables to zero")
+    def make_yij(self, xyz_configs, intramz=False, intermz=False):
+        logging.info("Constructing an array of interatomic distances with options:")
+        logging.info(" [INTRAMOLECULAR COORDINATES=ZERO] INTRAMZ={}".format(intramz))
+        logging.info(" [INTERMOLECULAR COORDINATES=ZERO] INTERMZ={}".format(intermz))
 
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")
@@ -266,7 +312,7 @@ class PolyDataset(Dataset):
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
                 # CH4-N2
-                if self.intramz:
+                if intramz:
                     if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
                     if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
                     if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
@@ -279,8 +325,17 @@ class PolyDataset(Dataset):
                     if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
                     if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
 
-                if self.purify:
-                    assert False
+                if intermz:
+                    if i == 0 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H1 N1
+                    if i == 0 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H1 N2
+                    if i == 1 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H2 N1
+                    if i == 1 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H2 N2
+                    if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H3 N1
+                    if i == 2 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H3 N2
+                    if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H4 N1
+                    if i == 3 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H4 N2
+                    if i == 4 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N1 C
+                    if i == 5 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N2 C
 
                 yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
                 yij[n][k] = np.exp(-yij[n, k] / a0)
