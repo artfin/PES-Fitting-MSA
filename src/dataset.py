@@ -25,12 +25,12 @@ class XYZConfig:
     atoms  : np.array
     energy : float
 
-    def check():
-        C  = xyz_config.atoms[6, :]
-        H1 = xyz_config.atoms[0, :]
-        H2 = xyz_config.atoms[1, :]
-        H3 = xyz_config.atoms[2, :]
-        H4 = xyz_config.atoms[3, :]
+    def check(self):
+        C  = self.atoms[6, :]
+        H1 = self.atoms[0, :]
+        H2 = self.atoms[1, :]
+        H3 = self.atoms[2, :]
+        H4 = self.atoms[3, :]
 
         r1 = np.linalg.norm(C - H1)
         r2 = np.linalg.norm(C - H2)

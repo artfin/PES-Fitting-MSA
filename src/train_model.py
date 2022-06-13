@@ -696,7 +696,7 @@ def load_dataset(cfg_dataset):
     intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
     purify       = cfg_dataset.get('PURIFY', False)
 
-    assert order in (4, )
+    assert order in (3, 4, 5)
     assert typ in ('rigid', 'nonrigid')
 
     logging.info("Dataset options:")
