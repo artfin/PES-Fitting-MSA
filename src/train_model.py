@@ -532,8 +532,6 @@ class Training:
         logging.info("----------- Running pretraining -----------------")
         logging.info("-------------------------------------------------")
 
-        raise NotImplementedError
-
         for epoch in range(self.pretraining_epochs):
             loss_train = self.train_epoch(epoch, self.pretraining_optimizer)
 
@@ -542,10 +540,9 @@ class Training:
 
                 pred_val = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, pred_val)
-                self.metric_val = self.get_metric(loss_val)
 
-            logging.info("Epoch: {}; metric train: {:.3f} cm-1; metric_val: {:.3f} cm-1".format(
-                epoch, self.metric_train, self.metric_val
+            logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(
+                epoch, loss_train, loss_val
             ))
 
         torch.save(model.state_dict(), self.chk_path)
@@ -600,7 +597,7 @@ class Training:
             if epoch % PRINT_TRAINING_STEPS == 0:
                 logging.info("Current learning rate: {:.2e}".format(current_lr))
                 logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(
-                    epoch, loss_train, loss_val 
+                    epoch, loss_train, loss_val
                 ))
 
                 end = time.time()
@@ -684,7 +681,7 @@ def setup_google_folder():
             file.Upload()
 
 def load_dataset(cfg_dataset):
-    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
+    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
 
     for option in cfg_dataset.keys():
         assert option in known_options, "Unknown option: {}".format(option)
