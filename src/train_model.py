@@ -694,7 +694,7 @@ def load_dataset(cfg_dataset):
     purify       = cfg_dataset.get('PURIFY', False)
 
     assert order in (3, 4, 5)
-    assert typ in ('rigid', 'nonrigid')
+    assert typ in ('rigid', 'nonrigid', 'nonrigid-clip')
 
     logging.info("Dataset options:")
     logging.info("order:        {}".format(order))
