@@ -281,11 +281,11 @@ if __name__ == '__main__':
     parser.add_argument("--EMAX",         required=True, type=float,
                         help="maximum value of the energy range over which model should be evaluated")
     parser.add_argument("--learning_overview", required=False, type=str2bool, default=False,
-                        help="whether to create on overview over train/val/test sets [True]")
+                        help="whether to create on overview over train/val/test sets [False]")
     parser.add_argument("--ch4_overview",  required=False, type=str2bool, default=False,
                         help="whether to create an overview over CH4 energies [False]")
-    parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=True,
-                        help="whether to add errors of reference potential on plots [True]")
+    parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=False,
+                        help="whether to add errors of reference potential on plots [False]")
 
     args = parser.parse_args()
 
