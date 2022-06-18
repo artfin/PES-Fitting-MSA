@@ -682,7 +682,6 @@ def setup_google_folder():
 
 def load_dataset(cfg_dataset):
     known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
-
     for option in cfg_dataset.keys():
         assert option in known_options, "Unknown option: {}".format(option)
 

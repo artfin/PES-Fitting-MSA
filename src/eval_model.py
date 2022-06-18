@@ -123,7 +123,7 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, ylim, ylocato
         ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
     else:
-        raise NotImplementedError 
+        raise NotImplementedError
 
     ax.yaxis.set_major_locator(plt.MultipleLocator(ylocators[0]))
     ax.yaxis.set_minor_locator(plt.MultipleLocator(ylocators[1]))
@@ -162,14 +162,26 @@ def timeit_model(model, X):
     logging.info("Execution time per point: {} mcs".format(point_t * 1e6))
 
 
-
-def plot_errors_for_files(evaluator, blocks, labels, figpath=None):
+def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim, ylocators, figpath=None):
     wdir = "datasets/external"
 
+    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
+    for option in cfg_dataset.keys():
+        assert option in known_options, "Unknown option: {}".format(option)
+
+    order        = cfg_dataset['ORDER']
+    symmetry     = cfg_dataset['SYMMETRY']
+    typ          = cfg_dataset['TYPE'].lower()
+    intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
+    purify       = cfg_dataset.get('PURIFY', False)
+
+    assert order in (3, 4, 5)
+    assert typ in ('rigid', 'nonrigid', 'nonrigid-clip')
+
     res_blocks = []
-    for block in blocks:
-        pd = PolyDataset(wdir=wdir, xyz_file=block["xyz_file"], limit_file=block["limit_file"], order="4", symmetry="4 2 1",
-                         intramz=False, purify=True)
+    for block in xyz_paths:
+        pd = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order,
+                         symmetry=symmetry, intramz=intramz, purify=purify)
 
         intermol_energy = evaluator(pd.X)
         error = (pd.y - intermol_energy).detach().numpy()
@@ -180,21 +192,32 @@ def plot_errors_for_files(evaluator, blocks, labels, figpath=None):
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)
 
-    colors = ['#FF6F61', '#6CD4FF', '#88B04B']
-    for res_block, color, label in zip(res_blocks, colors, labels):
-        ind = res_block[:,0] < 2000.0
-        plt.scatter(res_block[:,0][ind], res_block[:,1][ind], s=20.0, color=color, facecolor='none', lw=1.0, label=label)
+    colors = ['#FF6F61', '#6CD4FF', '#88B04B', '#575D90']
+    zorder = 4
 
-    plt.xlim((-200.0, 2000.0))
-    plt.ylim((-12.0, 12.0))
+    for res_block, color, label in zip(res_blocks, colors, labels):
+        ind = res_block[:,0] < EMAX
+        plt.scatter(res_block[:,0][ind], res_block[:,1][ind], s=20.0, color=color, facecolor='none', lw=1.0, 
+                    label=label, zorder=zorder)
+        zorder = zorder - 1
+
+    plt.xlim((-200.0, EMAX))
+    plt.ylim(ylim)
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
 
-    ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
-    ax.yaxis.set_major_locator(plt.MultipleLocator(5.0))
-    ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+    if np.isclose(EMAX, 2000.0):
+        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+    elif np.isclose(EMAX, 10000.0):
+        ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
+    else:
+        raise NotImplementedError
+
+    ax.yaxis.set_major_locator(plt.MultipleLocator(ylocators[0]))
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(ylocators[1]))
 
     ax.tick_params(axis='x', which='major', width=1.0, length=6.0)
     ax.tick_params(axis='x', which='minor', width=0.5, length=3.0)
@@ -257,12 +280,13 @@ if __name__ == '__main__':
                         help="the name of the YAML configuration file [without extension]")
     parser.add_argument("--EMAX",         required=True, type=float,
                         help="maximum value of the energy range over which model should be evaluated")
-    parser.add_argument("--learning_overview", required=False, type=str2bool,
-                        default=True, help="whether to create on overview over train/val/test sets [True]")
+    parser.add_argument("--learning_overview", required=False, type=str2bool, default=False,
+                        help="whether to create on overview over train/val/test sets [True]")
     parser.add_argument("--ch4_overview",  required=False, type=str2bool, default=False,
                         help="whether to create an overview over CH4 energies [False]")
     parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=True,
                         help="whether to add errors of reference potential on plots [True]")
+
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
@@ -274,12 +298,12 @@ if __name__ == '__main__':
     assert os.path.isfile(cfg_fpath), "YAML configuration file does not exist at {}".format(cfg_fpath)
     logging.info("MODEL: {}".format(MODEL))
 
-    logging.info("EMAX: {}".format(args.EMAX))
-
     logging.info("Values of optional parameters:")
     logging.info("  learning_overview: {}".format(args.learning_overview))
     logging.info("  ch4_overview:      {}".format(args.ch4_overview))
     logging.info("  add_reference:     {}".format(args.add_reference_pes))
+
+    logging.info("EMAX: {}".format(args.EMAX))
 
     chk_fpath = os.path.join(MODEL_FOLDER, MODEL + ".pt")
     assert os.path.isfile(chk_fpath), "File with model weights (.pt) does not exist at {}".format(chk_fpath)
@@ -292,17 +316,16 @@ if __name__ == '__main__':
 
     logging.info("loaded configuration file from {}".format(cfg_fpath))
 
+    # in order to plot ALL the points of the RIGID dataset
+    # instead of only the clipped part of it
+    cfg_dataset = cfg['DATASET']
+    if cfg_dataset['TYPE'] == 'NONRIGID-CLIP':
+        cfg_dataset['TYPE'] = 'NONRIGID'
+
     evaluator = retrieve_checkpoint(cfg, chk_fpath)
 
     if args.learning_overview:
-        cfg_dataset = cfg['DATASET']
-        if cfg_dataset['TYPE'] == 'NONRIGID-CLIP':
-            cfg_dataset['TYPE'] = 'NONRIGID'
-
         train, val, test = load_dataset(cfg_dataset)
-
-        errors_png = os.path.join(MODEL_FOLDER, MODEL + "-EMAX={}.png".format(args.EMAX))
-        logging.info("errors_png: {}".format(errors_png))
 
         show_model_evaluation(evaluator, train, val, test, args.EMAX)
 
@@ -312,14 +335,24 @@ if __name__ == '__main__':
         else:
             raise NotImplementedError
 
+        errors_png = os.path.join(MODEL_FOLDER, MODEL + "-EMAX={}.png".format(args.EMAX))
+        logging.info("errors_png: {}".format(errors_png))
+
         plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, ylim=ylim, ylocators=ylocators,
-                                    figpath=None, add_reference_pes=args.add_reference_pes)
+                                    figpath=errors_png, add_reference_pes=args.add_reference_pes)
 
     if args.ch4_overview:
-        from make_dataset import RAW_DATASET_PATHS
+        assert cfg_dataset['TYPE'] == 'NONRIGID'
 
+        from make_dataset import RAW_DATASET_PATHS
         xyz_paths = RAW_DATASET_PATHS["NONRIGID"]
-        assert False
+
+        ylim      = (-20.0, 20.0)
+        ylocators = (5.0, 1.0)
 
         labels = [r"CH$_4$: eq", r"CH$_4$: 0--1000 cm$^{-1}$", r"CH$_4$: 1000--2000 cm$^{-1}$", r"CH$_4$: 2000--3000 cm$^{-1}$"]
-        plot_errors_for_files(evaluator, blocks, labels, figpath="silu-ratio-clipped-purify-error-overview.png")
+
+        overview_png = os.path.join(MODEL_FOLDER, MODEL + "-ch4-overview.png")
+        logging.info("overview_png: {}".format(overview_png))
+
+        plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, args.EMAX, labels, ylim, ylocators, figpath=overview_png)
