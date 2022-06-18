@@ -711,24 +711,24 @@ def load_dataset(cfg_dataset):
     else:
         logging.info("Dataset found.")
 
-    logging.info("Loading training dataset:   {}".format(train_fpath))
-    logging.info("Loading validation dataset: {}".format(val_fpath))
-    logging.info("Loading testing dataset:    {}".format(test_fpath))
 
     train = PolyDataset.from_pickle(train_fpath)
     assert train.energy_limit == energy_limit
     assert train.intramz      == intramz
     assert train.purify       == purify
+    logging.info("Loading training dataset: {}; len: {}".format(train_fpath, len(train.y)))
 
     val   = PolyDataset.from_pickle(val_fpath)
     assert val.energy_limit == energy_limit
     assert val.intramz      == intramz
     assert val.purify       == purify
+    logging.info("Loading validation dataset: {}; len: {}".format(val_fpath, len(val.y)))
 
     test  = PolyDataset.from_pickle(test_fpath)
     assert test.energy_limit == energy_limit
     assert test.intramz      == intramz
     assert test.purify       == purify
+    logging.info("Loading testing dataset: {}; len: {}".format(test_fpath, len(test.y)))
 
     return train, val, test
 

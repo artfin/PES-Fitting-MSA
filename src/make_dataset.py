@@ -11,6 +11,50 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
+RAW_DATASET_PATHS = {
+    "RIGID" : [
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+        }
+    ],
+    "NONRIGID" : [{
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+        }
+    ],
+    "NONRIGID-CLIP" : [
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+        },
+        {
+            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+        }
+    ]
+}
+
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -59,51 +103,7 @@ def make_dataset(order, symmetry, typ, **kwargs):
     energy_limit = kwargs.get("energy_limit", None)
 
     dataset_postfix = '-' + typ
-    if typ == 'rigid':
-        xyz_paths = [
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-            }
-        ]
-    elif typ == 'nonrigid':
-        xyz_paths = [
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-            }
-        ]
-    elif typ == 'nonrigid-clip':
-        xyz_paths = [
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-            },
-            {
-                "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-                "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-            }
-        ]
+    xyz_paths = RAW_DATASET_PATHS[typ.upper()]
 
     GLOBAL_SET      = False
     GLOBAL_NATOMS   = None
