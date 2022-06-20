@@ -743,8 +743,8 @@ if __name__ == "__main__":
     stdout_handler.setFormatter(formatter)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("model_folder", type=str, help="path to folder with YAML configuration file")
-    parser.add_argument("model_name", type=str, help="the name of the YAML configuration file [without extension]")
+    parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
+    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file [without extension]")
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
