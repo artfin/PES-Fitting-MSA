@@ -5,21 +5,15 @@ The PIP-NN method imposes permutation symmetry using a set of PIPs as input. The
 
 Code in the repo is built on top of the MSA software used to construct the set of PIPs. As an example, we consider the intermolecular energy surface for the CH4-N2 van der Waals complex. First, we demonstrate the accuracy and robustness of the PIP-NN model within the rigid-rotor approximation (see folder `models/rigid/`). To attest to the high quality of the constructed model, we calculate the temperature variation of the cross second virial coefficient. We found the perfect agreement with previously published calculations [[3]](https://doi.org/10.1039/D1CP02161C) and reasonable agreement with experimental data.
 
-<style>
-  .img-container {
-    text-align: center;
-  }
-</style>
-
-<div class="img-container">
+<p align="center">
   <img src="https://github.com/artfin/PES-Fitting-MSA/blob/master/models/rigid/best-model/silu-svc-comparison.png " width="400">
-</div>
+</p>
 
 Next, we trained a model on the dataset of intermolecular energies obtained for vibrationally excited moieties -- up to 3,000 cm-1 for CH4 and 1,000 for N2 (see folder `models/nonrigid/`). The figure demonstrates the high quality of constructed model we will use further in spectroscopic and thermophysical applications.
 
-<div class="img-container">
+<p align="center">
   <img src="https://github.com/artfin/PES-Fitting-MSA/blob/master/models/nonrigid/nr-best-model/silu-ratio-clipped-purify-ch4-overview.png" width="400">
-</div>
+</p>
 
 ### How do I train the model of CH4-N2 PES using KrakeNN?
 
