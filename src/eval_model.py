@@ -122,6 +122,9 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, ylim, ylocato
     elif np.isclose(EMAX, 10000.0):
         ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
+    elif np.isclose(EMAX, 50000.0):
+        ax.xaxis.set_major_locator(plt.MultipleLocator(5000.0))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
     else:
         raise NotImplementedError
 
@@ -286,6 +289,8 @@ if __name__ == '__main__':
                         help="whether to create an overview over CH4 energies [False]")
     parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=False,
                         help="whether to add errors of reference potential on plots [False]")
+    parser.add_argument("--save", required=False, type=str2bool, default=False,
+                        help="whether to save the produced PNG to default generated path [False]")
 
     args = parser.parse_args()
 
@@ -332,11 +337,16 @@ if __name__ == '__main__':
         if cfg_dataset['TYPE'] == 'NONRIGID':
             ylim      = (-20.0, 20.0)
             ylocators = (5.0, 1.0)
+        elif cfg_dataset['TYPE'] == 'RIGID':
+            ylim      = (-20.0, 20.0)
+            ylocators = (5.0, 1.0)
         else:
             raise NotImplementedError
 
-        errors_png = os.path.join(MODEL_FOLDER, MODEL + "-EMAX={}.png".format(args.EMAX))
-        logging.info("errors_png: {}".format(errors_png))
+        errors_png = None
+        if args.save:
+            errors_png = os.path.join(MODEL_FOLDER, MODEL + "-EMAX={}.png".format(args.EMAX))
+            logging.info("errors_png: {}".format(errors_png))
 
         plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, ylim=ylim, ylocators=ylocators,
                                     figpath=errors_png, add_reference_pes=args.add_reference_pes)
@@ -352,7 +362,9 @@ if __name__ == '__main__':
 
         labels = [r"CH$_4$: eq", r"CH$_4$: 0--1000 cm$^{-1}$", r"CH$_4$: 1000--2000 cm$^{-1}$", r"CH$_4$: 2000--3000 cm$^{-1}$"]
 
-        overview_png = os.path.join(MODEL_FOLDER, MODEL + "-ch4-overview.png")
-        logging.info("overview_png: {}".format(overview_png))
+        overview_png = None
+        if args.save:
+            overview_png = os.path.join(MODEL_FOLDER, MODEL + "-ch4-overview.png")
+            logging.info("overview_png: {}".format(overview_png))
 
         plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, args.EMAX, labels, ylim, ylocators, figpath=overview_png)

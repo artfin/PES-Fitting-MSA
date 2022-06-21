@@ -686,7 +686,7 @@ def load_dataset(cfg_dataset):
         assert option in known_options, "Unknown option: {}".format(option)
 
     order        = cfg_dataset['ORDER']
-    symmetry     = cfg_dataset['SYMMETRY']
+    symmetry     = cfg_dataset.get('SYMMETRY', '4 2 1')
     typ          = cfg_dataset['TYPE'].lower()
     energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)
     intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
@@ -745,6 +745,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
     parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file [without extension]")
+    parser.add_argument("--log_path",     required=False, type=str, default=None, help="path to logging file")
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
@@ -769,7 +770,10 @@ if __name__ == "__main__":
 
     logging.info("loaded configuration file from {}".format(cfg_path))
 
-    log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
+    log_path = args.log_path
+    if logpath is None:
+        log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
+
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
