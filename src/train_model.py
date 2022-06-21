@@ -771,7 +771,7 @@ if __name__ == "__main__":
     logging.info("loaded configuration file from {}".format(cfg_path))
 
     log_path = args.log_path
-    if logpath is None:
+    if log_path is None:
         log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
 
     file_handler = logging.FileHandler(log_path)
