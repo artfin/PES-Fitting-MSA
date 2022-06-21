@@ -180,6 +180,10 @@ class PolyDataset(Dataset):
             self.NPOLY = sum(1 for line in open(POLY_fname))
 
             self.F_LIBNAME = os.path.join(self.wdir, 'f_basis' + stub + '.so')
+            if not os.path.isfile(self.F_LIBNAME):
+                from genpip import compile_dlib
+                compile_dlib(self.order, self.symmetry, self.wdir)
+
             assert os.path.isfile(self.F_LIBNAME), "No F_LIBRARY={} found".format(self.F_LIBNAME)
             self.setup_fortran_procs()
 

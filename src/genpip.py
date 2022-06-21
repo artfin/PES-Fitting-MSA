@@ -60,14 +60,14 @@ def run_msa(order, symmetry, wdir):
     st = cl('mv -v {}.MONO {}'.format(fname, wdir)); logging.info(st.stdout)
     st = cl('mv -v {}.POLY {}'.format(fname, wdir)); logging.info(st.stdout)
 
-def compile_dlib(order, symmetry, wdir):
+def generate_fortran(order, symmetry, wdir):
     logging.info("postmsa.pl generates Fortran code...")
-
     perl_script = os.path.join(BASEDIR, "src", "postmsa.pl")
     cl('perl {0} {1} {2} {3}'.format(perl_script, wdir, order, symmetry))
 
+def compile_dlib(order, symmetry, wdir):
     logging.info("compiling dynamic lib...")
-    fname = "basis_{}_{}".format(symmetry.replace(' ', '_'), order)
+    fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
     fpath = os.path.join(wdir, fname)
     st = cl('gfortran -shared -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
     logging.info(st.stdout)
@@ -95,5 +95,6 @@ if __name__   == "__main__":
     logging.info("    wdir         = {}".format(wdir))
 
     run_msa(order, symmetry, wdir)
+    generate_fortran(order, symmetry, wdir)
     compile_dlib(order, symmetry, wdir)
     logging.info("Finished.")
