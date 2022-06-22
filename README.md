@@ -22,14 +22,18 @@ Make sure all the required packages are available in your command line environme
     * `cd PES-Fitting-MSA`  
     * `pip install -r requirements.txt`   
 
-The preparation of PIPs, model architecture, and training hyperparameters are configured through the YAML file. Let us consider the model training on the values of PIPs computed from the dataset of energies obtained within rigid-rotor approximation (uncorrected energies from `datasets/raw/CH4-N2-RIGID.xyz` and asymptotic energies from `datasets/raw/CH4-N2-RIGID-LIMITS.xyz`). As an example, let us take [`model/rigid/best-model/silu.yaml`](https://github.com/artfin/PES-Fitting-MSA/blob/master/models/rigid/best-model/silu.yaml) configuration file.  
+The preparation of PIPs, model architecture, and training hyperparameters are configured through the YAML file. Let us consider the model training on the values of PIPs computed from the dataset of energies obtained within rigid-rotor approximation (uncorrected energies from `datasets/raw/CH4-N2-RIGID.xyz` and asymptotic energies from `datasets/raw/CH4-N2-RIGID-LIMITS.xyz`). As an example, let us take `model/rigid/best-model/silu.yaml` configuration file.  
 
 Model training using this YAML file can be started as follows:  
 ```python3 src/train_model.py --model_folder=models/rigid/best-model/ --model_name=silu --log_path=test.log```
 
+Logging info is shown in the command line and duplicated to provided `log_path`. If no `log_path` is provided, the logging file is created in the folder containing the configuration file. Checkpoints during training are saved to the `model_folder` as `checkpoint.pt`, and the final checkpoint is renamed `model_name.pt`. The event log for loss values on the training and validation sets is written to a subfolder `model_name` within the folder `runs`.    
+
+
+### What is the structure of YAML configuration file?
+
 ``` yaml
 # models/rigid/best-model/silu.yaml
-
 DATASET: 
   ORDER: 4
   SYMMETRY: 4 2 1
@@ -75,5 +79,19 @@ The `DATASET` block describes the pipeline of PIPs preparation:
 
 
 For now, only the complex CH4-N2 is explored. The permutational group for the complex can be represented as S4 x S2 x S1 or, in short, "4 2 1". Here we arrange the atoms in the following order: H H H H N N C. The keyword `TYPE: RIGID` triggers the code to parse configurations from the hardcoded list of files, which contain energies corresponding to equilibrium geometries of both moieties. Keywords `INTRAMOLECULAR_TO_ZERO` and `PURIFY` specify the subset of the complete basis set of PIPs that will be used for model training. Setting `INTRAMOLECULAR_TO_ZERO` to `True` allows us to use only those polynomials that contain interfragment coordinates. Through the keyword `PURIFY,` a user can trigger the purification of the basis set of PIPs (see, e.g., [review](https://doi.org/10.1146/annurev-physchem-050317-021139)). The latter is an essential step to improve the precision of the PES  in the long-range. In the purified basis set, we eliminate those polynomials that do not contain interfragment variables. As a result, we obtain a separable basis set, meaning that each polynomial is guaranteed to vanish in the long-range.   
+The `MODEL` block defines the hyperparameters of a neural network which consists of fully connected layers.
+* `HIDDEN_DIMS` : list that specifies the number of neurons within hidden layers of the model [no default]
+* `ACTIVATION`  : non-linear transformation applied to the input of neuron [no default; available all activations within `torch.nn`]
+* `BN`          : whether to add `BatchNorm1d` layer after each fully connected layer [default: False]
+* `DROPOUT`     : adds `torch.nn.Dropout` layer after each fully connected layer that randomly zeros some of the elements with provided probability [default: 0.0]
 
+Experiments showed that batch normalization and regularization through dropping out nodes is detrimental to the model training. Those options are left for running experiments with other molecular systems. 
 
+The `LOSS` block defines the hyperparameters of the loss function.
+* `NAME`        : criterion to measure the error between elements of the input and target [no default; available: weighted MSE (`WMSE`) and weighted RMSE (`WRMSE`)]
+* `WEIGHT_TYPE` : functional dependence of weights on intermolecular energy for loss function [no default]  
+   * `Boltzmann` : exponential decay of weights 
+      $$w_i = \exp \left( -\frac{E_i}{E_\textrm{ref}} \right)$$ 
+      * `EREF` : decay parameter [no default; float]  
+   * `PS` : weights in the form suggested by [Partridge and Schwenke](https://doi.org/10.1063/1.473987) 
+      $$w_i = \frac{1}{E_i^w} \frac{\textrm{tanh} \lb - 6 \cdot 10^{-4} \lb E_i^w - E_\textrm{max} \rb \rb + 1}{2}, \quad E_i^w = \max \left( E_\textrm{max}, E_i \right)$$

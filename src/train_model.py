@@ -374,6 +374,10 @@ class Training:
         if model_name is None:
             model_name = os.path.split(cfg['OUTPUT_PATH'])[1]
 
+        EVENTDIR = "runs"
+        if not os.path.isdir(EVENTDIR):
+            os.makedirs(EVENTDIR)
+
         log_dir = os.path.join("runs", model_name)
         self.writer = SummaryWriter(log_dir=log_dir)
 
