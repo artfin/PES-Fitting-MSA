@@ -33,5 +33,3 @@ TRAINING:
   EARLY_STOPPING:
     PATIENCE: 1000 
     TOLERANCE: 0.02
-
-OUTPUT_PATH: models/nonrigid/nr-best-model
