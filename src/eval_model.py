@@ -88,7 +88,7 @@ def retrieve_checkpoint(cfg, chk_fpath):
     return evaluator
 
 def load_published():
-    fname = "CH4-N2/published-pes/symm-adapted-published-pes-opt1.txt"
+    fname = "datasets/raw/symm-adapted-published-pes-opt1.txt"
     data = np.loadtxt(fname)
     return data[:,1], data[:,2]
 

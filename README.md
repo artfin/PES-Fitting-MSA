@@ -115,25 +115,22 @@ The `TRAINING` block defines the algorithms and their parameters for model train
   * `TOLERANCE_GRAD`, `TOLERANCE_CHANGE`, `MAX_ITER` : parameter propagation for `LBFGS`
   * `WEIGHT_DECAY` : parameter propagation for `Adam` 
 
-We use `LBFGS` as primary optimization algorithm; `Adam` was used only for pretraining without much.
+We use `LBFGS` as the primary optimization algorithm; `Adam` was used only for pretraining without much.
 
 * `SCHEDULER` : reduce learning rate when a target metric has stopped improving
   * `NAME` : scheduler class within `torch.optim` [no default; available `ReduceLROnPlateau`]
   * `LR_REDUCE_GAMMA`, `PATIENCE`, `THRESHOLD`, `THRESHOLD_MODE`, `COOLDOWN`, `MIN_LR` : parameter propagation for `ReduceLROnPlateau`
  
-* `EARLY_STOPPING` : a form of regularization based on the value of loss on the validation set
+* `EARLY_STOPPING` : a form of regularization based on the value of a loss on the validation set
   * `PATIENCE`  :  number of epochs with no improvement of loss after which training will be stopped [default: 1000]
-  * `TOLERANCE` :  minimum absolute change in loss to qualify as an improvement [default: 0.1] 
+  * `TOLERANCE` : absolute minimum change in loss to qualify as an improvement [default: 0.1] 
 
 ### How do I evaluate trained model?
 
 Figures showing differences between fitted and calculated energies can be generated using the `src/eval_model.py` script through the following command:   
 `python3 src/eval_model.py --model_folder=models/rigid/best-model/ --model_name=silu --chk_name=test --EMAX=2000.0 --learning_overview=True`
 
-Here, we provided keyword `EMAX` through which we can change the upper value for intermolecular energy which will be used to plot the overview of model errors on training, validation and testing sets. The script supports the values `EMAX=2000.0` and `EMAX=10000.0`.   
+Here, we provided the keyword `EMAX` through which we can change the upper value for intermolecular energy, which sets the boundary for the overview of model errors on training, validation, and testing sets. The script supports the values `EMAX=2000.0` and `EMAX=10000.0`.   
 
 You can compare your results with the model trained for over 5,000 epochs [approximately 75 minutes on NVIDIA A100 Tensor Core GPU] through the following command:   
 `python3 src/eval_model.py --model_folder=models/rigid/best-model/ --model_name=silu --chk_name=silu --EMAX=2000.0 --learning_overview=True`
-
-
- 
