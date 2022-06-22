@@ -22,13 +22,11 @@ TRAINING:
   SCHEDULER:
     NAME: ReduceLROnPlateau
     LR_REDUCE_GAMMA: 0.8
-    PATIENCE: 300 
+    PATIENCE: 200 
     THRESHOLD: 0.1
     THRESHOLD_MODE: abs
     COOLDOWN: 3
     MIN_LR: 1.0e-5
   EARLY_STOPPING:
-    PATIENCE: 600 
+    PATIENCE: 1000 
     TOLERANCE: 0.02
-
-OUTPUT_PATH: models/rigid/best-model

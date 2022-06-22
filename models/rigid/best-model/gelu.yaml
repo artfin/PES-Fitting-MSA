@@ -28,7 +28,5 @@ TRAINING:
     COOLDOWN: 3
     MIN_LR: 1.0e-5
   EARLY_STOPPING:
-    PATIENCE: 400 
-    TOLERANCE: 0.05
-
-OUTPUT_PATH: models/rigid/best-model
+    PATIENCE: 2000 
+    TOLERANCE: 0.02
