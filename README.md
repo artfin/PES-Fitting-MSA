@@ -1,6 +1,6 @@
 # KrakeNN 
 
-This software is designed to construct permutation invariant polynomial neural networks (PIP-NN) [[1]](https://doi.org/10.1063/1.4817187) to fit intermolecular potential energy surfaces.
+This software is designed to construct permutationally invariant polynomial neural networks (PIP-NN) [[1]](https://doi.org/10.1063/1.4817187) to fit intermolecular potential energy surfaces.
 The PIP-NN method imposes permutation symmetry using a set of PIPs as input. The invariance of the model with respect to overall translations and rotations is guaranteed through the use of interatomic distances as arguments of PIPs [[2]](https://doi.org/10.1080/01442350903234923).
 
 Code in the repo is built on top of the MSA software used to construct the set of PIPs. As an example, we consider the intermolecular energy surface for the CH$_4$-N$_2$ van der Waals complex. First, we demonstrate the accuracy and robustness of the PIP-NN model within the rigid-rotor approximation (see folder `models/rigid/`). To attest to the high quality of the constructed model, we calculate the temperature variation of the cross second virial coefficient. We found the perfect agreement with previously published calculations [[3]](https://doi.org/10.1039/D1CP02161C) and reasonable agreement with experimental data.
@@ -32,7 +32,7 @@ Code was tested on Linux system with `Python=3.8`, `gcc=9.4.0`.
 ### How do I train the model of CH4-N2 PES using KrakeNN?
 
 
-The preparation of PIPs, model architecture, and training hyperparameters are configured through the YAML file. Let us consider the model training on the values of PIPs computed from the dataset of energies obtained within rigid-rotor approximation (uncorrected energies from `datasets/raw/CH4-N2-RIGID.xyz` and asymptotic energies from `datasets/raw/CH4-N2-RIGID-LIMITS.xyz`). As an example, let us take `model/rigid/best-model/silu.yaml` configuration file.  
+The preparation of PIPs, model architecture, and training hyperparameters are configured through the YAML file. Let us consider the model training on the values of PIPs computed from the dataset of energies obtained within rigid-rotor approximation (uncorrected energies from `datasets/raw/CH4-N2-RIGID.xyz` and asymptotic energies from `datasets/raw/CH4-N2-RIGID-LIMITS.xyz`). As an example, let us take `model/rigid/best-model/silu.yaml` configuration file (shown in the next section). 
 
 Model training using this YAML file can be started as follows:  
 ```python3 src/train_model.py --model_folder=models/rigid/best-model/ --model_name=silu --log_name=test --chk_name=test```
@@ -115,7 +115,7 @@ The `TRAINING` block defines the algorithms and their parameters for model train
   * `TOLERANCE_GRAD`, `TOLERANCE_CHANGE`, `MAX_ITER` : parameter propagation for `LBFGS`
   * `WEIGHT_DECAY` : parameter propagation for `Adam` 
 
-We use `LBFGS` as the primary optimization algorithm; `Adam` was used only for pretraining without much.
+We use `LBFGS` as the primary optimization algorithm; `Adam` was used only for pretraining without much success.
 
 * `SCHEDULER` : reduce learning rate when a target metric has stopped improving
   * `NAME` : scheduler class within `torch.optim` [no default; available `ReduceLROnPlateau`]
@@ -134,3 +134,12 @@ Here, we provided the keyword `EMAX` through which we can change the upper value
 
 You can compare your results with the model trained for over 5,000 epochs [approximately 75 minutes on NVIDIA A100 Tensor Core GPU] through the following command:   
 `python3 src/eval_model.py --model_folder=models/rigid/best-model/ --model_name=silu --chk_name=silu --EMAX=2000.0 --learning_overview=True`
+
+### Exporting model to C++ 
+
+After a model prototype has been trained in Python, we would like to export it to C++ to use it in high-performance code to calculate thermophysical or spectroscopic properties. The script `src/export_model.py` exports the model via TorchScript using the tracing mechanism (`torch.jit.trace`):  
+```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test```
+
+To use an exported model in the C++ environment, we opt to calculate the temperature variation of the cross second virial coefficient. The integration over translational degrees of freedom is performed utilizing Adaptive Monte Carlo method VEGAS implemented in [`hep-mc` package](https://github.com/cschwan/hep-mc). The folder `external/rigid-svc` contains relevant code [this code has not been tested in other environments].
+
+We plan to try other exporting mechanisms because the TorchScript compiler while utilizing Just-In-Time (JIT) compilation and other fancy features, comes with massive overhead resulting in quite suboptimal performance.   

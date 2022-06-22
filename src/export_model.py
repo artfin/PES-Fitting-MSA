@@ -8,7 +8,7 @@ import yaml
 from build_model import build_network_yaml
 from dataset import PolyDataset
 from genpip import cl
-from train_model import load_dataset
+from train_model import load_dataset, load_cfg
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -63,11 +63,11 @@ def retrieve_checkpoint(cfg, chk_path):
 class Export:
     DATASETS_EXTERNAL = "datasets/external"
 
-    def __init__(self, cfg, evaluator, poly_source="CUSTOM"):
+    def __init__(self, cfg, model_folder, evaluator, poly_source="CUSTOM"):
         self.evaluator   = evaluator
         self.poly_source = poly_source
 
-        self.export_wd        = cfg['OUTPUT_PATH']
+        self.export_wd        = model_folder
         self.DEFAULT_CPP_PATH = os.path.join(self.export_wd, "load_model.hpp")
 
         #LR_CPP = os.path.join("CH4-N2", "long-range", "lr_pes_ch4_n2.cpp")
@@ -483,30 +483,30 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
-    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file [without extension]")
+    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file without extension")
+    parser.add_argument("--chk_name",     required=False, type=str, default=None, help="name of the general checkpoint without extension")
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
-    MODEL        = args.model_name
+    MODEL_NAME   = args.model_name
 
     assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
 
-    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".yaml")
     assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
 
-    with open(cfg_path, mode="r") as stream:
-        try:
-            cfg = yaml.safe_load(stream)
-        except yaml.YAMLError as exc:
-            logging.info(exc)
-
+    cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
 
-    chk_path = os.path.join(MODEL_FOLDER, MODEL + ".pt")
+    if args.chk_name is not None:
+        chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
+    else:
+        chk_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".pt")
+
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
-    torchscript_fname = MODEL + "-torchscript.pt"
-    Export(cfg, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
+    torchscript_fname = MODEL_NAME + "-torchscript.pt"
+    Export(cfg, MODEL_FOLDER, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
