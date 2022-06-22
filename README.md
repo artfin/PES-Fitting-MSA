@@ -15,20 +15,29 @@ Next, we trained a model on the dataset of intermolecular energies obtained for 
   <img src="https://github.com/artfin/PES-Fitting-MSA/blob/master/models/nonrigid/nr-best-model/silu-ratio-clipped-purify-ch4-overview.png" width="400">
 </p>
 
+### Getting code and requirements 
+```
+* git clone https://github.com/artfin/PES-Fitting-MSA.git
+* cd PES-Fitting-MSA
+* pip install -r requirements.txt
+```
+
+KrakeNN also requires
+```
+* GNU Compiler Collection (specifically, gfortran)
+```
+
+Code was tested on Linux system with `Python=3.8`, `gcc=9.4.0`. 
+
 ### How do I train the model of CH4-N2 PES using KrakeNN?
 
-Make sure all the required packages are available in your command line environment on Linux  
-    * `git clone https://github.com/artfin/PES-Fitting-MSA.git`  
-    * `cd PES-Fitting-MSA`  
-    * `pip install -r requirements.txt`   
 
 The preparation of PIPs, model architecture, and training hyperparameters are configured through the YAML file. Let us consider the model training on the values of PIPs computed from the dataset of energies obtained within rigid-rotor approximation (uncorrected energies from `datasets/raw/CH4-N2-RIGID.xyz` and asymptotic energies from `datasets/raw/CH4-N2-RIGID-LIMITS.xyz`). As an example, let us take `model/rigid/best-model/silu.yaml` configuration file.  
 
 Model training using this YAML file can be started as follows:  
-```python3 src/train_model.py --model_folder=models/rigid/best-model/ --model_name=silu --log_path=test.log```
+```python3 src/train_model.py --model_folder=models/rigid/best-model/ --model_name=silu --log_name=test --chk_name=test```
 
-Logging info is shown in the command line and duplicated to provided `log_path`. If no `log_path` is provided, the logging file is created in the folder containing the configuration file. Checkpoints during training are saved to the `model_folder` as `checkpoint.pt`, and the final checkpoint is renamed `model_name.pt`. The event log for loss values on the training and validation sets is written to a subfolder `model_name` within the folder `runs`.    
-
+Logging info is shown in the command line and duplicated to provided `log_name` in the `model_folder`. If no `log_name` is provided, log is piped to `model_name.log` file in the `model_folder`. The same logic is applied to general checkpoints through the keyword `chk_name`. The event log for loss values on the training and validation sets is written to a subfolder `model_name` within the folder `runs`. The training in this configuration took approximately 75 minutes on NVIDIA A100 Tensor Core GPU.
 
 ### What is the structure of YAML configuration file?
 
@@ -66,8 +75,6 @@ TRAINING:
   EARLY_STOPPING:
     PATIENCE: 1000 
     TOLERANCE: 0.02
-
-OUTPUT_PATH: models/rigid/best-model
 ```
 
 The `DATASET` block describes the pipeline of PIPs preparation:
@@ -82,16 +89,51 @@ For now, only the complex CH4-N2 is explored. The permutational group for the co
 The `MODEL` block defines the hyperparameters of a neural network which consists of fully connected layers.
 * `HIDDEN_DIMS` : list that specifies the number of neurons within hidden layers of the model [no default]
 * `ACTIVATION`  : non-linear transformation applied to the input of neuron [no default; available all activations within `torch.nn`]
-* `BN`          : whether to add `BatchNorm1d` layer after each fully connected layer [default: False]
+* `BN`          : whether to add `torch.nn.BatchNorm1d` layer after each fully connected layer [default: False]
 * `DROPOUT`     : adds `torch.nn.Dropout` layer after each fully connected layer that randomly zeros some of the elements with provided probability [default: 0.0]
 
-Experiments showed that batch normalization and regularization through dropping out nodes is detrimental to the model training. Those options are left for running experiments with other molecular systems. 
+Note that our experiments showed that batch normalization and regularization through dropping out nodes is detrimental to the model training. Those options are left for running experiments with other molecular systems. 
 
 The `LOSS` block defines the hyperparameters of the loss function.
 * `NAME`        : criterion to measure the error between elements of the input and target [no default; available: weighted MSE (`WMSE`) and weighted RMSE (`WRMSE`)]
 * `WEIGHT_TYPE` : functional dependence of weights on intermolecular energy for loss function [no default]  
-   * `Boltzmann` : exponential decay of weights 
-      $$w_i = \exp \left( -\frac{E_i}{E_\textrm{ref}} \right)$$ 
-      * `EREF` : decay parameter [no default; float]  
-   * `PS` : weights in the form suggested by [Partridge and Schwenke](https://doi.org/10.1063/1.473987) 
-      $$w_i = \frac{1}{E_i^w} \frac{\textrm{tanh} \lb - 6 \cdot 10^{-4} \lb E_i^w - E_\textrm{max} \rb \rb + 1}{2}, \quad E_i^w = \max \left( E_\textrm{max}, E_i \right)$$
+  * `BOLTZMANN` : exponential decay of weights 
+    $$w_i = \exp \left( -\frac{E_i}{E_\textrm{ref}} \right)$$ 
+    * `EREF` : decay parameter [no default; float]  
+  * `PS` : weights in the form suggested by [Partridge and Schwenke](https://doi.org/10.1063/1.473987) 
+    $$w_i = \frac{1}{E_i^w} \frac{\textrm{tanh} \left( - 6 \cdot 10^{-4} \left( E_i^w - E_\textrm{max} \right) \right) + 1}{2}, \quad E_i^w = \max \left( E_\textrm{max}, E_i \right)$$  
+    * `EMAX` : parameter that defines the upper range of switch [no default; float]  
+  * `RATIO` : hyperbolic decay of weights
+    $$w_i = \frac{\Delta}{\Delta + E_i - \textrm{min}(E_i)}$$  
+    * `DWT` : decay parameter [no default; float] 
+
+The `TRAINING` block defines the algorithms and their parameters for model training. 
+
+* `OPTIMIZER` : optimization algorithm  
+  * `NAME` : optimizer class within `torch.optim` [no default; available `LBFGS`, `Adam`]
+  * `LR`   : learning rate [default: 1.0 for `LBFGS` and 1.0e-3 for `Adam`]
+  * `TOLERANCE_GRAD`, `TOLERANCE_CHANGE`, `MAX_ITER` : parameter propagation for `LBFGS`
+  * `WEIGHT_DECAY` : parameter propagation for `Adam` 
+
+We use `LBFGS` as primary optimization algorithm; `Adam` was used only for pretraining without much.
+
+* `SCHEDULER` : reduce learning rate when a target metric has stopped improving
+  * `NAME` : scheduler class within `torch.optim` [no default; available `ReduceLROnPlateau`]
+  * `LR_REDUCE_GAMMA`, `PATIENCE`, `THRESHOLD`, `THRESHOLD_MODE`, `COOLDOWN`, `MIN_LR` : parameter propagation for `ReduceLROnPlateau`
+ 
+* `EARLY_STOPPING` : a form of regularization based on the value of loss on the validation set
+  * `PATIENCE`  :  number of epochs with no improvement of loss after which training will be stopped [default: 1000]
+  * `TOLERANCE` :  minimum absolute change in loss to qualify as an improvement [default: 0.1] 
+
+### How do I evaluate trained model?
+
+Figures showing differences between fitted and calculated energies can be generated using the `src/eval_model.py` script through the following command:   
+`python3 src/eval_model.py --model_folder=models/rigid/best-model/ --model_name=silu --chk_name=test --EMAX=2000.0 --learning_overview=True`
+
+Here, we provided keyword `EMAX` through which we can change the upper value for intermolecular energy which will be used to plot the overview of model errors on training, validation and testing sets. The script supports the values `EMAX=2000.0` and `EMAX=10000.0`.   
+
+You can compare your results with the model trained for over 5,000 epochs [approximately 75 minutes on NVIDIA A100 Tensor Core GPU] through the following command:   
+`python3 src/eval_model.py --model_folder=models/rigid/best-model/ --model_name=silu --chk_name=silu --EMAX=2000.0 --learning_overview=True`
+
+
+ 

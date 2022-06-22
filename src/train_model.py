@@ -304,7 +304,7 @@ class WRMSELoss_PS(torch.nn.Module):
         return torch.sqrt(wmse)
 
 class EarlyStopping:
-    def __init__(self, patience=10, tol=0.1, chk_path='checkpoint.pt'):
+    def __init__(self, patience, tol, chk_path):
         """
         patience : how many epochs to wait after the last time the monitored quantity [validation loss] has improved
         tol:       minimum change in the monitored quantity to qualify as an improvement
@@ -370,10 +370,7 @@ def count_params(model):
     return nparams
 
 class Training:
-    def __init__(self, model, cfg, train, val, test, xscaler, yscaler, model_name=None):
-        if model_name is None:
-            model_name = os.path.split(cfg['OUTPUT_PATH'])[1]
-
+    def __init__(self, model_folder, model_name, ckh_path, model, cfg, train, val, test, xscaler, yscaler):
         EVENTDIR = "runs"
         if not os.path.isdir(EVENTDIR):
             os.makedirs(EVENTDIR)
@@ -408,8 +405,8 @@ class Training:
             self.pretraining_epochs = cfg_pretrain['EPOCHS']
             self.pretraining_optimizer = self.build_optimizer(cfg_pretrain['OPTIMIZER'])
 
-        output_path = cfg.get('OUTPUT_PATH', '')
-        self.es = self.build_early_stopper(output_path=output_path)
+        self.chk_path = chk_path
+        self.es = self.build_early_stopper()
         self.meta_info = {
             "NPOLY":    self.train.NPOLY,
             "NMON":     self.train.NMON,
@@ -510,15 +507,13 @@ class Training:
 
         return scheduler
 
-    def build_early_stopper(self, output_path):
+    def build_early_stopper(self):
         cfg_early_stopping = self.cfg_solver['EARLY_STOPPING']
 
-        patience = cfg_early_stopping.get('PATIENCE', 10)
+        patience  = cfg_early_stopping.get('PATIENCE', 1000)
         tolerance = cfg_early_stopping.get('TOLERANCE', 0.1)
 
-        self.chk_path = os.path.join(output_path, 'checkpoint.pt')
-        es = EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
-        return es
+        return EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
 
     def reset_weights(self):
         for layer in self.model.children():
@@ -684,6 +679,19 @@ def setup_google_folder():
             file.SetContentFile('README.md')
             file.Upload()
 
+def load_cfg(cfg_path):
+    with open(cfg_path, mode="r") as stream:
+        try:
+            cfg = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            logging.info(exc)
+
+    known_groups = ('DATASET', 'MODEL', 'LOSS', 'TRAINING')
+    for group in cfg.keys():
+        assert group in known_groups, "Unknown group: {}".format(group)
+
+    return cfg
+
 def load_dataset(cfg_dataset):
     known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
     for option in cfg_dataset.keys():
@@ -748,16 +756,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
-    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file [without extension]")
-    parser.add_argument("--log_path",     required=False, type=str, default=None, help="path to logging file")
+    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file without extension")
+    parser.add_argument("--log_name",     required=False, type=str, default=None, help="name of the logging file without extension")
+    parser.add_argument("--chk_name",     required=False, type=str, default=None, help="name of the general checkpoint without extension")
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
-    MODEL        = args.model_name
+    MODEL_NAME   = args.model_name
 
     assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
 
-    cfg_path = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".yaml")
     assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
 
     seed_torch()
@@ -766,17 +775,18 @@ if __name__ == "__main__":
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
 
-    with open(cfg_path, mode="r") as stream:
-        try:
-            cfg = yaml.safe_load(stream)
-        except yaml.YAMLError as exc:
-            logging.info(exc)
-
+    cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
 
-    log_path = args.log_path
-    if log_path is None:
-        log_path = os.path.join(MODEL_FOLDER, MODEL + ".log")
+    if args.log_name is not None:
+        log_path = os.path.join(MODEL_FOLDER, args.log_name + ".log")
+    else:
+        log_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".log")
+
+    if args.chk_name is not None:
+        chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
+    else:
+        chk_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".pt")
 
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)
@@ -794,9 +804,7 @@ if __name__ == "__main__":
     nparams = count_params(model)
     logging.info("Number of parameters: {}".format(nparams))
 
-    t = Training(model, cfg, train, val, test, xscaler, yscaler)
+    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, model, cfg, train, val, test, xscaler, yscaler)
 
     model = t.train_model()
     t.model_eval()
-
-    os.rename(os.path.join(MODEL_FOLDER, "checkpoint.pt"), os.path.join(MODEL_FOLDER, MODEL + '.pt'))

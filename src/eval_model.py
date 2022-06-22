@@ -19,7 +19,7 @@ from matplotlib.ticker import ScalarFormatter
 from build_model import build_network_yaml
 from dataset import PolyDataset
 from genpip import cmdstat, cl
-from train_model import load_dataset
+from train_model import load_dataset, load_cfg
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -61,9 +61,8 @@ class Evaluator:
 def trim_png(figname):
     cl('convert {0} -trim +repage {0}'.format(figname))
 
-def retrieve_checkpoint(cfg, chk_fname="checkpoint.pt"):
-    chk_path = os.path.join(cfg["OUTPUT_PATH"], chk_fname)
-    checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
+def retrieve_checkpoint(cfg, chk_fpath):
+    checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
     cfg_model = cfg['MODEL']
@@ -280,7 +279,9 @@ if __name__ == '__main__':
     parser.add_argument("--model_folder", required=True, type=str,
                         help="path to folder with YAML configuration file")
     parser.add_argument("--model_name",   required=True, type=str,
-                        help="the name of the YAML configuration file [without extension]")
+                        help="the name of the YAML configuration file without extension")
+    parser.add_argument("--chk_name",     required=False, type=str,
+                        help="the name of the general checkpoint file without extension [default: same as model_name]")
     parser.add_argument("--EMAX",         required=True, type=float,
                         help="maximum value of the energy range over which model should be evaluated")
     parser.add_argument("--learning_overview", required=False, type=str2bool, default=False,
@@ -295,31 +296,28 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
-    assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
-    logging.info("MODEL_FOLDER: {}".format(MODEL_FOLDER))
+    MODEL_NAME   = args.model_name
 
-    MODEL = args.model_name
-    cfg_fpath = os.path.join(MODEL_FOLDER, MODEL + ".yaml")
-    assert os.path.isfile(cfg_fpath), "YAML configuration file does not exist at {}".format(cfg_fpath)
-    logging.info("MODEL: {}".format(MODEL))
+    assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
+
+    cfg_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".yaml")
+    assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
 
     logging.info("Values of optional parameters:")
+    logging.info("  chk_name:          {}".format(args.chk_name))
     logging.info("  learning_overview: {}".format(args.learning_overview))
     logging.info("  ch4_overview:      {}".format(args.ch4_overview))
     logging.info("  add_reference:     {}".format(args.add_reference_pes))
+    logging.info("  EMAX:              {}".format(args.EMAX))
 
-    logging.info("EMAX: {}".format(args.EMAX))
+    if args.chk_name is not None:
+        chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
+    else:
+        chk_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".pt")
+    assert os.path.isfile(chk_path), "File with model weights (.pt) does not exist at {}".format(chk_path)
 
-    chk_fpath = os.path.join(MODEL_FOLDER, MODEL + ".pt")
-    assert os.path.isfile(chk_fpath), "File with model weights (.pt) does not exist at {}".format(chk_fpath)
-
-    with open(cfg_fpath, mode="r") as stream:
-        try:
-            cfg = yaml.safe_load(stream)
-        except yaml.YAMLError as exc:
-            logging.info(exc)
-
-    logging.info("loaded configuration file from {}".format(cfg_fpath))
+    cfg = load_cfg(cfg_path)
+    logging.info("loaded configuration file from {}".format(cfg_path))
 
     # in order to plot ALL the points of the RIGID dataset
     # instead of only the clipped part of it
@@ -327,7 +325,7 @@ if __name__ == '__main__':
     if cfg_dataset['TYPE'] == 'NONRIGID-CLIP':
         cfg_dataset['TYPE'] = 'NONRIGID'
 
-    evaluator = retrieve_checkpoint(cfg, chk_fpath)
+    evaluator = retrieve_checkpoint(cfg, chk_path)
 
     if args.learning_overview:
         train, val, test = load_dataset(cfg_dataset)
