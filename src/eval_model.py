@@ -188,6 +188,15 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
         intermol_energy = evaluator(pd.X)
         error = (pd.y - intermol_energy).detach().numpy()
 
+        ind = (pd.y < EMAX).nonzero()[:,0]
+        ys = pd.y[ind]
+        preds = intermol_energy[ind]
+
+        _mse = torch.mean((ys - preds) * (ys - preds))
+        _rmse = torch.sqrt(_mse)
+
+        logging.info("[< {:.0f} cm-1] file: {}; RMSE: {:.3f}".format(EMAX, block["xyz_path"], _rmse))
+
         r = np.hstack((intermol_energy, error))
         res_blocks.append(r)
 
@@ -234,8 +243,9 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
     plt.show()
 
 
-def show_model_evaluation(evaluator, train, val, test, emax):
+def show_model_evaluation(evaluator, train, val, test, emax, add_reference_pes=False):
     mean_diff, max_diff = [], []
+    mse, rmse = [], []
 
     for sampling_set in [train, val, test]:
         pred = torch.from_numpy(evaluator(sampling_set.X))
@@ -247,13 +257,29 @@ def show_model_evaluation(evaluator, train, val, test, emax):
 
         mean = torch.mean(diff)
         maxx = torch.max(diff)
-
         mean_diff.append(mean)
         max_diff.append(maxx)
 
+        _mse = torch.mean((ys - preds) * (ys - preds))
+        _rmse = torch.sqrt(_mse)
+        mse.append(_mse)
+        rmse.append(_rmse)
+
     logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *mean_diff))
     logging.info("[< {:.0f} cm-1] MAX  DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *max_diff))
+    logging.info("[< {:.0f} cm-1] RMSE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}; total mean: {:.3f}".format(emax, *rmse, np.mean(rmse)))
 
+    if add_reference_pes:
+        calc, published_fit = load_published()
+        calc = torch.from_numpy(calc)
+        published_fit = torch.from_numpy(published_fit)
+
+        ind = (calc < emax).nonzero()[:,0]
+        calc          = calc[ind]
+        published_fit = published_fit[ind]
+
+        rmse_published = torch.sqrt(torch.mean((calc - published_fit) * (calc - published_fit)))
+        logging.info("[< {:.0f} cm-1] RMSE: (published) {:.3f}".format(emax, rmse_published))
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -330,7 +356,7 @@ if __name__ == '__main__':
     if args.learning_overview:
         train, val, test = load_dataset(cfg_dataset)
 
-        show_model_evaluation(evaluator, train, val, test, args.EMAX)
+        show_model_evaluation(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
 
         if cfg_dataset['TYPE'] == 'NONRIGID':
             ylim      = (-20.0, 20.0)
