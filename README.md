@@ -142,4 +142,13 @@ After a model prototype has been trained in Python, we would like to export it t
 
 To use an exported model in the C++ environment, we opt to calculate the temperature variation of the cross second virial coefficient. The integration over translational degrees of freedom is performed utilizing Adaptive Monte Carlo method VEGAS implemented in [`hep-mc` package](https://github.com/cschwan/hep-mc). The folder `external/rigid-svc` contains relevant code [this code has not been tested in other environments].
 
-We plan to try other exporting mechanisms because the TorchScript compiler while utilizing Just-In-Time (JIT) compilation and other fancy features, comes with massive overhead resulting in quite suboptimal performance.   
+Exporting mechanism with TorchScript compiler while using Just-In-Time (JIT) compilation and other features comes with overhead resulting in quite suboptimal performance.  
+
+Let us compare times per call for the model in the form of symmetry-adapted expansion and PIP-NN exported as TorchScript and taken as my custom implementation in C++ built using [Eigen](http://eigen.tuxfamily.org/) template library for linear algebra. For the PIP-NN model, we use the neural network with (79, 32, 1) architecture and SiLU activation function (the one considered the best for now for this dataset). The neural network accepts the values of 79 polynomials of the intermolecular basis of order 4 (also custom implementation in C). For this model, time for calculating polynomials is separated to see how much time is spent in NN evaluation (marked with a star). 
+
+
+| Models | Time per call |
+| --- | --- |
+| Symmetry-adapted expansion     | 1,340  ns |
+| TorchScript                    | 33,250 ns |
+| custom implementation of MLP   | 1,430  ns (990 ns*) |
