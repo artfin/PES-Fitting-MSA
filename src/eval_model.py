@@ -181,6 +181,9 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
     assert typ in ('rigid', 'nonrigid', 'nonrigid-clip')
 
     res_blocks = []
+    c_rmse = 0.0
+    c_points = 0.0
+
     for block in xyz_paths:
         pd = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order,
                          symmetry=symmetry, intramz=intramz, purify=purify)
@@ -194,11 +197,16 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
 
         _mse = torch.mean((ys - preds) * (ys - preds))
         _rmse = torch.sqrt(_mse)
+        c_rmse += _rmse.item() * ys.size()[0]
+        c_points += ys.size()[0]
 
         logging.info("[< {:.0f} cm-1] file: {}; RMSE: {:.3f}".format(EMAX, block["xyz_path"], _rmse))
 
         r = np.hstack((intermol_energy, error))
         res_blocks.append(r)
+
+    c_rmse = c_rmse / c_points
+    logging.info("Cumulative RMSE: {:.3f}".format(c_rmse))
 
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)

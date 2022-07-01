@@ -1,5 +1,6 @@
 import argparse
 import logging
+import numpy as np
 from pathlib import Path
 import os
 import torch
@@ -9,6 +10,7 @@ from build_model import build_network_yaml
 from dataset import PolyDataset
 from genpip import cl
 from train_model import load_dataset, load_cfg
+from eval_model import str2bool
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -472,6 +474,8 @@ set_property(TARGET load-model PROPERTY CXX_STANDARD 14)
             out.write(cmake_template)
 
 
+
+
 if __name__ == "__main__":
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
@@ -485,6 +489,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
     parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file without extension")
     parser.add_argument("--chk_name",     required=False, type=str, default=None, help="name of the general checkpoint without extension")
+    parser.add_argument("--export_torchscript",  required=False, type=str2bool, default=False, help="whether to export model using Torchsript/tracing mechanism")
+    parser.add_argument("--export_npz", required=False, type=str2bool, default=False, help="whether to export model weights in NPZ format")
+    parser.add_argument("--export_onnx", required=False, type=str2bool, default=False, help="whether to export model in ONNX format")
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
@@ -495,6 +502,12 @@ if __name__ == "__main__":
     cfg_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".yaml")
     assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
 
+    logging.info("Values of optional parameters:")
+    logging.info("  chk_name:           {}".format(args.chk_name))
+    logging.info("  export_torchscript: {}".format(args.export_torchscript))
+    logging.info("  export_npz:         {}".format(args.export_npz))
+    logging.info("  export_onnx:        {}".format(args.export_onnx))
+
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
 
@@ -502,16 +515,87 @@ if __name__ == "__main__":
         chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
     else:
         chk_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".pt")
+    assert os.path.isfile(chk_path), "File with model weights (.pt) does not exist at {}".format(chk_path)
 
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
-    torchscript_fname = MODEL_NAME + "-torchscript.pt"
-    Export(cfg, MODEL_FOLDER, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
+    if args.export_onnx:
+        logging.info("Tracing the model")
+
+        NPOLY = evaluator.meta_info["NPOLY"]
+        dummy = torch.rand(1, NPOLY, dtype=torch.float64)
+
+        onnx_fpath = os.path.join(MODEL_FOLDER, MODEL_NAME + ".onnx")
+
+        torch.onnx.export(evaluator,                 # model being run [poly scaler -> NN -> energy scaler]
+                          dummy,                     # input
+                          onnx_fpath,                # where to save the model 
+                          export_params=True,        # store the parameter weighs in the exported file
+                          opset_version=10,          # the ONNX version
+                          do_constant_folding=True,  # whether to executre constant folding for optimization
+                          input_names = ['input'],   # the model's input names
+                          output_names = ['output'], # the model's output names
+        )
+        assert os.path.isfile(onnx_fpath), "ONNX file does not exist at {} after exporting".format(onnx_fpath)
+
+        # check the ONNX model with ONNX's API
+        import onnx
+        onnx_model = onnx.load(onnx_fpath)
+        onnx.checker.check_model(onnx_model)
+
+    if args.export_npz:
+        npz_fname = MODEL_NAME + ".npz"
+
+        state = evaluator.model.state_dict()
+
+        architecture = []
+        for k, v in state.items():
+            if "weight" in k:
+                architecture.append(v.size()[1])
+
+        architecture.append(v.size()[0])
+
+        model_dict = {}
+        model_dict["architecture"] = tuple(architecture)
+
+        model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
+        model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
+        model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()
+        model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()
+
+        for k, v in state.items():
+            model_dict[k] = v.detach().numpy().transpose()
+
+        import inspect
+        torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
+        for module in evaluator.model.modules():
+            module_str = repr(module).strip("()")
+            if module_str in torch_activations:
+                activation = module_str
+                break
+
+        logging.info("ACTIVATION FUNCTION IS NOT STORED")
+        #model_dict["activation"] = activation
+
+        #ind = 0
+        #for layer in evaluator.model.children():
+        #    if isinstance(layer, torch.nn.modules.linear.Linear):
+        #        name = "weights-" + str(ind)
+        #        model_dict[name] = layer.weight.detach().numpy()
+        #        ind = ind + 1
+
+        np.savez(npz_fname, **model_dict)
+
+
+    if args.export_torchscript:
+        torchscript_fname = MODEL_NAME + "-torchscript.pt"
+        Export(cfg, MODEL_FOLDER, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
 
     X0 = train.X[0].view((1, train.NPOLY))
+    X0 = torch.zeros((1, 79))
 
     y0 = evaluator(X0)
     logging.info("Expected output of the exported model on the first configuration: {}".format(y0.item()))
