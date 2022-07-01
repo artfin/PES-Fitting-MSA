@@ -137,10 +137,10 @@ You can compare your results with the model trained for over 5,000 epochs [appro
 
 ### Exporting model to C++ 
 
-After a model prototype has been trained in Python, we would like to export it to C++ to use it in high-performance code to calculate thermophysical or spectroscopic properties. The script `src/export_model.py` exports the model to TorchScript using the tracing mechanism (`torch.jit.trace`)  
-```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_torchscript=True```
-or to ONNX format
-```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_onnx=True```.
+After a model prototype has been trained in Python, we would like to export it to C++ to use it in high-performance code to calculate thermophysical or spectroscopic properties. The script `src/export_model.py` exports the model to TorchScript using the tracing mechanism (`torch.jit.trace`)   
+```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_torchscript=True```  
+or to ONNX format  
+```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_onnx=True```.  
 
 To use an exported model in the C++ environment, we opt to calculate the temperature variation of the cross second virial coefficient. The integration over translational degrees of freedom is performed utilizing Adaptive Monte Carlo method VEGAS implemented in [`hep-mc` package](https://github.com/cschwan/hep-mc). The folder `external/rigid-svc` contains relevant code [this code has not been tested in other environments].
 
