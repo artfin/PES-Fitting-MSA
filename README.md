@@ -137,17 +137,19 @@ You can compare your results with the model trained for over 5,000 epochs [appro
 
 ### Exporting model to C++ 
 
-After a model prototype has been trained in Python, we would like to export it to C++ to use it in high-performance code to calculate thermophysical or spectroscopic properties. The script `src/export_model.py` exports the model via TorchScript using the tracing mechanism (`torch.jit.trace`):  
-```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test```
+After a model prototype has been trained in Python, we would like to export it to C++ to use it in high-performance code to calculate thermophysical or spectroscopic properties. The script `src/export_model.py` exports the model to TorchScript using the tracing mechanism (`torch.jit.trace`)  
+```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_torchscript=True```
+or to ONNX format
+```python3 src/export_model.py --model_folder=models/rigid/best-model --model_name=silu --chk_name=test --export_onnx=True```.
 
 To use an exported model in the C++ environment, we opt to calculate the temperature variation of the cross second virial coefficient. The integration over translational degrees of freedom is performed utilizing Adaptive Monte Carlo method VEGAS implemented in [`hep-mc` package](https://github.com/cschwan/hep-mc). The folder `external/rigid-svc` contains relevant code [this code has not been tested in other environments].
 
 Exporting mechanism with TorchScript compiler while using Just-In-Time (JIT) compilation and other features comes with overhead resulting in quite suboptimal performance.  
 
 Let us compare times per call for [symmetry-adapted expansion](https://doi.org/10.1039/D1CP02161C) and PIP-NN model exported in different ways. For the PIP-NN model, we use the neural network with currently the best architecture (79, 32, 1) and SiLU activation function. The neural network accepts the values of 79 polynomials of the intermolecular basis of order 4 (custom implementation in C). We try out several exporting mechanisms for the PIP-NN model: [TorchScript](https://pytorch.org/docs/stable/jit.html) (recommended way within PyTorch infrastracture), [onnxruntime](https://github.com/microsoft/onnxruntime) (library by Microsoft) and custom-made implementation in C++ built using [Eigen](http://eigen.tuxfamily.org/) template library for linear algebra. Folders with inference experiments:   
-[custom implementation](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-custom-mlp)
-[TorchScript](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-torhscript)
-[onnxruntime](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-onnxruntime)
+[custom implementation](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-custom-mlp)  
+[TorchScript](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-torhscript)  
+[onnxruntime](https://github.com/artfin/PES-Fitting-MSA/tree/master/external/timeit-onnxruntime)  
 
 For the custom-made model, time for calculating polynomials is separated to see how much time is spent in NN evaluation (marked with a star). 
 
