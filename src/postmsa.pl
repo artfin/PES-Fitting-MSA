@@ -55,8 +55,6 @@ print_poly_foot(\*OUT);
 print_module_foot(\*OUT);
 close(OUT);
 
-# ... Here are some subroutines
-
 sub print_module_head{
     my ($out,$nx,$nm,$np) = @_;
     print $out "module basis\n";

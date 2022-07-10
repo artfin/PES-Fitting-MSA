@@ -61,13 +61,29 @@ def run_msa(order, symmetry, wdir):
     st = cl('mv -v {}.POLY {}'.format(fname, wdir)); logging.info(st.stdout)
 
 def generate_fortran(order, symmetry, wdir):
-    logging.info("postmsa.pl generates Fortran code...")
+    logging.info("postmsa.pl generates Fortran code to evaluate PIPs...")
     perl_script = os.path.join(BASEDIR, "src", "postmsa.pl")
-    cl('perl {0} {1} {2} {3}'.format(perl_script, wdir, order, symmetry))
+    cl("perl {0} {1} {2} {3}".format(perl_script, wdir, order, symmetry))
+    fpath = os.path.join(wdir, "f_basis_{}_{}.f90".format(symmetry.replace(' ', '_'), order))
+    assert os.path.exists(fpath), "some problem with basis file generation; see src/postmsa.pl"
+    logging.info("Created PIP basis file: {}".format(fpath))
+
+    logging.info("derivative.pl generates Fortran code to evaluate derivatives of PIPs...")
+    perl_script = os.path.join(BASEDIR, "src", "derivative.pl")
+    cl("perl {0} {1} {2} {3}".format(perl_script, wdir, order, symmetry))
+    fpath = os.path.join(wdir, "f_gradbasis_{}_{}.f90".format(symmetry.replace(' ', '_'), order))
+    assert os.path.exists(fpath), "some problem with gradient file generation; see src/derivative.pl"
+    logging.info("Created PIP gradient file: {}".format(fpath))
 
 def compile_dlib(order, symmetry, wdir):
     logging.info("compiling dynamic lib...")
+
     fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
+    fpath = os.path.join(wdir, fname)
+    st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
+    logging.info(st.stdout)
+
+    fname = "f_gradbasis_{}_{}".format(symmetry.replace(' ', '_'), order)
     fpath = os.path.join(wdir, fname)
     st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
     logging.info(st.stdout)
