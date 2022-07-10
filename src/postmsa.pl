@@ -10,7 +10,7 @@ my @atom   = @ARGV;
 my $stub = "$wdir/MOL_".join("_",@atom)."_$degree";
 my $mono = $stub.".MONO";
 my $poly = $stub.".POLY";
-my $fbas = "$wdir/basis_".join("_", @atom)."_$degree.f90";
+my $fbas = "$wdir/f_basis_".join("_", @atom)."_$degree.f90";
 
 my $c_bind = 1; # = false
 
