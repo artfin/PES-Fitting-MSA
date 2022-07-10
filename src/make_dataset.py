@@ -11,49 +11,49 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-RAW_DATASET_PATHS = {
-    "RIGID" : [
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-        }
-    ],
-    "NONRIGID" : [{
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-        }
-    ],
-    "NONRIGID-CLIP" : [
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-        },
-        {
-            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-        }
-    ]
-}
+#RAW_DATASET_PATHS = {
+#    "RIGID" : [
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+#        }
+#    ],
+#    "NONRIGID" : [{
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+#        }
+#    ],
+#    "NONRIGID-CLIP" : [
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+#        },
+#        {
+#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
+#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+#        }
+#    ]
+#}
 
 class JSONNumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -70,7 +70,10 @@ def save_json(d, fpath):
     with open(fpath, mode='w') as fp:
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
-def make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify):
+def make_dataset_fpaths(typ, order, symmetry, energy_limit, intramz, purify):
+    assert typ in ('energy', 'dipole')
+    assert order in (1, 2, 3, 4, 5)
+
     dataset_folder = os.path.join(BASEDIR, "datasets", "interim")
 
     if energy_limit is not None:
@@ -89,21 +92,18 @@ def make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify):
         purify_str = ""
 
     symmetry_str = symmetry.replace(' ', '_')
-    train_fpath = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-train-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
-    val_fpath   = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-val-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
-    test_fpath  = os.path.join(dataset_folder, f"poly_{symmetry_str}_{order}-test-{typ}{enlim_str}{intramz_str}{purify_str}.pk")
+    train_fpath = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}-train{enlim_str}{intramz_str}{purify_str}.pk")
+    val_fpath   = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}-val{enlim_str}{intramz_str}{purify_str}.pk")
+    test_fpath  = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}-test{enlim_str}{intramz_str}{purify_str}.pk")
 
     return train_fpath, val_fpath, test_fpath
 
-def make_dataset(order, symmetry, typ, **kwargs):
+def make_dataset(source, typ, order, symmetry, **kwargs):
     wdir = "datasets/external"
 
     intramz      = kwargs.get('intramz', False)
     purify       = kwargs.get('purify', False)
     energy_limit = kwargs.get("energy_limit", None)
-
-    dataset_postfix = '-' + typ
-    xyz_paths = RAW_DATASET_PATHS[typ.upper()]
 
     GLOBAL_SET      = False
     GLOBAL_NATOMS   = None
@@ -117,8 +117,8 @@ def make_dataset(order, symmetry, typ, **kwargs):
     labels = []
     label = 0
 
-    for block in xyz_paths:
-        dataset = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order,
+    for file_path in source:
+        dataset = PolyDataset(wdir=wdir, file_path=file_path, order=order,
                               symmetry=symmetry, intramz=intramz, purify=purify)
 
         if GLOBAL_SET:
@@ -149,7 +149,7 @@ def make_dataset(order, symmetry, typ, **kwargs):
     #######################################################################
     # splitting polynomials into train/val/test and saving
     #######################################################################
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify)
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, energy_limit, intramz, purify)
 
     logging.info("Performing stratified splitting.")
     data_split = sklearn.model_selection.train_test_split

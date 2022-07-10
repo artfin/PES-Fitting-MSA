@@ -25,9 +25,9 @@ plt.rcParams.update({
     "font.family": "serif",
     "font.serif" : ["Times"],
     'figure.titlesize' : "Large",
-    "axes.labelsize" : 21,
-    "xtick.labelsize" : 18,
-    "ytick.labelsize" : 18,
+    "axes.labelsize" : 24,
+    "xtick.labelsize" : 21,
+    "ytick.labelsize" : 21,
 })
 
 BOHRTOANG = 0.529177249
@@ -87,14 +87,22 @@ from dataclasses import dataclass
 from typing import List
 import itertools
 
-@dataclass
-class XYZConfig:
-    atoms  : np.array
-    energy : float
+from dataset import XYZConfig
 
 class XYZPlotter:
     def __init__(self, *fpaths):
-        self.xyz_configs = list(itertools.chain.from_iterable(self.load_xyz(fpath) for fpath in fpaths))
+        self.xyz_configs = []
+        for fpath in fpaths:
+            if fpath.endswith(".xyz"):
+                assert False
+                from dataset import load_xyz
+                self.xyz_configs.extend(load_xyz(fpath))
+            elif fpath.endswith(".npz"):
+                from dataset import load_npz
+                natoms, nconfigs, xyz_configs = load_npz(fpath)
+                self.xyz_configs.extend(xyz_configs)
+            else:
+                raise ValueError("unknown format")
 
     def make_histogram_R(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
@@ -364,23 +372,23 @@ class XYZPlotter:
         plt.show()
 
 
-    def make_histogram_intermolecular_energy(self, figpath=None):
+    def make_histogram_energy(self, figpath=None):
         NCONFIGS = len(self.xyz_configs)
         energy = np.asarray([xyz_config.energy for xyz_config in self.xyz_configs])
 
         plt.figure(figsize=(10, 10))
         ax = plt.subplot(1, 1, 1)
 
-        #bins = [-200.0, -150.0, -100.0, -50.0, 0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0]
-        #r = ([-200.0, -150.0], [-150.0, -100.0])
 
-        bins = list(100.0 * x for x in range(-3, 21, 1)) + [10000.0]
+        #bins = list(500.0 * x for x in range(0, 31, 1)) + [20000.0]
+        bins = list(500.0 * x for x in range(0, 21, 1))
         hist, bind_edges = np.histogram(energy, bins)
 
         plt.bar(range(len(hist)), hist, width=0.8, color='#88B04B')
 
         ax.set_xticks([0.5 + i for i, _ in enumerate(hist)])
-        ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist[:-1])] + [r"$>$ 2000.0"])
+        #ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist[:-1])] + [r"$>$ 2000.0"])
+        ax.set_xticklabels(['{}'.format(int(bins[i+1])) for i, _ in enumerate(hist)])
         ax.tick_params(axis='x', which='major', labelsize=15, rotation=45)
 
         plt.xlabel(r"Intermolecular energy, cm$^{-1}$")
@@ -400,40 +408,8 @@ class XYZPlotter:
 
         plt.show()
 
-    def load_xyz(self, fpath):
-        nlines = sum(1 for line in open(fpath, mode='r'))
-        NATOMS = int(open(fpath, mode='r').readline())
-        if hasattr(self, 'NATOMS'):
-            assert self.NATOMS == NATOMS
-            logging.info("NATOMS is consistent.")
-        else:
-            self.NATOMS = NATOMS
-            logging.info("Setting NATOMS attribute.")
-
-        logging.info("detected NATOMS = {}".format(self.NATOMS))
-
-        NCONFIGS = nlines // (self.NATOMS + 2)
-        logging.info("detected NCONFIGS = {}".format(NCONFIGS))
-
-        xyz_configs = []
-        with open(fpath, mode='r') as inp:
-            for i in range(NCONFIGS):
-                line = inp.readline()
-                energy = float(inp.readline())
-
-                atoms = np.zeros((NCONFIGS, 3))
-                for natom in range(self.NATOMS):
-                    words = inp.readline().split()
-                    atoms[natom, :] = np.fromiter(map(float, words[1:]), dtype=np.float64)
-
-                c = XYZConfig(atoms=atoms, energy=energy)
-                xyz_configs.append(c)
-
-        return xyz_configs
-
     def trim_png(self, figname):
         cl('convert {0} -trim +repage {0}'.format(figname))
-
 
 
 if __name__ == "__main__":
@@ -445,19 +421,24 @@ if __name__ == "__main__":
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    xyz_paths = [
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-        os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+    #fpaths = [
+    #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
+    #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
+    #    os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
+    #]
+
+    fpaths = [
+        os.path.join(BASEDIR, "datasets/raw/ethanol_ccsd_t/ethanol_ccsd_t-train.npz"),
     ]
 
-    plotter = XYZPlotter(*xyz_paths)
+    plotter = XYZPlotter(*fpaths)
+    plotter.make_histogram_energy()
 
-    plotter.make_histogram_asymptotic_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "asymptotic-energy.png"))
+    #plotter.make_histogram_asymptotic_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "asymptotic-energy.png"))
 
     #plotter.make_histogram_CH4_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "CH4-energy.png"))
     #plotter.make_histogram_N2_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "N2-energy.png"))
-    #plotter.make_histogram_intermolecular_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "intermolecular-energy.png"))
+    #plotter.make_histogram_energy(figpath=os.path.join(BASEDIR, "datasets", "raw", "intermolecular-energy.png"))
 
     #plotter.make_histogram_CH_distance(figpath=os.path.join(BASEDIR, "datasets", "raw", "C-H-histogram.png"))
     #plotter.make_histogram_HCH_angle(figpath=os.path.join(BASEDIR, "datasets", "raw", "HCH-histogram.png"))

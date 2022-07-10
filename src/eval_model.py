@@ -109,23 +109,23 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, ylim, ylocato
     plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
     plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
 
-    plt.xlim((-200.0, EMAX))
+    plt.xlim((0.0, EMAX))
     plt.ylim(ylim)
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute error, cm$^{-1}$")
 
-    if np.isclose(EMAX, 2000.0):
-        ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
-        ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
-    elif np.isclose(EMAX, 10000.0):
-        ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
-        ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
-    elif np.isclose(EMAX, 50000.0):
-        ax.xaxis.set_major_locator(plt.MultipleLocator(5000.0))
-        ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
-    else:
-        raise NotImplementedError
+    #if np.isclose(EMAX, 2000.0):
+    #    ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
+    #    ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
+    #elif np.isclose(EMAX, 10000.0):
+    #    ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
+    #    ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
+    #elif np.isclose(EMAX, 50000.0):
+    #    ax.xaxis.set_major_locator(plt.MultipleLocator(5000.0))
+    #    ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
+    #else:
+    #    raise NotImplementedError
 
     ax.yaxis.set_major_locator(plt.MultipleLocator(ylocators[0]))
     ax.yaxis.set_minor_locator(plt.MultipleLocator(ylocators[1]))
@@ -366,14 +366,8 @@ if __name__ == '__main__':
 
         show_model_evaluation(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
 
-        if cfg_dataset['TYPE'] == 'NONRIGID':
-            ylim      = (-20.0, 20.0)
-            ylocators = (5.0, 1.0)
-        elif cfg_dataset['TYPE'] == 'RIGID':
-            ylim      = (-20.0, 20.0)
-            ylocators = (5.0, 1.0)
-        else:
-            raise NotImplementedError
+        ylim      = (-10.0, 10.0)
+        ylocators = (1.0, 1.0)
 
         errors_png = None
         if args.save:

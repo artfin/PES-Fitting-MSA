@@ -16,16 +16,25 @@ from torch.utils.data import Dataset
 from dataclasses import dataclass
 from typing import List, Optional
 
+BOHRTOANG = 0.529177249
+KCALTOCM  = 349.757
+
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
 POLYNOMIAL_LIB = "MSA"
 
+SYMBOLS = ('H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F',)
+
 @dataclass
 class XYZConfig:
-    atoms  : np.array
-    energy : float
+    coords  : np.array
+    z       : np.array
+    energy  : float
 
     def check(self):
+        # TODO: check some interatomic distnaces (C-C, C-H and others to be in specific range)
+        assert False
+
         C  = self.atoms[6, :]
         H1 = self.atoms[0, :]
         H2 = self.atoms[1, :]
@@ -39,7 +48,7 @@ class XYZConfig:
         rr = np.array([r1, r2, r3, r4])
 
         MIN_CH = 1.88 # BOHR
-        MAX_CH = 2.5  # BOHR
+        #MAX_CH = 2.5  # BOHR
         assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
 
 @dataclass
@@ -68,34 +77,92 @@ def load_xyz(fpath):
             line = inp.readline()
             energy = float(inp.readline())
 
-            atoms = np.zeros((NATOMS, 3))
+            coords = np.zeros((NATOMS, 3))
+            z = np.zeros((NATOMS, 1))
+
             for natom in range(NATOMS):
                 words = inp.readline().split()
-                atoms[natom, :] = list(map(float, words[1:]))
 
-            c = XYZConfig(atoms=atoms, energy=energy)
-            c.check()
+                coords[natom, :] = list(map(float, words[1:]))
+                charge = SYMBOLS.index(words[0]) + 1
+                z[natom] = charge
+
+            c = XYZConfig(coords=coords, z=z, energy=energy)
+            #c.check()
             xyz_configs.append(c)
 
     return NATOMS, NCONFIGS, xyz_configs
 
 def write_xyz(xyz_path, xyz_configs):
-    natoms = xyz_configs[0].atoms.shape[0]
+    natoms = xyz_configs[0].coords.shape[0]
 
     with open(xyz_path, mode='w') as fd:
         for xyz_config in xyz_configs:
             fd.write("    {}\n".format(natoms))
             fd.write("    {:.10f}\n".format(xyz_config.energy))
-            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[0, 0], xyz_config.atoms[0, 1], xyz_config.atoms[0, 2]))
-            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[1, 0], xyz_config.atoms[1, 1], xyz_config.atoms[1, 2]))
-            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[2, 0], xyz_config.atoms[2, 1], xyz_config.atoms[2, 2]))
-            fd.write("H \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[3, 0], xyz_config.atoms[3, 1], xyz_config.atoms[3, 2]))
-            fd.write("N \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[4, 0], xyz_config.atoms[4, 1], xyz_config.atoms[4, 2]))
-            fd.write("N \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[5, 0], xyz_config.atoms[5, 1], xyz_config.atoms[5, 2]))
-            fd.write("C \t {:.10f} \t {:.10f} \t {:.10f}\n".format(xyz_config.atoms[6, 0], xyz_config.atoms[6, 1], xyz_config.atoms[6, 2]))
+            for k in range(natoms):
+                charge = xyz_config.z[k]
+                symbol = SYMBOLS[charge - 1]
+                fd.write("{} \t {:.10f} \t {:.10f} \t {:.10f}\n".format(symbol, xyz_config.coords[k, 0], xyz_config.coords[k, 1], xyz_config.coords[k, 2]))
+
+def print_molpro_format(xyz_config):
+    natoms = xyz_config.coords.shape[0]
+
+    for k in range(natoms):
+        charge = xyz_config.z[k]
+        symbol = SYMBOLS[charge - 1]
+        print(f"{k+1}, {symbol}{k+1},, {xyz_config.coords[k, 0]:.10f}, {xyz_config.coords[k, 1]:.10f}, {xyz_config.coords[k, 2]:.10f}")
+
+
+def load_npz(fpath):
+    fd = np.load(fpath)
+
+    if "theory" in fd:
+        logging.info("  Theory: {}".format(fd['theory']))
+
+    assert(fd['E'].shape[0] == fd['R'].shape[0])
+    NCONFIGS = fd['E'].shape[0]
+    NATOMS   = fd['R'].shape[1]
+    z        = fd['z']
+
+    energy_min = min(fd['E'])[0]
+    energy_max = max(fd['E'])[0]
+    logging.info("ENERGY_MIN: {}".format(energy_min))
+    logging.info("ENERGY_MAX: {}".format(energy_max))
+
+    # ETHANOL CCSD(T)
+    #energy_min = -97095.38950894916
+    # ETHANOL DFT (full)
+    energy_min = -97208.40600498248
+
+    xyz_configs = []
+    for coords, energy in zip(fd['R'], fd['E']):
+        # THIS DATASET HAS DISTANCES IN ANGSTROM AND ENERGY IN KCAL/MOL
+        # MAYBE HAVE THIS INFO IN .NPZ FILE?
+        coords_bohr = coords / BOHRTOANG
+        energy_cm   = (energy[0] - energy_min) * KCALTOCM
+        c = XYZConfig(coords=coords_bohr, z=z, energy=energy_cm)
+        xyz_configs.append(c)
+
+    return NATOMS, NCONFIGS, xyz_configs
+
+def write_npz(npz_path, xyz_configs):
+    from random import shuffle
+    shuffle(xyz_configs)
+    xyz_configs = xyz_configs[:50000]
+
+    natoms   = xyz_configs[0].coords.shape[0]
+    nconfigs = len(xyz_configs)
+
+    energy = np.array([xyz_config.energy for xyz_config in xyz_configs]).reshape((nconfigs, 1))
+    z = xyz_configs[0].z
+    R = np.asarray([xyz_config.coords for xyz_config in xyz_configs])
+
+    np.savez(npz_path, E=energy, z=z, R=R)
+
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, xyz_file, limit_file=None, order=None, symmetry=None, intramz=False, purify=False):
+    def __init__(self, wdir, file_path, order=None, symmetry=None, intramz=False, purify=False):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
@@ -104,39 +171,22 @@ class PolyDataset(Dataset):
         self.intramz  = intramz
         self.purify   = purify
 
-        logging.info("Loading configurations from xyz_file: {}".format(xyz_file))
-        NATOMS, NCONFIGS, xyz_configs = load_xyz(xyz_file)
+        if file_path.endswith(".xyz"):
+            logging.info("Loading configurations from file_path: {}".format(file_path))
+            NATOMS, NCONFIGS, xyz_configs = load_xyz(file_path)
+            write_npz("ch4-n2-rigid.npz", xyz_configs)
+            assert False
+        elif file_path.endswith(".npz"):
+            NATOMS, NCONFIGS, xyz_configs = load_npz(file_path)
+            #write_npz("ethanol_dft-50000.npz", xyz_configs)
+        else:
+            raise ValueError("Unrecognized file format.")
 
         self.NATOMS   = NATOMS
         self.NDIS     = self.NATOMS * (self.NATOMS - 1) // 2
         self.NCONFIGS = NCONFIGS
-
         logging.info("  NATOMS = {}".format(self.NATOMS))
         logging.info("  NCONFIGS = {}".format(NCONFIGS))
-
-        if limit_file is not None:
-            logging.info("Loading configurations from limit_file: {}".format(limit_file))
-            NATOMS, NCONFIGS, limit_configs = load_xyz(limit_file)
-            assert NATOMS   == self.NATOMS
-            assert NCONFIGS == self.NCONFIGS
-
-            for n in range(NCONFIGS):
-                xyz_config   = xyz_configs[n]
-                limit_config = limit_configs[n]
-
-                np.testing.assert_almost_equal(xyz_config.atoms[0, :], limit_config.atoms[0, :])
-                np.testing.assert_almost_equal(xyz_config.atoms[1, :], limit_config.atoms[1, :])
-                np.testing.assert_almost_equal(xyz_config.atoms[2, :], limit_config.atoms[2, :])
-                np.testing.assert_almost_equal(xyz_config.atoms[3, :], limit_config.atoms[3, :])
-                np.testing.assert_almost_equal(xyz_config.atoms[6, :], limit_config.atoms[6, :])
-
-                xyz_NN   = np.linalg.norm(xyz_config.atoms[4, :]   - xyz_config.atoms[5, :])
-                limit_NN = np.linalg.norm(limit_config.atoms[4, :] - limit_config.atoms[5, :])
-                np.testing.assert_almost_equal(xyz_NN, limit_NN)
-
-                xyz_configs[n].energy -= limit_configs[n].energy
-
-            logging.info("Subtracted asymptotic energies")
 
         self.prepare_poly_lib()
         if self.purify:
@@ -342,7 +392,7 @@ class PolyDataset(Dataset):
                     if i == 4 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N1 C
                     if i == 5 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N2 C
 
-                yij[n, k] = np.linalg.norm(c.atoms[i] - c.atoms[j])
+                yij[n, k] = np.linalg.norm(c.coords[i] - c.coords[j])
                 yij[n][k] = np.exp(-yij[n, k] / a0)
                 k = k + 1
 

@@ -1,10 +1,10 @@
 import argparse
 import collections
 import json
+import sys
 import logging
 import random
 import os
-import sys
 import time
 import yaml
 
@@ -197,10 +197,24 @@ class WMSELoss_Ratio(torch.nn.Module):
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
 
+        #ydnp = yd.detach().numpy()
+        #yd_prednp = yd_pred.detach().numpy()
+        #tt = np.hstack((ydnp, yd_prednp))
+        #np.savetxt("tmp.txt", tt)
+        #assert False
+
         ymin = yd.min()
 
         w  = self.dwt / (self.dwt + yd - ymin)
         wmse = (w * (yd - yd_pred)**2).mean()
+
+        #mse = ((yd - yd_pred)**2).mean()
+        #print("MSE: {}".format(mse))
+
+        #wnp = w.detach().numpy()
+        #ydnp = yd.detach().numpy()
+        #tt = np.hstack((ydnp, wnp))
+        #np.savetxt("ethanol_w.txt", tt)
 
         return wmse
 
@@ -322,16 +336,16 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = score
             self.save_checkpoint(model, xscaler, yscaler, meta_info)
-
         elif score < self.best_score and (self.best_score - score) > self.tol:
             self.best_score = score
             self.counter = 0
             self.save_checkpoint(model, xscaler, yscaler, meta_info)
-
         else:
             self.counter += 1
             if self.counter >= self.patience:
                 self.status = True
+
+        self.save_checkpoint(model, xscaler, yscaler, meta_info)
 
         if epoch % PRINT_TRAINING_STEPS == 0:
             logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
@@ -647,14 +661,14 @@ class Training:
         with torch.no_grad():
             self.model.eval()
 
-            pred_train        = self.model(self.train.X)
-            loss_train        = self.loss_fn(self.train.y, pred_train)
+            pred_train = self.model(self.train.X)
+            loss_train = self.loss_fn(self.train.y, pred_train)
 
-            pred_val        = self.model(self.val.X)
-            loss_val        = self.loss_fn(self.val.y, pred_val)
+            pred_val   = self.model(self.val.X)
+            loss_val   = self.loss_fn(self.val.y, pred_val)
 
-            pred_test        = self.model(self.test.X)
-            loss_test        = self.loss_fn(self.test.y, pred_test)
+            pred_test  = self.model(self.test.X)
+            loss_test  = self.loss_fn(self.test.y, pred_test)
 
         logging.info("Model evaluation after training:")
         logging.info("Train      loss: {:.2f} cm-1".format(loss_train))
@@ -693,10 +707,11 @@ def load_cfg(cfg_path):
     return cfg
 
 def load_dataset(cfg_dataset):
-    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
+    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'SOURCE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
     for option in cfg_dataset.keys():
         assert option in known_options, "Unknown option: {}".format(option)
 
+    source       = cfg_dataset['SOURCE']
     order        = cfg_dataset['ORDER']
     symmetry     = cfg_dataset.get('SYMMETRY', '4 2 1')
     typ          = cfg_dataset['TYPE'].lower()
@@ -704,21 +719,26 @@ def load_dataset(cfg_dataset):
     intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
     purify       = cfg_dataset.get('PURIFY', False)
 
-    assert order in (3, 4, 5)
-    assert typ in ('rigid', 'nonrigid', 'nonrigid-clip')
+    assert order in (1, 2, 3, 4, 5)
+    assert typ in ('energy', 'dipole')
 
     logging.info("Dataset options:")
     logging.info("order:        {}".format(order))
     logging.info("symmetry:     {}".format(symmetry))
     logging.info("typ:          {}".format(typ))
+    logging.info("source:       {}".format(source))
     logging.info("energy_limit: {}".format(energy_limit))
     logging.info("intramz:      {}".format(intramz))
     logging.info("purify:       {}".format(purify))
 
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(order, symmetry, typ, energy_limit, intramz, purify)
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, energy_limit, intramz, purify)
     if not os.path.isfile(train_fpath) or not os.path.isfile(val_fpath) or not os.path.isfile(test_fpath):
         logging.info("Invoking make_dataset to create polynomial dataset")
-        make_dataset(order=order, symmetry=symmetry, typ=typ, energy_limit=energy_limit, intramz=intramz, purify=purify)
+
+        # we suppose that paths in YAML configuration are relative to BASEDIR (repo folder)
+        source = [os.path.join(BASEDIR, path) for path in source]
+
+        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, energy_limit=energy_limit, intramz=intramz, purify=purify)
     else:
         logging.info("Dataset found.")
 
@@ -744,15 +764,16 @@ def load_dataset(cfg_dataset):
     return train, val, test
 
 if __name__ == "__main__":
-    logger = logging.getLogger()
-    logger.handlers = []
-    logger.setLevel(logging.INFO)
 
-    formatter = logging.Formatter('[%(levelname)s] %(message)s')
+    #logger = logging.getLogger()
+    #logger.handlers = []
+    #logger.setLevel(logging.INFO)
 
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.INFO)
-    stdout_handler.setFormatter(formatter)
+    #formatter = logging.Formatter('[%(levelname)s] %(message)s')
+
+    #stdout_handler = logging.StreamHandler(sys.stdout)
+    #stdout_handler.setLevel(logging.INFO)
+    #stdout_handler.setFormatter(formatter)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
@@ -788,12 +809,28 @@ if __name__ == "__main__":
     else:
         chk_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".pt")
 
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
+    if os.path.exists(log_path):
+        os.remove(log_path)
 
-    logger.addHandler(stdout_handler)
-    logger.addHandler(file_handler)
+    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
+    rootLogger = logging.getLogger()
+    rootLogger.handlers = []
+
+    fileHandler = logging.FileHandler(log_path)
+    fileHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(fileHandler)
+
+    consoleHandler = logging.StreamHandler(sys.stdout)
+    consoleHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(consoleHandler)
+    rootLogger.setLevel(logging.INFO)
+
+    #file_handler = logging.FileHandler(log_path)
+    #file_handler.setLevel(logging.INFO)
+    #file_handler.setFormatter(formatter)
+
+    #logger.addHandler(stdout_handler)
+    #logger.addHandler(file_handler)
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)
