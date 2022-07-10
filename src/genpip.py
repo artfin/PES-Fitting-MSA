@@ -69,7 +69,7 @@ def compile_dlib(order, symmetry, wdir):
     logging.info("compiling dynamic lib...")
     fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
     fpath = os.path.join(wdir, fname)
-    st = cl('gfortran -shared -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
+    st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
     logging.info(st.stdout)
 
 
