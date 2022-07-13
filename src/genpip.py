@@ -75,13 +75,16 @@ def generate_fortran(order, symmetry, wdir):
     assert os.path.exists(fpath), "some problem with gradient file generation; see src/derivative.pl"
     logging.info("Created PIP gradient file: {}".format(fpath))
 
-def compile_dlib(order, symmetry, wdir):
-    logging.info("compiling dynamic lib...")
+def compile_basis_dlib(order, symmetry, wdir):
+    logging.info("compiling basis dynamic lib...")
 
     fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
     fpath = os.path.join(wdir, fname)
     st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
     logging.info(st.stdout)
+
+def compile_derivatives_dlib(order, symmetry, wdir):
+    logging.info("compiling derivatives dynamic lib...")
 
     fname = "f_gradbasis_{}_{}".format(symmetry.replace(' ', '_'), order)
     fpath = os.path.join(wdir, fname)
@@ -112,5 +115,5 @@ if __name__   == "__main__":
 
     run_msa(order, symmetry, wdir)
     generate_fortran(order, symmetry, wdir)
-    compile_dlib(order, symmetry, wdir)
+    compile_basis_dlib(order, symmetry, wdir)
     logging.info("Finished.")

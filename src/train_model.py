@@ -218,6 +218,51 @@ class WMSELoss_Ratio(torch.nn.Module):
 
         return wmse
 
+class WMSELoss_Ratio_wforces(torch.nn.Module):
+    def __init__(self, natoms, dwt=1.0):
+        super().__init__()
+        self.natoms = natoms
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
+
+        self.en_mean = None
+        self.en_std  = None
+
+    def set_scale(self, en_mean, en_std):
+        self.en_mean = torch.from_numpy(en_mean).to(DEVICE)
+        self.en_std  = torch.from_numpy(en_std).to(DEVICE)
+
+    def __repr__(self):
+        return "WMSELoss_Ratio_wforces(natoms={}, dwt={})".format(self.natoms, self.dwt)
+
+    def forward(self, en, en_pred, forces, forces_pred):
+        assert self.en_mean is not None
+        assert self.en_std is not None
+
+        # descale energies
+        # forces are supposed to be unnormalized already here
+        _en      = en      * self.en_std + self.en_mean
+        _en_pred = en_pred * self.en_std + self.en_mean
+
+        enmin = _en.min()
+        w  = self.dwt / (self.dwt + _en - enmin)
+        wmse_en     = (w * (_en - _en_pred)**2).mean()
+
+
+        # TODO: probably can be rewritten in the vectorized form
+        wmse_forces = 0.0
+        nconfigs = forces.size()[0]
+        for n in range(nconfigs):
+            lf = 0.0
+            fp = forces_pred[n].resize_(9, 3)
+
+            for natom in range(self.natoms):
+                lf += torch.dot(forces[n, natom, :], fp[natom, :])
+
+            wmse_forces += lf * w[n] / self.natoms
+
+        wmse_forces = wmse_forces / nconfigs
+        return wmse_en + wmse_forces
+
 class WRMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
@@ -408,7 +453,6 @@ class Training:
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
 
-        # passing mean and scale of energies to obtain absolute energies from normalized ones
         self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.pretraining = False
@@ -468,24 +512,35 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
+        use_forces = self.cfg_loss.get('FORCES', False)
+        print("use_forces: {}".format(use_forces))
+
+        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann':
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WMSELoss_Boltzmann(Eref=Eref)
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio':
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not use_forces:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio':
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not use_forces:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WMSELoss_Ratio(dwt=dwt)
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS':
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not use_forces:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS':
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not use_forces:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WMSELoss_PS(Emax=Emax)
+
+
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and use_forces:
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt)
+
         else:
             print(self.cfg_loss)
             raise ValueError("unreachable")
@@ -638,9 +693,46 @@ class Training:
     def train_epoch(self, epoch, optimizer):
         def closure():
             optimizer.zero_grad()
-            y_pred = self.model(self.train.X)
 
-            loss = self.loss_fn(self.train.y, y_pred)
+            USE_FORCES = True
+
+            if USE_FORCES:
+                self.train.X.requires_grad = True
+
+                sz = self.train.X.size()
+                y_pred = torch.zeros(sz[0])
+
+                # derivative of (normalized) energy w.r.t. to (normalized) polynomials for all configurations
+                #   dims: [nconfigs x npoly]
+                ders_pred = torch.zeros(sz)
+
+                for k in range(sz[0]):
+                    inputs = self.train.X[k, :]
+                    pred = self.model(inputs)
+
+                    y_pred[k]       = pred
+                    ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True)[0]
+
+                self.train.X.requires_grad = False
+
+                # take into account normalization of energy and polynomials
+                # now we have derivatives of energy w.r.t. to polynomials 
+                ders_pred = torch.div(ders_pred, torch.from_numpy(self.xscaler.scale_))
+                ders_pred = torch.div(ders_pred, torch.from_numpy(self.yscaler.scale_))
+
+                # dE/dx = dE/d(poly) * d(poly)/dx
+                # `torch.einsum` throws a Runtime error with explicit conversion to Double 
+                dy_pred = torch.einsum('ijk,ij -> ik', self.train.dX.double(), ders_pred.double())
+
+                #print("ders_pred.size(): {}".format(ders_pred.size()))
+                #print("dX.size(): {}".format(self.train.dX.size()))
+                #print("dE_dx.size(): {}".format(dE_dx.size()))
+
+                loss = self.loss_fn(self.train.y, y_pred, self.train.dy, dy_pred)
+            else:
+                y_pred = self.model(self.train.X)
+                loss = self.loss_fn(self.train.y, y_pred)
+
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
 
@@ -707,7 +799,7 @@ def load_cfg(cfg_path):
     return cfg
 
 def load_dataset(cfg_dataset):
-    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'SOURCE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
+    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'SOURCE', 'FORCES', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
     for option in cfg_dataset.keys():
         assert option in known_options, "Unknown option: {}".format(option)
 
@@ -718,27 +810,30 @@ def load_dataset(cfg_dataset):
     energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)
     intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
     purify       = cfg_dataset.get('PURIFY', False)
+    use_forces   = cfg_dataset.get('FORCES', False)
 
     assert order in (1, 2, 3, 4, 5)
     assert typ in ('energy', 'dipole')
+    assert use_forces in (True, False)
 
     logging.info("Dataset options:")
     logging.info("order:        {}".format(order))
     logging.info("symmetry:     {}".format(symmetry))
     logging.info("typ:          {}".format(typ))
     logging.info("source:       {}".format(source))
+    logging.info("use_forces:   {}".format(use_forces))
     logging.info("energy_limit: {}".format(energy_limit))
     logging.info("intramz:      {}".format(intramz))
     logging.info("purify:       {}".format(purify))
 
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, energy_limit, intramz, purify)
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify)
     if not os.path.isfile(train_fpath) or not os.path.isfile(val_fpath) or not os.path.isfile(test_fpath):
         logging.info("Invoking make_dataset to create polynomial dataset")
 
         # we suppose that paths in YAML configuration are relative to BASEDIR (repo folder)
         source = [os.path.join(BASEDIR, path) for path in source]
-
-        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, energy_limit=energy_limit, intramz=intramz, purify=purify)
+        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, use_forces=use_forces,
+                     energy_limit=energy_limit, intramz=intramz, purify=purify)
     else:
         logging.info("Dataset found.")
 
@@ -764,17 +859,6 @@ def load_dataset(cfg_dataset):
     return train, val, test
 
 if __name__ == "__main__":
-
-    #logger = logging.getLogger()
-    #logger.handlers = []
-    #logger.setLevel(logging.INFO)
-
-    #formatter = logging.Formatter('[%(levelname)s] %(message)s')
-
-    #stdout_handler = logging.StreamHandler(sys.stdout)
-    #stdout_handler.setLevel(logging.INFO)
-    #stdout_handler.setFormatter(formatter)
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
     parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file without extension")
@@ -831,6 +915,8 @@ if __name__ == "__main__":
 
     #logger.addHandler(stdout_handler)
     #logger.addHandler(file_handler)
+    import psutil
+    print("Memory at the very start: ", psutil.virtual_memory())
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset)

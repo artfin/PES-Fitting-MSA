@@ -87,12 +87,15 @@ sub print_mono_head {
         print $om "    real (c_double), dimension($ng,$nx), intent(in)  :: drdx\n";
         print $om "    real (c_double), dimension(0:$nm),   intent(out) :: dm\n";
         print $om "    real (c_double), dimension(0:$nm),   intent(in)  :: m\n";
+
+        # explicitly stating that integer::flag will be passed by value
+        # (instead of through pointer by default)
+        print $om "    integer (c_int), intent(in), VALUE  :: flag\n"; 
     } else {
         print $om "    real, dimension($ng,$nx), intent(in)  :: drdx\n";
         print $om "    real, dimension(0:$nm),   intent(out) :: dm\n";
         print $om "    real, dimension(0:$nm),   intent(in)  :: m\n";
     }
-    print $om "    integer::flag\n";
     print $om "    !::::::::::::::::::::\n";
     print $om "    real::a\n";
     print $om "\n";
