@@ -250,8 +250,6 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         w  = self.dwt / (self.dwt + _en - enmin)
         wmse_en     = (w * (_en - _en_pred)**2).mean()
 
-        start_time = timeit.default_timer()
-
         # TODO: probably can be rewritten in the vectorized form
         wmse_forces = 0.0
         nconfigs = forces.size()[0]
@@ -266,9 +264,6 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
             wmse_forces += lf * w[n] / self.natoms
 
         wmse_forces = wmse_forces / nconfigs
-
-        elapsed = timeit.default_timer() - start_time
-        logging.info("Loss on forces took {:.2f}s".format(elapsed))
 
         return wmse_en + wmse_forces
 
@@ -367,7 +362,6 @@ class WRMSELoss_PS(torch.nn.Module):
         w = (torch.tanh(-6e-4 * (Ehat - self.Emax.expand_as(Ehat))) + 1.002002002) / 2.002002002 / N / Ehat
         w /= w.max()
         wmse = (w * (yd - yd_pred)**2).mean()
-
 
         return torch.sqrt(wmse)
 
@@ -670,19 +664,23 @@ class Training:
                 self.loss_fn = self.build_loss()
                 self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
-            loss_train = self.train_epoch(epoch, self.optimizer)
+            loss_train = self.train_epoch(epoch, self.optimizer).item()
 
-            with torch.no_grad():
-                self.model.eval()
+            # Calling model.eval() will change the behavior of some layers, 
+            # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
+            self.model.eval()
 
-                if self.cfg_loss['USE_FORCES']:
-                    val_y_pred, val_dy_pred = self.compute_forces(self.val)
-                    loss_val = self.loss_fn(self.val.y, pred_val, self.val.dy, pred_dy_val)
-                else:
+            if self.cfg_loss['USE_FORCES']:
+                val_y_pred, val_dy_pred = self.compute_forces(self.val)
+                loss_val = self.loss_fn(self.val.y, val_y_pred, self.val.dy, val_dy_pred).item()
+            else:
+                # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+                # or wrap the forward pass into with torch.no_grad().
+                with torch.no_grad():
                     pred_val = self.model(self.val.X)
                     loss_val = self.loss_fn(self.val.y, pred_val)
 
-                self.writer.add_scalar("loss/val", loss_val, epoch)
+            self.writer.add_scalar("loss/val", loss_val, epoch)
 
             self.scheduler.step(loss_val)
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -792,17 +790,31 @@ class Training:
         self.test.X = self.test.X.to(DEVICE)
         self.test.y = self.test.y.to(DEVICE)
 
-        with torch.no_grad():
-            self.model.eval()
+        # Calling model.eval() will change the behavior of some layers, 
+        # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
+        self.model.eval()
 
-            pred_train = self.model(self.train.X)
-            loss_train = self.loss_fn(self.train.y, pred_train)
+        if self.cfg_loss['USE_FORCES']:
+            train_y_pred, train_dy_pred = self.compute_forces(self.train)
+            loss_train = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred).item()
 
-            pred_val   = self.model(self.val.X)
-            loss_val   = self.loss_fn(self.val.y, pred_val)
+            val_y_pred, val_dy_pred = self.compute_forces(self.val)
+            loss_val = self.loss_fn(self.val.y, val_y_pred, self.val.dy, val_dy_pred).item()
 
-            pred_test  = self.model(self.test.X)
-            loss_test  = self.loss_fn(self.test.y, pred_test)
+            test_y_pred, test_dy_pred = self.compute_forces(self.test)
+            loss_test = self.loss_fn(self.test.y, test_y_pred, self.test.dy, test_dy_pred).item()
+        else:
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                pred_train = self.model(self.train.X)
+                loss_train = self.loss_fn(self.train.y, pred_train)
+
+                pred_val   = self.model(self.val.X)
+                loss_val   = self.loss_fn(self.val.y, pred_val)
+
+                pred_test  = self.model(self.test.X)
+                loss_test  = self.loss_fn(self.test.y, pred_test)
 
         logging.info("Model evaluation after training:")
         logging.info("Train      loss: {:.2f} cm-1".format(loss_train))
