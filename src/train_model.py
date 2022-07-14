@@ -664,7 +664,7 @@ class Training:
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
         for epoch in range(MAX_EPOCHS):
-            # switch between loss functions
+            # switch into mixed loss function: E + F
             if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
                 self.cfg_loss['USE_FORCES'] = True
                 self.loss_fn = self.build_loss()
@@ -676,10 +676,12 @@ class Training:
                 self.model.eval()
 
                 if self.cfg_loss['USE_FORCES']:
+                    val_y_pred, val_dy_pred = self.compute_forces(self.val)
                     loss_val = self.loss_fn(self.val.y, pred_val, self.val.dy, pred_dy_val)
                 else:
                     pred_val = self.model(self.val.X)
                     loss_val = self.loss_fn(self.val.y, pred_val)
+
                 self.writer.add_scalar("loss/val", loss_val, epoch)
 
             self.scheduler.step(loss_val)
@@ -713,46 +715,49 @@ class Training:
 
         return self.model
 
+    def compute_forces(self, dataset):
+        dataset.X.requires_grad = True
+
+        sz     = dataset.X.size()
+        y_pred = torch.zeros(sz[0])
+
+        # derivative of (normalized) energy w.r.t. to (normalized) polynomials for all configurations
+        #   dims: [nconfigs x npoly]
+        ders_pred = torch.zeros(sz)
+
+        for k in range(sz[0]):
+            inputs = dataset.X[k, :]
+            pred   = self.model(inputs)
+
+            y_pred[k]       = pred
+            ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True, create_graph=False)[0]
+
+        dataset.X.requires_grad = False
+
+        # take into account normalization of polynomials
+        # now we have derivatives of energy w.r.t. to polynomials 
+        ders_pred = torch.div(ders_pred, torch.from_numpy(self.xscaler.scale_))
+
+        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error with explicit conversion to Double 
+        dy_pred = torch.einsum('ijk,ij -> ik', dataset.dX.double(), ders_pred.double())
+        # take into account normalization of model energy
+        dy_pred = - torch.mul(dy_pred, torch.from_numpy(self.yscaler.scale_))
+
+        return y_pred, dy_pred
+
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
+
         def closure():
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
 
             optimizer.zero_grad()
 
-            if self.cfg_loss['USE_FORCES'] or \
-               (self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']):
-
-                self.train.X.requires_grad = True
-
-                sz = self.train.X.size()
-                y_pred = torch.zeros(sz[0])
-
-                # derivative of (normalized) energy w.r.t. to (normalized) polynomials for all configurations
-                #   dims: [nconfigs x npoly]
-                ders_pred = torch.zeros(sz)
-
-                for k in range(sz[0]):
-                    inputs = self.train.X[k, :]
-                    pred = self.model(inputs)
-
-                    y_pred[k]       = pred
-                    ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True, create_graph=False)[0]
-
-                self.train.X.requires_grad = False
-
-                # take into account normalization of polynomials
-                # now we have derivatives of energy w.r.t. to polynomials 
-                ders_pred = torch.div(ders_pred, torch.from_numpy(self.xscaler.scale_))
-
-                # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
-                # `torch.einsum` throws a Runtime error with explicit conversion to Double 
-                dy_pred = torch.einsum('ijk,ij -> ik', self.train.dX.double(), ders_pred.double())
-                # take into account normalization of model energy
-                dy_pred = - torch.mul(dy_pred, torch.from_numpy(self.yscaler.scale_))
-
-                loss = self.loss_fn(self.train.y, y_pred, self.train.dy, dy_pred)
+            if self.cfg_loss['USE_FORCES']:
+                train_y_pred, train_dy_pred = self.compute_forces(self.train)
+                loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
             else:
                 y_pred = self.model(self.train.X)
                 loss = self.loss_fn(self.train.y, y_pred)
@@ -760,12 +765,12 @@ class Training:
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
 
-            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
+            if self.cfg_loss['USE_FORCES']:
                 print("Calling loss.backward()")
 
             loss.backward(retain_graph=True)
-            
-            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
+
+            if self.cfg_loss['USE_FORCES']:
                 print("Exiting `closure`")
 
             return loss
