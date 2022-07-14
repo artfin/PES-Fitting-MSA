@@ -373,12 +373,17 @@ class EarlyStopping:
         path:      path for the checkpoint to be saved to
         """
         self.patience = patience
-        self.tol = tol
+        self.tol      = tol
         self.chk_path = chk_path
 
-        self.counter = 0
+        self.counter    = 0
         self.best_score = None
-        self.status = False
+        self.status     = False
+
+    def reset(self):
+        self.counter    = 0
+        self.best_score = None
+        self.status     = False
 
     def __call__(self, epoch, score, model, xscaler, yscaler, meta_info):
         if self.best_score is None:
@@ -663,6 +668,8 @@ class Training:
                 self.cfg_loss['USE_FORCES'] = True
                 self.loss_fn = self.build_loss()
                 self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+
+                self.es.reset()
 
             loss_train = self.train_epoch(epoch, self.optimizer).item()
 
