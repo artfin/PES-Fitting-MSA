@@ -149,11 +149,10 @@ def load_npz(fpath, load_forces=False):
         coords_bohr    = coords / BOHRTOANG
         energy_cm      = (energy[0] - energy_min) * KCALTOCM
 
+        forces_cm_bohr = None
         if load_forces:
             forces = fd['F'][ind]
             forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
-        else:
-            forces_cm_bohr = None
 
         xyz_configs.append(
             XYZConfig(

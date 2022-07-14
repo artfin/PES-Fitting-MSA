@@ -6,6 +6,7 @@ import logging
 import random
 import os
 import time
+import timeit
 import yaml
 
 import torch.nn
@@ -247,6 +248,7 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         w  = self.dwt / (self.dwt + _en - enmin)
         wmse_en     = (w * (_en - _en_pred)**2).mean()
 
+        start_time = timeit.default_timer()
 
         # TODO: probably can be rewritten in the vectorized form
         wmse_forces = 0.0
@@ -256,11 +258,16 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
             fp = forces_pred[n].resize_(9, 3)
 
             for natom in range(self.natoms):
-                lf += torch.dot(forces[n, natom, :], fp[natom, :])
+                df = forces[n, natom, :] - fp[natom, :]
+                lf += torch.dot(df, df)
 
             wmse_forces += lf * w[n] / self.natoms
 
         wmse_forces = wmse_forces / nconfigs
+
+        elapsed = timeit.default_timer() - start_time
+        logging.info("Loss on forces took {:.2f}s".format(elapsed))
+
         return wmse_en + wmse_forces
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -390,8 +397,6 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.status = True
 
-        self.save_checkpoint(model, xscaler, yscaler, meta_info)
-
         if epoch % PRINT_TRAINING_STEPS == 0:
             logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
             logging.info("(Early Stopping) ES counter: {}; ES patience: {}".format(self.counter, self.patience))
@@ -448,12 +453,11 @@ class Training:
         self.yscaler = yscaler
 
         self.cfg_loss = cfg['LOSS']
-        self.loss_fn = self.build_loss()
+        self.loss_fn  = self.build_loss()
+        self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
-
-        self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
         self.pretraining = False
         if cfg.get('PRETRAINING'):
@@ -512,8 +516,16 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        use_forces = self.cfg_loss.get('FORCES', False)
-        print("use_forces: {}".format(use_forces))
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH')
+        for option in self.cfg_loss.keys():
+            assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
+
+        # have all defaults in the same place and set them to configuration if the value is omitted in the YAML file
+        use_forces = self.cfg_loss.get('USE_FORCES', False)
+        self.cfg_loss['USE_FORCES'] = use_forces
+
+        use_forces_after_epoch = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
+        self.cfg_loss['USE_FORCES_AFTER_EPOCH'] = use_forces_after_epoch
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
@@ -650,6 +662,12 @@ class Training:
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
         for epoch in range(MAX_EPOCHS):
+            # switch between loss functions
+            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
+                self.cfg_loss['USE_FORCES'] = True
+                self.loss_fn = self.build_loss()
+                self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+
             loss_train = self.train_epoch(epoch, self.optimizer)
 
             with torch.no_grad():
@@ -691,12 +709,16 @@ class Training:
         return self.model
 
     def train_epoch(self, epoch, optimizer):
+        CLOSURE_CALL_COUNT = 0
         def closure():
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+
             optimizer.zero_grad()
 
-            USE_FORCES = True
+            if self.cfg_loss['USE_FORCES'] or \
+               (self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']):
 
-            if USE_FORCES:
                 self.train.X.requires_grad = True
 
                 sz = self.train.X.size()
@@ -711,22 +733,19 @@ class Training:
                     pred = self.model(inputs)
 
                     y_pred[k]       = pred
-                    ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True)[0]
+                    ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True, create_graph=False)[0]
 
                 self.train.X.requires_grad = False
 
-                # take into account normalization of energy and polynomials
+                # take into account normalization of polynomials
                 # now we have derivatives of energy w.r.t. to polynomials 
                 ders_pred = torch.div(ders_pred, torch.from_numpy(self.xscaler.scale_))
-                ders_pred = torch.div(ders_pred, torch.from_numpy(self.yscaler.scale_))
 
-                # dE/dx = dE/d(poly) * d(poly)/dx
+                # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
                 # `torch.einsum` throws a Runtime error with explicit conversion to Double 
                 dy_pred = torch.einsum('ijk,ij -> ik', self.train.dX.double(), ders_pred.double())
-
-                #print("ders_pred.size(): {}".format(ders_pred.size()))
-                #print("dX.size(): {}".format(self.train.dX.size()))
-                #print("dE_dx.size(): {}".format(dE_dx.size()))
+                # take into account normalization of model energy
+                dy_pred = - torch.mul(dy_pred, torch.from_numpy(self.yscaler.scale_))
 
                 loss = self.loss_fn(self.train.y, y_pred, self.train.dy, dy_pred)
             else:
@@ -736,11 +755,20 @@ class Training:
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
 
-            loss.backward()
+            print("Calling loss.backward()")
+            loss.backward(retain_graph=True)
+            print("Exiting `closure`")
+
             return loss
 
         self.model.train()
+
+        start_time = timeit.default_timer()
         optimizer.step(closure)
+        elapsed = timeit.default_timer() - start_time
+        logging.info("Optimizer makes step in {:.2f}s".format(elapsed))
+        logging.info("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+
         loss_train = closure()
 
         self.writer.add_scalar("loss/train", loss_train, epoch)

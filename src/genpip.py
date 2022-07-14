@@ -116,4 +116,5 @@ if __name__   == "__main__":
     run_msa(order, symmetry, wdir)
     generate_fortran(order, symmetry, wdir)
     compile_basis_dlib(order, symmetry, wdir)
+    compile_derivatives_dlib(order, symmetry, wdir)
     logging.info("Finished.")
