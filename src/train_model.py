@@ -239,6 +239,8 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         assert self.en_mean is not None
         assert self.en_std is not None
 
+        en_pred = en_pred.to(DEVICE)
+
         # descale energies
         # forces are supposed to be unnormalized already here
         _en      = en      * self.en_std + self.en_mean
@@ -673,8 +675,11 @@ class Training:
             with torch.no_grad():
                 self.model.eval()
 
-                pred_val = self.model(self.val.X)
-                loss_val = self.loss_fn(self.val.y, pred_val)
+                if self.cfg_loss['USE_FORCES']:
+                    loss_val = self.loss_fn(self.val.y, pred_val, self.val.dy, pred_dy_val)
+                else:
+                    pred_val = self.model(self.val.X)
+                    loss_val = self.loss_fn(self.val.y, pred_val)
                 self.writer.add_scalar("loss/val", loss_val, epoch)
 
             self.scheduler.step(loss_val)
@@ -755,9 +760,13 @@ class Training:
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
 
-            print("Calling loss.backward()")
+            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
+                print("Calling loss.backward()")
+
             loss.backward(retain_graph=True)
-            print("Exiting `closure`")
+            
+            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch >= self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
+                print("Exiting `closure`")
 
             return loss
 
