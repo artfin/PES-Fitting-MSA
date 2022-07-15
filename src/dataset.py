@@ -140,35 +140,45 @@ def load_npz(fpath, load_forces=False):
     # ETHANOL DFT (full)
     energy_min = -97208.40600498248
 
+   # TODO:
+   # THIS DATASET HAS DISTANCES IN ANGSTROM AND ENERGY IN KCAL/MOL
+   # MAYBE HAVE THIS INFO IN .NPZ FILE, PARSE AND TRANSFORM ACCORDINGLY?
     xyz_configs = []
-    for ind, (coords, energy) in enumerate(zip(fd['R'], fd['E'])):
-        # TODO:
-        # THIS DATASET HAS DISTANCES IN ANGSTROM AND ENERGY IN KCAL/MOL
-        # MAYBE HAVE THIS INFO IN .NPZ FILE, PARSE AND TRANSFORM ACCORDINGLY?
 
-        coords_bohr    = coords / BOHRTOANG
-        energy_cm      = (energy[0] - energy_min) * KCALTOCM
-
-        forces_cm_bohr = None
-        if load_forces:
-            forces = fd['F'][ind]
+    if load_forces:
+        for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
+            coords_bohr    = coords / BOHRTOANG
+            energy_cm      = (energy[0] - energy_min) * KCALTOCM
             forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
 
-        xyz_configs.append(
-            XYZConfig(
-                coords=coords_bohr,
-                z=z,
-                energy=energy_cm,
-                forces=forces_cm_bohr
+            xyz_configs.append(
+                XYZConfig(
+                    coords=coords_bohr,
+                    z=z,
+                    energy=energy_cm,
+                    forces=forces_cm_bohr
+                )
             )
-        )
+    else:
+        for coords, energy in zip(fd['R'], fd['E']):
+            coords_bohr    = coords / BOHRTOANG
+            energy_cm      = (energy[0] - energy_min) * KCALTOCM
+
+            xyz_configs.append(
+                XYZConfig(
+                    coords=coords_bohr,
+                    z=z,
+                    energy=energy_cm,
+                    forces=None
+                )
+            )
 
     return NATOMS, NCONFIGS, xyz_configs
 
 def write_npz(npz_path, xyz_configs):
     from random import shuffle
     shuffle(xyz_configs)
-    xyz_configs = xyz_configs[:10000]
+    xyz_configs = xyz_configs[:50000]
 
     natoms   = xyz_configs[0].coords.shape[0]
     nconfigs = len(xyz_configs)
@@ -198,7 +208,7 @@ class PolyDataset(Dataset):
             #write_npz("ch4-n2-rigid.npz", xyz_configs)
         elif file_path.endswith(".npz"):
             NATOMS, NCONFIGS, xyz_configs = load_npz(file_path, use_forces)
-            #write_npz("ethanol_dft-10000.npz", xyz_configs)
+            #write_npz("ethanol_dft-50000.npz", xyz_configs)
         else:
             raise ValueError("Unrecognized file format.")
 
