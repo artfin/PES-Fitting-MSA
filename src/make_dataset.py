@@ -70,12 +70,10 @@ def save_json(d, fpath):
     with open(fpath, mode='w') as fp:
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
-def make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify):
+def make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify, interim_folder):
     assert typ in ('energy', 'dipole')
     assert order in (1, 2, 3, 4, 5)
     assert use_forces in (True, False)
-
-    dataset_folder = os.path.join(BASEDIR, "datasets", "interim")
 
     if energy_limit is not None:
         enlim_str = "-enlim={:.0f}".format(energy_limit)
@@ -98,29 +96,22 @@ def make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz,
         forces_str = ""
 
     symmetry_str = symmetry.replace(' ', '_')
-    train_fpath = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-train{enlim_str}{intramz_str}{purify_str}.pk")
-    val_fpath   = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-val{enlim_str}{intramz_str}{purify_str}.pk")
-    test_fpath  = os.path.join(dataset_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-test{enlim_str}{intramz_str}{purify_str}.pk")
+    train_fpath = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-train{enlim_str}{intramz_str}{purify_str}.pk")
+    val_fpath   = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-val{enlim_str}{intramz_str}{purify_str}.pk")
+    test_fpath  = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-test{enlim_str}{intramz_str}{purify_str}.pk")
 
     return train_fpath, val_fpath, test_fpath
 
-def make_dataset(source, typ, order, symmetry, **kwargs):
-    wdir = "datasets/external"
-
-    use_forces   = kwargs.get('use_forces', False)
-    intramz      = kwargs.get('intramz', False)
-    purify       = kwargs.get('purify', False)
-    energy_limit = kwargs.get("energy_limit", None)
-
+def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, use_forces, intramz, purify, energy_limit):
+    # default split function [dataset] -> [train, val, test] 
     data_split = sklearn.model_selection.train_test_split
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify)
 
     if use_forces:
         if len(source) > 1:
             logging.info("Stratification is not implemented for `use_forces=True`")
             assert False
 
-        dataset = PolyDataset(wdir=wdir, file_path=source[0], order=order, use_forces=use_forces,
+        dataset = PolyDataset(wdir=external_folder, file_path=source[0], order=order, use_forces=use_forces,
                               symmetry=symmetry, intramz=intramz, purify=purify)
 
         NCONFIGS = dataset.X.size()[0]
@@ -158,8 +149,8 @@ def make_dataset(source, typ, order, symmetry, **kwargs):
         label = 0
 
         for file_path in source:
-            dataset = PolyDataset(wdir=wdir, file_path=file_path, order=order, use_forces=use_forces,
-                              symmetry=symmetry, intramz=intramz, purify=purify)
+            dataset = PolyDataset(wdir=external_folder, file_path=file_path, order=order, use_forces=use_forces,
+                                  symmetry=symmetry, intramz=intramz, purify=purify)
 
             if GLOBAL_SET:
                 assert GLOBAL_NATOMS == dataset.NATOMS
@@ -239,6 +230,10 @@ def make_dataset(source, typ, order, symmetry, **kwargs):
     #train_index_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train-index.json")
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
+
+    train_fpath = dataset_fpaths["train"]
+    val_fpath   = dataset_fpaths["val"]
+    test_fpath  = dataset_fpaths["test"]
 
     dict_pk = dict(
         NATOMS=dataset.NATOMS,

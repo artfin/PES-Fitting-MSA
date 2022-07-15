@@ -860,22 +860,30 @@ def load_cfg(cfg_path):
     return cfg
 
 def load_dataset(cfg_dataset):
-    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'SOURCE', 'FORCES', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
+    known_options = ('SOURCE', 'INTERIM_FOLDER', 'ORDER', 'SYMMETRY', 'TYPE', 'FORCES', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
     for option in cfg_dataset.keys():
         assert option in known_options, "Unknown option: {}".format(option)
 
-    source       = cfg_dataset['SOURCE']
-    order        = cfg_dataset['ORDER']
-    symmetry     = cfg_dataset.get('SYMMETRY', '4 2 1')
-    typ          = cfg_dataset['TYPE'].lower()
-    energy_limit = cfg_dataset.get('ENERGY_LIMIT', None)
-    intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
-    purify       = cfg_dataset.get('PURIFY', False)
-    use_forces   = cfg_dataset.get('FORCES', False)
+    source          = cfg_dataset['SOURCE']
+    interim_folder  = cfg_dataset.get('INTERIM_FOLDER', os.path.join(BASEDIR, "datasets", "interim"))
+    external_folder = cfg_dataset.get('EXTERNAL_FOLDER', os.path.join(BASEDIR, "datasets", "external"))
+    order           = cfg_dataset['ORDER']
+    symmetry        = cfg_dataset.get('SYMMETRY', '4 2 1')
+    typ             = cfg_dataset['TYPE'].lower()
+    energy_limit    = cfg_dataset.get('ENERGY_LIMIT', None)
+    intramz         = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
+    purify          = cfg_dataset.get('PURIFY', False)
+    use_forces      = cfg_dataset.get('FORCES', False)
 
     assert order in (1, 2, 3, 4, 5)
     assert typ in ('energy', 'dipole')
     assert use_forces in (True, False)
+
+    if not os.path.isdir(interim_folder):
+        os.makedirs(interim_folder) # can create nested directories
+
+    if not os.path.isdir(external_folder):
+        os.makedirs(external_folder)
 
     logging.info("Dataset options:")
     logging.info("order:        {}".format(order))
@@ -887,14 +895,17 @@ def load_dataset(cfg_dataset):
     logging.info("intramz:      {}".format(intramz))
     logging.info("purify:       {}".format(purify))
 
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify)
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify, interim_folder)
+
     if not os.path.isfile(train_fpath) or not os.path.isfile(val_fpath) or not os.path.isfile(test_fpath):
         logging.info("Invoking make_dataset to create polynomial dataset")
 
         # we suppose that paths in YAML configuration are relative to BASEDIR (repo folder)
         source = [os.path.join(BASEDIR, path) for path in source]
-        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, use_forces=use_forces,
-                     energy_limit=energy_limit, intramz=intramz, purify=purify)
+
+        dataset_fpaths = {"train" : train_fpath, "val": val_fpath, "test" : test_fpath}
+        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, dataset_fpaths=dataset_fpaths, external_folder=external_folder,
+                     use_forces=use_forces, energy_limit=energy_limit, intramz=intramz, purify=purify)
     else:
         logging.info("Dataset found.")
 
