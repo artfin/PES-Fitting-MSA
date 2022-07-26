@@ -343,17 +343,17 @@ def generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True):
 
     return code + "}"
 
-def generate_poly_proc(poly):
-    return """
-void evpoly(double* x, double* p) {{
-{}
-}}
-""".format(
-        "".join([
-            "    p[{}] = {};\n".format(ind, generate_poly_expr(p))
-            for ind, p in enumerate(poly)
-        ])
-    )
+def generate_poly_proc(poly, poly_func_name):
+    decl = "void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p) {{\n".format(poly_func_name)
+    body = ""
+
+    for ind, p in enumerate(poly):
+        rhs = generate_poly_expr(p)
+        rhs = rhs.replace("1*", "")
+
+        body = body + "    p({}) = {};\n".format(ind, rhs)
+
+    return decl + body + "}\n"
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -378,8 +378,32 @@ if __name__ == "__main__":
     stub = args.basis_file.split("MOL_")[1].split(".BAS")[0]
 
     if args.generate_poly:
-        proc = generate_poly_proc(poly)
-        print(proc)
+        poly_func_name = "evpoly_{}".format(stub)
+
+        print("Generating code for evaluating polynomials...")
+        proc_code = generate_poly_proc(poly, poly_func_name)
+        print("Finished.")
+
+        poly_cc_fname = "c_basis_" + stub + ".cc"
+        poly_h_fname  = "c_basis_" + stub + ".h"
+
+        print("Writing generated code to CC={}".format(poly_cc_fname))
+        print("Writing corresponding header file H={}".format(poly_h_fname))
+
+        with open(poly_cc_fname, mode='w') as out:
+            out.write("#include \"{}\"\n\n".format(poly_h_fname))
+            out.write(proc_code)
+
+        include_guard = "c_basis_" + stub + "_h"
+        include_guard = include_guard.upper()
+
+        with open(poly_h_fname, mode='w') as out:
+            out.write("#ifndef {}\n".format(include_guard))
+            out.write("#define {}\n".format(include_guard))
+            out.write("\n")
+            out.write("void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p);\n".format(poly_func_name))
+            out.write("\n")
+            out.write("#endif")
 
     if args.generate_jac:
         jac_func_name = "evpoly_jac_{}".format(stub)
