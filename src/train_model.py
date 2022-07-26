@@ -40,8 +40,8 @@ def seed_torch(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
 
-def preprocess_dataset(train, val, test, cfg_preprocess):
-    if cfg_preprocess['NORMALIZE'] == 'std':
+def preprocess_dataset(train, val, test, cfg):
+    if cfg['NORMALIZE'] == 'std':
         xscaler = StandardScaler()
         yscaler = StandardScaler()
     else:
@@ -53,6 +53,7 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
         val.X   = torch.from_numpy(xscaler.transform(val.X))
         test.X  = torch.from_numpy(xscaler.transform(test.X))
     except ValueError:
+        logging.error("[preprocess_dataset] caught ValueError")
         val.X  = torch.empty((1, 1))
         test.X = torch.empty((1, 1))
 
@@ -62,6 +63,7 @@ def preprocess_dataset(train, val, test, cfg_preprocess):
         val.y   = torch.from_numpy(yscaler.transform(val.y))
         test.y  = torch.from_numpy(yscaler.transform(test.y))
     except ValueError:
+        logging.error("[preprocess_dataset] caught ValueError")
         val.y = torch.empty(1)
         test.y = torch.empty(1)
 
@@ -198,6 +200,9 @@ class WMSELoss_Ratio(torch.nn.Module):
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
 
+        #print("yd: {}".format(yd))
+        #print("yd_pred: {}".format(yd_pred))
+
         #ydnp = yd.detach().numpy()
         #yd_prednp = yd_pred.detach().numpy()
         #tt = np.hstack((ydnp, yd_prednp))
@@ -209,13 +214,43 @@ class WMSELoss_Ratio(torch.nn.Module):
         w  = self.dwt / (self.dwt + yd - ymin)
         wmse = (w * (yd - yd_pred)**2).mean()
 
-        #mse = ((yd - yd_pred)**2).mean()
-        #print("MSE: {}".format(mse))
-
         #wnp = w.detach().numpy()
         #ydnp = yd.detach().numpy()
         #tt = np.hstack((ydnp, wnp))
         #np.savetxt("ethanol_w.txt", tt)
+
+        return wmse
+
+class WMSELoss_Ratio_dipole(torch.nn.Module):
+    def __init__(self, dwt=1.0):
+        super().__init__()
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
+
+        self.dip_mean = None
+        self.dip_std  = None
+
+    def set_scale(self, dip_mean, dip_std):
+        self.dip_mean = torch.FloatTensor(dip_mean.tolist()).to(DEVICE)
+        self.dip_std  = torch.FloatTensor(dip_std.tolist()).to(DEVICE)
+
+    def __repr__(self):
+        return "WMSELoss_Ratio_dipole(dwt={})".format(self.dwt)
+
+    def forward(self, en, dip, dip_pred):
+        assert self.y_mean is not None
+        assert self.y_std is not None
+
+        # descale 
+        dipd      = dip     * self.dip_std + self.dip_mean
+        dipd_pred = dip_pred * self.dip_std + self.dip_mean
+
+        en_min = en.min()
+        w  = self.dwt / (self.dwt + en - en_min)
+
+        wmse = 0.0
+
+        nconfigs = yd.size()[0]
+        wmse = torch.tensordot(w * (yd - yd_pred), yd - yd_pred) / nconfigs
 
         return wmse
 
@@ -246,9 +281,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         _en      = en      * self.en_std + self.en_mean
         _en_pred = en_pred * self.en_std + self.en_mean
 
-        enmin = _en.min()
-        w  = self.dwt / (self.dwt + _en - enmin)
-        wmse_en     = (w * (_en - _en_pred)**2).mean()
+        enmin   = _en.min()
+        w       = self.dwt / (self.dwt + _en - enmin)
+        wmse_en = (w * (_en - _en_pred)**2).mean()
 
         # TODO: probably can be rewritten in the vectorized form
         wmse_forces = 0.0
@@ -264,7 +299,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
             wmse_forces += lf * w[n] / self.natoms
 
         wmse_forces = wmse_forces / nconfigs
+        wmse_forces = wmse_forces.item()
 
+        print("wmse_en: {}; wmse_forces: {}".format(wmse_en, wmse_forces))
         return wmse_en + wmse_forces
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -444,6 +481,7 @@ class Training:
         self.writer = SummaryWriter(log_dir=log_dir)
 
         self.model = model
+        self.cfg = cfg
         self.cfg_solver = cfg['TRAINING']
 
         self.train = train
@@ -528,7 +566,11 @@ class Training:
         use_forces_after_epoch = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
         self.cfg_loss['USE_FORCES_AFTER_EPOCH'] = use_forces_after_epoch
 
-        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
+        if self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WMSELoss_Ratio_dipole(dwt=dwt)
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
@@ -724,7 +766,7 @@ class Training:
         dataset.X.requires_grad = True
 
         sz     = dataset.X.size()
-        y_pred = torch.zeros(sz[0])
+        y_pred = torch.zeros(sz[0], 1)
 
         # derivative of (normalized) energy w.r.t. to (normalized) polynomials for all configurations
         #   dims: [nconfigs x npoly]
@@ -853,79 +895,94 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('DATASET', 'MODEL', 'LOSS', 'TRAINING')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
     return cfg
 
-def load_dataset(cfg_dataset):
-    known_options = ('SOURCE', 'INTERIM_FOLDER', 'ORDER', 'SYMMETRY', 'TYPE', 'FORCES', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE')
-    for option in cfg_dataset.keys():
-        assert option in known_options, "Unknown option: {}".format(option)
+def load_dataset(cfg_dataset, typ):
+    from enum import Enum, auto
+    class KeywordType:
+        KEYWORD_OPTIONAL = auto()
+        KEYWORD_REQUIRED = auto()
 
-    source          = cfg_dataset['SOURCE']
-    interim_folder  = cfg_dataset.get('INTERIM_FOLDER', os.path.join(BASEDIR, "datasets", "interim"))
-    external_folder = cfg_dataset.get('EXTERNAL_FOLDER', os.path.join(BASEDIR, "datasets", "external"))
-    order           = cfg_dataset['ORDER']
-    symmetry        = cfg_dataset.get('SYMMETRY', '4 2 1')
-    typ             = cfg_dataset['TYPE'].lower()
-    energy_limit    = cfg_dataset.get('ENERGY_LIMIT', None)
-    intramz         = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
-    purify          = cfg_dataset.get('PURIFY', False)
-    use_forces      = cfg_dataset.get('FORCES', False)
+    KEYWORDS = [
+        ('NAME', KeywordType.KEYWORD_REQUIRED, None), # `str` 
+        # FILE ORGANIZATION 
+        #  `list` : paths (relative to BASEDIR) to the .xyz/.npz files 
+        ('SOURCE', KeywordType.KEYWORD_REQUIRED, None),
+        #  `str`  : path to store pickled train/val/test datasets 
+        ('INTERIM_FOLDER', KeywordType.KEYWORD_OPTIONAL, os.path.join(BASEDIR, "datasets", "interim")),
+        #  `str`  : path to folder with files to compute invariant polynomials: .f90 to compute polynomials (and their derivatives) + .MONO + .POLY 
+        ('EXTERNAL_FOLDER', KeywordType.KEYWORD_OPTIONAL, os.path.join(BASEDIR, "datasets", "external")),
+        # DATA SELECTION 
+        ('LOAD_FORCES',  KeywordType.KEYWORD_OPTIONAL, False), # `bool` : whether to load forces from dataset
+        ('ENERGY_LIMIT', KeywordType.KEYWORD_OPTIONAL, None),  # `bool` : NOT SUPPORTED now -- set an upper bound on energies in the training dataset 
+        # DATASET PREPROCESSING
+        ('NORMALIZE',        KeywordType.KEYWORD_REQUIRED, None),  # `str`  : how to perform data normalization  
+        ('ANCHOR_POSITIONS', KeywordType.KEYWORD_OPTIONAL, None),  # [REQUIRED for TYPE=dipole] `int`s : which atoms to place on the OZ axis  
+        # PIP CONSTRUCTION 
+        ('ORDER',                  KeywordType.KEYWORD_REQUIRED, None),  # `int`  : maximum order of PIPs 
+        ('SYMMETRY',               KeywordType.KEYWORD_REQUIRED, None),  # `int`s : permutational symmetry of the molecule | molecular pair
+        ('INTRAMOLECULAR_TO_ZERO', KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use intermolecular basis of PIPs 
+        ('PURIFY',                 KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
+    ]
 
-    assert order in (1, 2, 3, 4, 5)
-    assert typ in ('energy', 'dipole')
-    assert use_forces in (True, False)
+    from operator import itemgetter
+    for keyword in cfg_dataset.keys():
+        assert keyword in list(map(itemgetter(0), KEYWORDS)), "Unknown keyword: {}".format(keyword)
 
-    if not os.path.isdir(interim_folder):
+    for keyword, keyword_type, default_value in KEYWORDS:
+        if keyword_type == KeywordType.KEYWORD_REQUIRED:
+            assert keyword in cfg_dataset, "Required keyword {} is missing".format(keyword)
+        elif keyword_type == KeywordType.KEYWORD_OPTIONAL:
+            cfg_dataset.setdefault(keyword, default_value)
+
+    if typ == 'DIPOLE':
+        assert 'ANCHOR_POSITIONS' in cfg_dataset
+        assert not cfg_dataset['LOAD_FORCES']
+
+    cfg_dataset['TYPE'] = typ
+
+    if not os.path.isdir(cfg_dataset['INTERIM_FOLDER']):
         os.makedirs(interim_folder) # can create nested directories
 
-    if not os.path.isdir(external_folder):
-        os.makedirs(external_folder)
+    if not os.path.isdir(cfg_dataset['EXTERNAL_FOLDER']):
+        os.makedirs(external_folder) # can create nested directories
 
     logging.info("Dataset options:")
-    logging.info("order:        {}".format(order))
-    logging.info("symmetry:     {}".format(symmetry))
-    logging.info("typ:          {}".format(typ))
-    logging.info("source:       {}".format(source))
-    logging.info("use_forces:   {}".format(use_forces))
-    logging.info("energy_limit: {}".format(energy_limit))
-    logging.info("intramz:      {}".format(intramz))
-    logging.info("purify:       {}".format(purify))
+    for keyword, value in cfg_dataset.items():
+        logging.info("{:>25}: \t {}".format(keyword, value))
 
-    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify, interim_folder)
-
+    train_fpath, val_fpath, test_fpath = make_dataset_fpaths(cfg_dataset)
     if not os.path.isfile(train_fpath) or not os.path.isfile(val_fpath) or not os.path.isfile(test_fpath):
         logging.info("Invoking make_dataset to create polynomial dataset")
 
         # we suppose that paths in YAML configuration are relative to BASEDIR (repo folder)
-        source = [os.path.join(BASEDIR, path) for path in source]
+        source = [os.path.join(BASEDIR, path) for path in cfg_dataset['SOURCE']]
 
         dataset_fpaths = {"train" : train_fpath, "val": val_fpath, "test" : test_fpath}
-        make_dataset(source=source, typ=typ, order=order, symmetry=symmetry, dataset_fpaths=dataset_fpaths, external_folder=external_folder,
-                     use_forces=use_forces, energy_limit=energy_limit, intramz=intramz, purify=purify)
+        make_dataset(cfg_dataset, dataset_fpaths)
     else:
         logging.info("Dataset found.")
 
-
     train = PolyDataset.from_pickle(train_fpath)
-    assert train.energy_limit == energy_limit
-    assert train.intramz      == intramz
-    assert train.purify       == purify
+    assert train.energy_limit == cfg_dataset['ENERGY_LIMIT']
+    assert train.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
+    assert train.purify       == cfg_dataset['PURIFY']
     logging.info("Loading training dataset: {}; len: {}".format(train_fpath, len(train.y)))
 
     val   = PolyDataset.from_pickle(val_fpath)
-    assert val.energy_limit == energy_limit
-    assert val.intramz      == intramz
-    assert val.purify       == purify
+    assert val.energy_limit == cfg_dataset['ENERGY_LIMIT']
+    assert val.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
+    assert val.purify       == cfg_dataset['PURIFY']
     logging.info("Loading validation dataset: {}; len: {}".format(val_fpath, len(val.y)))
 
     test  = PolyDataset.from_pickle(test_fpath)
-    assert test.energy_limit == energy_limit
-    assert test.intramz      == intramz
-    assert test.purify       == purify
+    assert test.energy_limit == cfg_dataset['ENERGY_LIMIT']
+    assert test.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
+    assert test.purify       == cfg_dataset['PURIFY']
     logging.info("Loading testing dataset: {}; len: {}".format(test_fpath, len(test.y)))
 
     return train, val, test
@@ -981,21 +1038,23 @@ if __name__ == "__main__":
     rootLogger.addHandler(consoleHandler)
     rootLogger.setLevel(logging.INFO)
 
-    #file_handler = logging.FileHandler(log_path)
-    #file_handler.setLevel(logging.INFO)
-    #file_handler.setFormatter(formatter)
-
-    #logger.addHandler(stdout_handler)
-    #logger.addHandler(file_handler)
     import psutil
     print("Memory at the very start: ", psutil.virtual_memory())
 
+    assert 'TYPE' in cfg
+    typ = cfg['TYPE']
+    assert typ in ('ENERGY', 'DIPOLE')
+
     cfg_dataset = cfg['DATASET']
-    train, val, test = load_dataset(cfg_dataset)
+    train, val, test = load_dataset(cfg_dataset, typ)
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
 
     cfg_model = cfg['MODEL']
-    model = build_network_yaml(cfg_model, input_features=train.NPOLY)
+    if typ == 'ENERGY':
+        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=1)
+    elif typ == 'DIPOLE':
+        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=3)
+
     nparams = count_params(model)
     logging.info("Number of parameters: {}".format(nparams))
 

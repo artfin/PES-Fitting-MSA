@@ -23,16 +23,20 @@ KCALTOCM  = 349.757
 
 # parameter inside the `yij` exp(...)
 a0 = 2.0 # bohrs
-POLYNOMIAL_LIB = "MSA"
+#POLYNOMIAL_LIB = "MSA"
+POLYNOMIAL_LIB = "CUSTOM"
 
 SYMBOLS = ('H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F',)
 
+# Optional actually means that variable is either T or None
+# so to make optional you have to specify None as default value
 @dataclass
 class XYZConfig:
     coords  : np.array
     z       : np.array
-    energy  : float
-    forces  : Optional[np.array]
+    energy  : Optional[float]    = None
+    dipole  : Optional[np.array] = None
+    forces  : Optional[np.array] = None
 
     def check(self):
         # TODO: check some interatomic distnaces (C-C, C-H and others to be in specific range)
@@ -70,8 +74,7 @@ class PolyDataset_t:
     intramz      : bool  = False
     purify       : bool  = False
 
-
-def load_xyz(fpath):
+def load_xyz_with_energy(fpath):
     nlines = sum(1 for line in open(fpath, mode='r'))
     NATOMS = int(open(fpath, mode='r').readline())
     NCONFIGS = nlines // (NATOMS + 2)
@@ -80,17 +83,17 @@ def load_xyz(fpath):
     with open(fpath, mode='r') as inp:
         for i in range(NCONFIGS):
             line = inp.readline()
-            energy = float(inp.readline())
 
+            energy = float(inp.readline())
             coords = np.zeros((NATOMS, 3))
-            z = np.zeros((NATOMS, 1))
+            z      = np.zeros((NATOMS, 1))
 
             for natom in range(NATOMS):
                 words = inp.readline().split()
 
                 coords[natom, :] = list(map(float, words[1:]))
-                charge = SYMBOLS.index(words[0]) + 1
-                z[natom] = charge
+                charge           = SYMBOLS.index(words[0]) + 1
+                z[natom]         = charge
 
             c = XYZConfig(coords=coords, z=z, energy=energy)
             #c.check()
@@ -98,7 +101,34 @@ def load_xyz(fpath):
 
     return NATOMS, NCONFIGS, xyz_configs
 
-def write_xyz(xyz_path, xyz_configs):
+def load_xyz_with_dipole(fpath):
+    nlines = sum(1 for line in open(fpath, mode='r'))
+    NATOMS = int(open(fpath, mode='r').readline())
+    NCONFIGS = nlines // (NATOMS + 2)
+
+    xyz_configs = []
+    with open(fpath, mode='r') as inp:
+        for i in range(NCONFIGS):
+            line = inp.readline()
+
+            dipole = np.fromiter(map(float, inp.readline().split()), dtype=np.float32)
+            coords = np.zeros((NATOMS, 3))
+            z = np.zeros((NATOMS, 1))
+
+            for natom in range(NATOMS):
+                words = inp.readline().split()
+
+                coords[natom, :] = list(map(float, words[1:]))
+                charge           = SYMBOLS.index(words[0]) + 1
+                z[natom]         = charge
+
+            c = XYZConfig(coords=coords, z=z, dipole=dipole)
+            #c.check()
+            xyz_configs.append(c)
+
+    return NATOMS, NCONFIGS, xyz_configs
+
+def write_xyz(xyz_path, xyz_configs, prop={"energy", "dipole"}):
     natoms = xyz_configs[0].coords.shape[0]
 
     with open(xyz_path, mode='w') as fd:
@@ -132,43 +162,34 @@ def load_npz(fpath, load_forces=False):
 
     energy_min = min(fd['E'])[0]
     energy_max = max(fd['E'])[0]
-    logging.info("ENERGY_MIN: {}".format(energy_min))
-    logging.info("ENERGY_MAX: {}".format(energy_max))
+    logging.info("    Energy range: {} - {} cm-1".format(energy_min, energy_max))
 
-    # ETHANOL CCSD(T)
-    #energy_min = -97095.38950894916
-    # ETHANOL DFT (full)
-    energy_min = -97208.40600498248
-
-   # TODO:
-   # THIS DATASET HAS DISTANCES IN ANGSTROM AND ENERGY IN KCAL/MOL
-   # MAYBE HAVE THIS INFO IN .NPZ FILE, PARSE AND TRANSFORM ACCORDINGLY?
     xyz_configs = []
 
     if load_forces:
         for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
-            coords_bohr    = coords / BOHRTOANG
-            energy_cm      = (energy[0] - energy_min) * KCALTOCM
-            forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
+            #coords_bohr    = coords / BOHRTOANG
+            #energy_cm      = (energy[0] - energy_min) * KCALTOCM
+            #forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
 
             xyz_configs.append(
                 XYZConfig(
-                    coords=coords_bohr,
+                    coords=coords,
                     z=z,
-                    energy=energy_cm,
-                    forces=forces_cm_bohr
+                    energy=energy,
+                    forces=forces
                 )
             )
     else:
         for coords, energy in zip(fd['R'], fd['E']):
-            coords_bohr    = coords / BOHRTOANG
-            energy_cm      = (energy[0] - energy_min) * KCALTOCM
+            #coords_bohr    = coords / BOHRTOANG
+            #energy_cm      = (energy[0] - energy_min) * KCALTOCM
 
             xyz_configs.append(
                 XYZConfig(
-                    coords=coords_bohr,
+                    coords=coords,
                     z=z,
-                    energy=energy_cm,
+                    energy=energy,
                     forces=None
                 )
             )
@@ -178,7 +199,7 @@ def load_npz(fpath, load_forces=False):
 def write_npz(npz_path, xyz_configs):
     from random import shuffle
     shuffle(xyz_configs)
-    xyz_configs = xyz_configs[:50000]
+    xyz_configs = xyz_configs[:10000]
 
     natoms   = xyz_configs[0].coords.shape[0]
     nconfigs = len(xyz_configs)
@@ -192,23 +213,37 @@ def write_npz(npz_path, xyz_configs):
 
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, file_path, order=None, symmetry=None, use_forces=False, intramz=False, purify=False):
+    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, intramz=False, purify=False):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
-        self.order      = order
-        self.symmetry   = symmetry
-        self.use_forces = use_forces
-        self.intramz    = intramz
-        self.purify     = purify
+        self.typ         = typ
+        self.order       = order
+        self.symmetry    = symmetry
+        self.load_forces = load_forces
+        self.intramz     = intramz
+        self.purify      = purify
 
         logging.info("Loading configurations from file_path: {}".format(file_path))
         if file_path.endswith(".xyz"):
-            NATOMS, NCONFIGS, xyz_configs = load_xyz(file_path)
+            if load_forces:
+                logging.error("STORING/LOADING FORCES IN XYZ FILE IS NOT SUPPORTED FOR NOW")
+                assert False
+            if self.typ == 'ENERGY':
+                NATOMS, NCONFIGS, self.xyz_configs = load_xyz_with_energy(file_path)
+            elif self.typ == 'DIPOLE':
+                NATOMS, NCONFIGS, self.xyz_configs = load_xyz_with_dipole(file_path)
+            else:
+                assert False
+
             #write_npz("ch4-n2-rigid.npz", xyz_configs)
         elif file_path.endswith(".npz"):
-            NATOMS, NCONFIGS, xyz_configs = load_npz(file_path, use_forces)
-            #write_npz("ethanol_dft-50000.npz", xyz_configs)
+            if self.typ == 'ENERGY':
+                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_forces)
+            else:
+                assert False
+
+            #write_npz("ethanol_dft-10000.npz", self.xyz_configs)
         else:
             raise ValueError("Unrecognized file format.")
 
@@ -228,36 +263,52 @@ class PolyDataset(Dataset):
 
         #  X: values of polynomials
         # dX: derivatives of polynomials w.r.t. cartesian coordinates
-        #  y: values of energies
-        # dy: derivatives of energies w.r.t. cartesian coordinates [a.k.a forces]
-        if self.use_forces:
-            self.X, self.dX, self.y, self.dy = self.prepare_dataset_with_derivatives_from_configs(xyz_configs)
+        #  y: values of energies | dipoles
+        # dy: (minus) derivatives of energies w.r.t. cartesian coordinates [a.k.a forces]
+
+        if self.load_forces:
+            self.X, self.dX, self.y, self.dy = self.prepare_dataset_with_derivatives_from_configs()
         else:
-            self.X, self.y   = self.prepare_dataset_from_configs(xyz_configs)
+            if self.typ == 'ENERGY':
+                self.X, self.y = self.prepare_dataset_with_energies_from_configs()
+            elif self.typ == 'DIPOLE':
+                self.X, self.y = self.prepare_dataset_with_dipoles_from_configs()
+            else:
+                assert False
+
             self.dX, self.dy = None, None
 
         # TODO: create mask explicitly when `purify` and `intramz` options are selected
         if self.purify:
+            assert False
             self.NPOLY = self.purify_mask.sum()
             X = X[:, self.purify_mask.astype(np.bool)]
-            assert False
 
         if self.intramz:
-            assert False
+            self.mask = self.X.abs().sum(dim=0).bool().numpy().astype(int)
+            logging.info("Applying non-zero mask. Selecting {} polynomials out of {} initially...".format(
+                self.mask.sum(), len(self.mask)
+            ))
 
-        #if POLYNOMIAL_LIB == "MSA":
-        #    self.mask = X.abs().sum(dim=0).bool().numpy().astype(int)
-        #    logging.info("Applying non-zero mask. Selecting {} polynomials out of {} initially...".format(
-        #        self.mask.sum(), len(self.mask)
-        #    ))
+            nonzero_index = self.mask.nonzero()[0].tolist()
+            #logging.info("indices of non-zero polynomials: {}".format(nonzero_index))
+            #logging.info(json.dumps(nonzero_index))
 
-        #    #nonzero_index = self.mask.nonzero()[0].tolist()
-        #    #logging.info("indices of non-zero polynomials: {}".format(nonzero_index))
-        #    #logging.info(json.dumps(nonzero_index))
+            stub = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+            basis_file = os.path.join(self.wdir, 'MOL' + stub + '.BAS')
 
-        #    self.NPOLY = self.mask.sum()
-        #    X = X[:, self.mask.astype(np.bool)]
-        #    logging.info("Final size of the X-array: {}".format(X.size()))
+            from genproc import load_polynomials_from_bas, save_polynomials_to_bas
+            poly = load_polynomials_from_bas(basis_file)
+
+            poly_masked = [poly[k] for k in nonzero_index]
+            basis_file_masked = os.path.join(self.wdir, 'MOL' + stub + '_intramz.BAS')
+            save_polynomials_to_bas(basis_file_masked, poly_masked)
+            logging.info("Saving .BAS file for the basis set to: {}".format(basis_file_masked))
+
+            self.NPOLY = self.mask.sum()
+            self.X = self.X[:, self.mask.astype(np.bool)]
+            logging.info("Final size of the X-array: {}".format(self.X.size()))
+
 
     def prepare_poly_lib(self):
         logging.info("Preparing dynamic library to compute invariant polynomials: ")
@@ -277,7 +328,7 @@ class PolyDataset(Dataset):
 
             assert os.path.isfile(self.F_LIBNAME), "No F_BASIS_LIBRARY={} found".format(self.F_LIBNAME)
 
-            if self.use_forces:
+            if self.load_forces:
                 self.F_DER_LIBNAME = os.path.join(self.wdir, 'f_gradbasis' + stub + '.so')
                 if not os.path.isfile(self.F_DER_LIBNAME):
                     from genpip import compile_derivatives_dlib
@@ -287,21 +338,36 @@ class PolyDataset(Dataset):
 
             self.setup_fortran_procs()
 
-        elif POLYNOMIAL_LIB == "MSA":
+        elif POLYNOMIAL_LIB == "CUSTOM":
             stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             self.C_LIBNAME = os.path.join(self.wdir, 'c_basis' + stub + '.so')
+            if not os.path.isfile(self.C_LIBNAME):
+                from genpip import compile_basis_dlib
+                compile_basis_dlib(self.order, self.symmetry, self.wdir)
+
             assert os.path.isfile(self.C_LIBNAME), "No C_LIBRARY={} found".format(self.C_LIBNAME)
+
+            if self.load_forces:
+                self.C_DER_LIBNAME = os.path.join(self.wdir, 'c_jac' + stub + '.so')
+                if not os.path.isfile(self.C_DER_LIBNAME):
+                    from genpip import compile_derivatives_dlib
+                    compile_derivatives_dlib(self.order, self.symmetry, self.wdir)
+
+                assert os.path.isfile(self.C_DER_LIBNAME), "No C_DERIVATIVES_LIBRARY={} found".format(self.C_DER_LIBNAME)
+
             self.setup_c_procs()
 
-            C_LIBNAME_CODE = os.path.join(self.wdir, 'c_basis' + stub + '.cc')
-            with open(C_LIBNAME_CODE, mode='r') as fp:
+            C_LIB = os.path.join(self.wdir, 'c_basis' + stub + '.cc')
+            assert os.path.isfile(C_LIB)
+            with open(C_LIB, mode='r') as fp:
                 lines = "".join(fp.readlines())
 
-            pattern    = "double p\[(\d+)\]"
+            pattern    = "p\[(\d+)\]"
             found      = re.findall(pattern, lines)
-            self.NPOLY = int(found[0])
-            self.NMON  = None
+            assert found
 
+            self.NPOLY = max(list(map(int, found))) + 1
+            self.NMON  = None
         else:
             raise ValueError("unreachable")
 
@@ -360,24 +426,23 @@ class PolyDataset(Dataset):
         #logging.info(json.dumps(purify_index))
 
 
-    def prepare_dataset_with_derivatives_from_configs(self, xyz_configs):
+    def prepare_dataset_with_derivatives_from_configs(self):
         logging.info("Preparing interatomic distances and their derivatives.")
-        yij  = self.make_yij(xyz_configs, intramz=self.intramz, intermz=False)
-        drdx = self.make_drdx(xyz_configs, intramz=self.intramz, intermz=False)
+        yij  = self.make_yij(self.xyz_configs, intramz=self.intramz, intermz=False)
+        drdx = self.make_drdx(self.xyz_configs, intramz=self.intramz, intermz=False)
         logging.info("Done.")
 
-
-        NCONFIGS = len(xyz_configs)
+        NCONFIGS = len(self.xyz_configs)
         poly             = np.zeros((NCONFIGS, self.NPOLY))
         poly_derivatives = np.zeros((NCONFIGS, self.NPOLY, 3 * self.NATOMS))
 
-        # omit second number for the arrays to be considered one-dimensional
-        m  = np.zeros((self.NMON, ))
-        dm = np.zeros((self.NMON, ), order="F")
-        p  = np.zeros((self.NPOLY, ))
-        dp = np.zeros((self.NPOLY, ))
-
         if POLYNOMIAL_LIB == "MSA":
+            # omit second number for the arrays to be considered one-dimensional
+            p  = np.zeros((self.NPOLY, ))
+            dp = np.zeros((self.NPOLY, ))
+            m  = np.zeros((self.NMON, ), order="F")
+            dm = np.zeros((self.NMON, ), order="F")
+
             for n in range(0, NCONFIGS):
                 yij_c  = yij[n, :].copy()
                 drdx_c = np.asfortranarray(drdx[n, :, :].copy())
@@ -394,16 +459,32 @@ class PolyDataset(Dataset):
                     poly_derivatives[n, :, nd] = dp
 
         elif POLYNOMIAL_LIB == "CUSTOM":
-            assert False
+            dpdy    = np.zeros((self.NDIS, self.NPOLY))
+            dpdy_pp = (dpdy.__array_interface__['data'][0] + np.arange(dpdy.shape[0]) * dpdy.strides[0]).astype(np.uintp)
+
+            p = np.zeros((self.NPOLY, ))
+
+            for n in range(0, NCONFIGS):
+                _yij  = yij[n, :].copy()
+                _dydr = -1.0 / a0 * np.diag(_yij)
+                _drdx = drdx[n, :, :].copy()
+
+                self.evpoly(_yij, p)
+                self.c_jac_dpdy(dpdy_pp, _yij)
+
+                dpdx = _drdx @ _dydr @ dpdy
+
+                poly[n, :]          = p.copy()
+                poly_derivatives[n] = dpdx.T
         else:
             assert False
 
         energies = np.zeros((NCONFIGS, 1))
-        for ind, xyz_config in enumerate(xyz_configs):
+        for ind, xyz_config in enumerate(self.xyz_configs):
             energies[ind] = xyz_config.energy
 
         forces = np.zeros((NCONFIGS, self.NATOMS, 3))
-        for ind, xyz_config in enumerate(xyz_configs):
+        for ind, xyz_config in enumerate(self.xyz_configs):
             forces[ind, :, :] = xyz_config.forces
 
         X  = torch.from_numpy(poly)
@@ -413,12 +494,38 @@ class PolyDataset(Dataset):
 
         return X, dX, y, dy
 
-    def prepare_dataset_from_configs(self, xyz_configs):
+    def prepare_dataset_with_dipoles_from_configs(self):
         logging.info("preparing interatomic distances..")
-        yij = self.make_yij(xyz_configs, intramz=self.intramz, intermz=False)
+        yij = self.make_yij(self.xyz_configs, intramz=self.intramz, intermz=False)
         logging.info("Done.")
 
-        NCONFIGS = len(xyz_configs)
+        NCONFIGS = len(self.xyz_configs)
+        poly = np.zeros((NCONFIGS, self.NPOLY))
+        x = np.zeros((self.NDIS, 1))
+
+        logging.info("Computing polynomials...")
+        for n in range(0, NCONFIGS):
+            x = yij[n, :].copy()
+            p = self.eval_poly(x)
+            poly[n, :] = p.reshape((self.NPOLY, )).copy()
+
+        logging.info("Done.")
+
+        dipoles = np.zeros((NCONFIGS, 3))
+        for ind, xyz_config in enumerate(self.xyz_configs):
+            dipoles[ind] = xyz_config.dipole
+
+        X = torch.from_numpy(poly)
+        y = torch.from_numpy(dipoles)
+
+        return X, y
+
+    def prepare_dataset_with_energies_from_configs(self):
+        logging.info("preparing interatomic distances..")
+        yij = self.make_yij(self.xyz_configs, intramz=self.intramz, intermz=False)
+        logging.info("Done.")
+
+        NCONFIGS = len(self.xyz_configs)
         poly = np.zeros((NCONFIGS, self.NPOLY))
         x = np.zeros((self.NDIS, 1))
 
@@ -431,12 +538,8 @@ class PolyDataset(Dataset):
         logging.info("Done.")
 
         energies = np.zeros((NCONFIGS, 1))
-        for ind, xyz_config in enumerate(xyz_configs):
+        for ind, xyz_config in enumerate(self.xyz_configs):
             energies[ind] = xyz_config.energy
-
-        # NOTE: LR-model was added here
-        #    if lr_model is not None:
-        #        energies[ind] -= lr_model(ind)
 
         X = torch.from_numpy(poly)
         y = torch.from_numpy(energies)
@@ -549,7 +652,7 @@ class PolyDataset(Dataset):
         self.evmono.argtypes = [ndpointer(ct.c_double, ndim=1, flags="F"), ndpointer(ct.c_double, ndim=1, flags="F")]
         self.evpoly.argtypes = [ndpointer(ct.c_double, ndim=1, flags="F"), ndpointer(ct.c_double, ndim=1, flags="F")]
 
-        if self.use_forces:
+        if self.load_forces:
             logging.info("Loading and setting up Fortran procedures for derivatives evaluation from LIBNAME: {}".format(self.F_DER_LIBNAME))
             derlib = ct.CDLL(self.F_DER_LIBNAME)
 
@@ -565,8 +668,22 @@ class PolyDataset(Dataset):
     def setup_c_procs(self):
         logging.info("Loading and setting up C procedures from LIBNAME: {}".format(self.C_LIBNAME))
         basislib = ct.CDLL(self.C_LIBNAME)
-
-        self.evpoly = basislib.evpoly
+        proc_name = 'evpoly_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+        self.evpoly = getattr(basislib, proc_name)
 
         from numpy.ctypeslib import ndpointer
-        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="C_CONTIGUOUS"), ndpointer(ct.c_double, flags="C_CONTIGUOUS")]
+        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="C"), ndpointer(ct.c_double, flags="C")]
+
+        if self.load_forces:
+            logging.info("Loading and setting up C procedures for derivatives evaluation from LIBNAME: {}".format(self.C_DER_LIBNAME))
+            derlib = ct.CDLL(self.C_DER_LIBNAME)
+            proc_name = 'evpoly_jac_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+            self.c_jac_dpdy = getattr(derlib, proc_name)
+
+            # double** should be passed as an array of type np.uintp
+            # see https://stackoverflow.com/questions/22425921/pass-a-2d-numpy-array-to-c-using-ctypes
+            pp = ndpointer(dtype=np.uintp, ndim=1, flags="C") # double**
+            self.c_jac_dpdy.argtypes = [pp, ndpointer(ct.c_double, ndim=1, flags="C")]
+            self.c_jac_dpdy.restype  = None
+
+

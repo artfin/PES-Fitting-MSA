@@ -13,7 +13,7 @@ class Builder:
         except Exception as e:
             raise e.__class__(str(e), name, args, kwargs) from e
 
-def build_network_yaml(architecture, input_features, builder=Builder(torch.nn.__dict__)):
+def build_network_yaml(architecture, input_features, output_features, builder=Builder(torch.nn.__dict__)):
     layers = []
 
     hidden_dims = architecture['HIDDEN_DIMS']
@@ -36,7 +36,7 @@ def build_network_yaml(architecture, input_features, builder=Builder(torch.nn.__
         layers.append(builder(activation))
         in_features = out_features
 
-    layers.append(torch.nn.Linear(out_features, 1, bias=bias))
+    layers.append(torch.nn.Linear(out_features, output_features, bias=bias))
 
     model = torch.nn.Sequential(*layers)
     model.double()

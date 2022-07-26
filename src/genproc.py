@@ -22,6 +22,13 @@ class Polynomial:
     nmon:      int
     monomials: list
 
+def save_polynomials_to_bas(fname, poly):
+    with open(fname, mode='w') as out:
+        for p in poly:
+            for id_mono, m in enumerate(p.monomials):
+                degrees_str = " ".join([str(d) for d in m.degrees])
+                out.write(f"{p.id} {p.degree} {p.nmon} {id_mono} : {degrees_str}\n")
+
 def load_polynomials_from_bas(fname):
     assert fname.endswith('.BAS')
 
@@ -316,7 +323,7 @@ def generate_jac_proc_dpdx_partial_cse(poly):
     decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
     return decl + c_code + "\n}\n"
 
-def generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True):
+def generate_jac_proc_dpdr(poly, jac_func_name, use_eigen_interface, skip_zeros=True):
     """
     Produces code for elements of jacobian matrix with dimensions [ndist, npoly]
 
@@ -324,9 +331,12 @@ def generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True):
     """
     nvars = len(poly[0].monomials[0].degrees)
 
-    jac_name = "jac"
-    code = "void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* x) {{\n".format(jac_func_name)
+    if use_eigen_interface:
+        decl = "extern \"C\" void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* y) {{\n".format(jac_func_name)
+    else:
+        decl = "extern \"C\" void {}(double** jac, double* y) {{\n".format(jac_func_name)
 
+    body = ""
     for indp, p in enumerate(poly):
         for nvar in range(nvars):
             pd = diff_poly(p, nvar)
@@ -338,20 +348,30 @@ def generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True):
             # remove annoying multiplications by 1
             rhs = rhs.replace("1*", "")
 
-            lhs = f"    {jac_name}({nvar}, {indp}) = "
-            code += lhs + rhs + ";\n"
+            if use_eigen_interface:
+                lhs = f"    jac({nvar}, {indp}) = "
+            else:
+                lhs = f"    jac[{nvar}][{indp}] = "
 
-    return code + "}"
+            body += lhs + rhs + ";\n"
 
-def generate_poly_proc(poly, poly_func_name):
-    decl = "void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p) {{\n".format(poly_func_name)
+    return decl + body + "}"
+
+def generate_poly_proc(poly, poly_func_name, use_eigen_interface):
+    if use_eigen_interface:
+        decl = "extern \"C\" void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p) {{\n".format(poly_func_name)
+    else:
+        decl = "extern \"C\" void {}(double* y, double* p) {{\n".format(poly_func_name)
+
     body = ""
-
     for ind, p in enumerate(poly):
         rhs = generate_poly_expr(p)
         rhs = rhs.replace("1*", "")
 
-        body = body + "    p({}) = {};\n".format(ind, rhs)
+        if use_eigen_interface:
+            body = body + "    p({}) = {};\n".format(ind, rhs)
+        else:
+            body = body + "    p[{}] = {};\n".format(ind, rhs)
 
     return decl + body + "}\n"
 
@@ -367,9 +387,10 @@ def str2bool(v):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--basis_file", required=True, type=str, help="path to file with basis specification [.BAS]")
-    parser.add_argument("--generate_poly", required=False, type=str2bool, help="whether to generate the C code for procedure to calculate polynomials")
-    parser.add_argument("--generate_jac", required=False, type=str2bool, help="whether to generate the C code for procedure to calculate jacobian of polynomials")
+    parser.add_argument("--basis_file",          required=True,  type=str, help="path to file with basis specification [.BAS]")
+    parser.add_argument("--use_eigen_interface", required=False, default=False, type=str2bool, help="whether to generate the C code for calculating polynomials using Eigen")
+    parser.add_argument("--generate_poly",       required=False, default=False, type=str2bool, help="whether to generate the C code for procedure to calculate polynomials")
+    parser.add_argument("--generate_jac",        required=False, default=False, type=str2bool, help="whether to generate the C code for procedure to calculate jacobian of polynomials")
     args = parser.parse_args()
 
     assert os.path.isfile(args.basis_file)
@@ -381,7 +402,7 @@ if __name__ == "__main__":
         poly_func_name = "evpoly_{}".format(stub)
 
         print("Generating code for evaluating polynomials...")
-        proc_code = generate_poly_proc(poly, poly_func_name)
+        proc_code = generate_poly_proc(poly, poly_func_name, use_eigen_interface=args.use_eigen_interface)
         print("Finished.")
 
         poly_cc_fname = "c_basis_" + stub + ".cc"
@@ -401,7 +422,13 @@ if __name__ == "__main__":
             out.write("#ifndef {}\n".format(include_guard))
             out.write("#define {}\n".format(include_guard))
             out.write("\n")
-            out.write("void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p);\n".format(poly_func_name))
+
+            if args.use_eigen_interface:
+                out.write("#include <Eigen/Dense>\n")
+                out.write("extern \"C\" void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p);\n".format(poly_func_name))
+            else:
+                out.write("extern \"C\" void {}(double* y, double* p);\n".format(poly_func_name))
+
             out.write("\n")
             out.write("#endif")
 
@@ -409,7 +436,7 @@ if __name__ == "__main__":
         jac_func_name = "evpoly_jac_{}".format(stub)
 
         print("Generating jacobian code...")
-        jac_code = generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True)
+        jac_code = generate_jac_proc_dpdr(poly, jac_func_name, args.use_eigen_interface, skip_zeros=True)
         print("Finished.")
 
         jac_cc_fname = "c_jac_" + stub + ".cc"
@@ -428,7 +455,12 @@ if __name__ == "__main__":
             out.write("#ifndef {}\n".format(include_guard))
             out.write("#define {}\n".format(include_guard))
             out.write("\n")
-            out.write("#include <Eigen/Dense>\n")
-            out.write("void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* x);\n".format(jac_func_name))
+
+            if args.use_eigen_interface:
+                out.write("#include <Eigen/Dense>\n")
+                out.write("extern \"C\" void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* y);\n".format(jac_func_name))
+            else:
+                out.write("extern \"C\" void {}(double** jac, double* y);\n".format(jac_func_name))
+
             out.write("\n")
             out.write("#endif")

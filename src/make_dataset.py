@@ -70,49 +70,52 @@ def save_json(d, fpath):
     with open(fpath, mode='w') as fp:
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
-def make_dataset_fpaths(typ, order, symmetry, use_forces, energy_limit, intramz, purify, interim_folder):
-    assert typ in ('energy', 'dipole')
-    assert order in (1, 2, 3, 4, 5)
-    assert use_forces in (True, False)
+def make_dataset_fpaths(cfg_dataset):
+    # keywords to be considered to make a hash
+    keywords = ('SOURCE', 'LOAD_FORCES', 'ENERGY_LIMIT', 'NORMALIZE', 'ANCHOR_POSITIONS', 'ORDER', 'SYMMETRY', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY')
+    d = {kw : cfg_dataset[kw] for kw in keywords}
 
-    if energy_limit is not None:
-        enlim_str = "-enlim={:.0f}".format(energy_limit)
-    else:
-        enlim_str = ""
+    from hashlib import sha1
+    _hash = sha1(repr(sorted(d.items())).encode('utf-8')).hexdigest() # sorting dictionary makes the hash consistent across runs (since dictionary is unordered collection)
 
-    if intramz:
-        intramz_str = "-intramz=true"
-    else:
-        intramz_str = ""
-
-    if purify:
-        purify_str = "-purify=true"
-    else:
-        purify_str = ""
-
-    if use_forces:
-        forces_str = "-forces=true"
-    else:
-        forces_str = ""
-
-    symmetry_str = symmetry.replace(' ', '_')
-    train_fpath = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-train{enlim_str}{intramz_str}{purify_str}.pk")
-    val_fpath   = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-val{enlim_str}{intramz_str}{purify_str}.pk")
-    test_fpath  = os.path.join(interim_folder, f"{typ}-poly_{symmetry_str}_{order}{forces_str}-test{enlim_str}{intramz_str}{purify_str}.pk")
+    train_fpath = os.path.join(cfg_dataset['INTERIM_FOLDER'], f"{cfg_dataset['NAME']}-train-{_hash}.pk")
+    val_fpath   = os.path.join(cfg_dataset['INTERIM_FOLDER'], f"{cfg_dataset['NAME']}-val-{_hash}.pk")
+    test_fpath  = os.path.join(cfg_dataset['INTERIM_FOLDER'], f"{cfg_dataset['NAME']}-test-{_hash}.pk")
 
     return train_fpath, val_fpath, test_fpath
 
-def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, use_forces, intramz, purify, energy_limit):
+def rot_z(ang):
+    """
+    rotation matrix around OZ
+    """
+    return np.array([
+        [np.cos(ang), -np.sin(ang), 0.0],
+        [np.sin(ang),  np.cos(ang), 0.0],
+        [        0.0,          0.0, 1.0],
+    ])
+
+def rot_y(ang):
+    """
+    rotation matrix around OY
+    """
+    return np.array([
+        [ np.cos(ang), 0.0, np.sin(ang)],
+        [         0.0, 1.0,         0.0],
+        [-np.sin(ang), 0.0, np.cos(ang)],
+    ])
+
+def make_dataset(cfg_dataset, dataset_fpaths):
     # default split function [dataset] -> [train, val, test] 
     data_split = sklearn.model_selection.train_test_split
 
-    if use_forces:
-        if len(source) > 1:
+    if cfg_dataset['LOAD_FORCES']:
+        if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Stratification is not implemented for `use_forces=True`")
             assert False
 
-        dataset = PolyDataset(wdir=external_folder, file_path=source[0], order=order, use_forces=use_forces,
-                              symmetry=symmetry, intramz=intramz, purify=purify)
+        dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=cfg_dataset['SOURCE'][0],
+                              order=cfg_dataset['ORDER'], load_forces=True, symmetry=cfg_dataset['SYMMETRY'],
+                              intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
 
         NCONFIGS = dataset.X.size()[0]
         indices = list(range(NCONFIGS))
@@ -148,9 +151,28 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
         labels = []
         label = 0
 
-        for file_path in source:
-            dataset = PolyDataset(wdir=external_folder, file_path=file_path, order=order, use_forces=use_forces,
-                                  symmetry=symmetry, intramz=intramz, purify=purify)
+        for file_path in cfg_dataset['SOURCE']:
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], load_forces=cfg_dataset['LOAD_FORCES'],
+                                  symmetry=cfg_dataset['SYMMETRY'], intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
+
+            if cfg_dataset['TYPE'] == 'DIPOLE':
+                anchor_pos = tuple(map(int, cfg_dataset['ANCHOR_POSITIONS'].split()))
+                assert anchor_pos[0] in range(dataset.NATOMS)
+                assert anchor_pos[1] in range(dataset.NATOMS)
+
+                for xyz_config in dataset.xyz_configs:
+                    anchor = xyz_config.coords[anchor_pos[0]] - xyz_config.coords[anchor_pos[1]]
+
+                    x, y, z = anchor[0], anchor[1], anchor[2]
+                    alpha = np.arctan2(-y, x)
+                    beta  = np.arctan2(-np.sqrt(x**2 + y**2), z)
+
+                    S = rot_y(beta) @ rot_z(alpha)
+                    xyz_config.coords = xyz_config.coords @ S.T
+                    xyz_config.dipole = S @ xyz_config.dipole
+
+                    rot_anchor = S @ anchor
+                    assert np.isclose(rot_anchor / np.linalg.norm(rot_anchor), np.array([0.0, 0.0, 1.0])).all()
 
             if GLOBAL_SET:
                 assert GLOBAL_NATOMS == dataset.NATOMS
@@ -175,7 +197,7 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
         X = torch.cat(tuple(Xs))
         y = torch.cat(tuple(ys))
 
-        if len(source) > 1:
+        if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Performing stratified splitting.")
 
         # We need to put the labels into X array because we divide it 2 times:
@@ -207,7 +229,7 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
         dX_train, dX_val, dX_test = None, None, None
         dy_train, dy_val, dy_test = None, None, None
 
-    if energy_limit is not None:
+    if cfg_dataset['ENERGY_LIMIT'] is not None:
         # TODO:
         # Don't know if this whole idea is worth using in the future
         # Need to look more into this
@@ -235,15 +257,16 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
     val_fpath   = dataset_fpaths["val"]
     test_fpath  = dataset_fpaths["test"]
 
+
     dict_pk = dict(
         NATOMS=dataset.NATOMS,
         NMON=dataset.NMON,
         NPOLY=dataset.NPOLY,
-        symmetry=symmetry,
-        order=order,
-        energy_limit=energy_limit,
-        intramz=intramz,
-        purify=purify,
+        symmetry=cfg_dataset['SYMMETRY'],
+        order=cfg_dataset['ORDER'],
+        energy_limit=cfg_dataset['ENERGY_LIMIT'],
+        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        purify=cfg_dataset['PURIFY'],
         X=X_train,
         y=y_train,
         dX=dX_train,
@@ -257,11 +280,11 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
         NATOMS=dataset.NATOMS,
         NMON=dataset.NMON,
         NPOLY=dataset.NPOLY,
-        symmetry=symmetry,
-        order=order,
-        energy_limit=energy_limit,
-        intramz=intramz,
-        purify=purify,
+        symmetry=cfg_dataset['SYMMETRY'],
+        order=cfg_dataset['ORDER'],
+        energy_limit=cfg_dataset['ENERGY_LIMIT'],
+        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        purify=cfg_dataset['PURIFY'],
         X=X_val,
         y=y_val,
         dX=dX_val,
@@ -274,11 +297,11 @@ def make_dataset(source, typ, order, symmetry, dataset_fpaths, external_folder, 
         NATOMS=dataset.NATOMS,
         NMON=dataset.NMON,
         NPOLY=dataset.NPOLY,
-        symmetry=symmetry,
-        order=order,
-        energy_limit=energy_limit,
-        intramz=intramz,
-        purify=purify,
+        symmetry=cfg_dataset['SYMMETRY'],
+        order=cfg_dataset['ORDER'],
+        energy_limit=cfg_dataset['ENERGY_LIMIT'],
+        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        purify=cfg_dataset['PURIFY'],
         X=X_test,
         y=y_test,
         dX=dX_test,
