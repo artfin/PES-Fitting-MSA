@@ -39,6 +39,9 @@ def build_lib():
         logging.error("during the cmd = {}".format(st.stdout))
         sys.exit(1)
 
+def _stub(symmetry, order):
+    return '{}_{}'.format(symmetry.replace(' ', '_'), order)
+
 def run_msa(order, symmetry, wdir):
     exe = os.path.join(BASEDIR, "c_src", "msa")
     cmd = '{} {} {}'.format(exe, order, symmetry)
@@ -52,7 +55,7 @@ def run_msa(order, symmetry, wdir):
         logging.error("MSA return code = {}".format(st.returncode))
         sys.exit(1)
 
-    fname = 'MOL_{}_{}'.format(symmetry.replace(' ', '_'), order)
+    fname = "MOL_" + _stub(symmetry, order)
 
     st = cl('mv -v {}.BAS  {}'.format(fname, wdir)); logging.info(st.stdout)
     st = cl('mv -v {}.FOC  {}'.format(fname, wdir)); logging.info(st.stdout)
@@ -117,4 +120,3 @@ if __name__   == "__main__":
     generate_fortran(order, symmetry, wdir)
     compile_basis_dlib(order, symmetry, wdir)
     compile_derivatives_dlib(order, symmetry, wdir)
-    logging.info("Finished.")

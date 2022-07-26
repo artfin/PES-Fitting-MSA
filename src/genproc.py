@@ -22,7 +22,9 @@ class Polynomial:
     nmon:      int
     monomials: list
 
-def load_polynomials(fname):
+def load_polynomials_from_bas(fname):
+    assert fname.endswith('.BAS')
+
     with open(fname, mode='r') as fp:
         lines = fp.readlines()
 
@@ -314,7 +316,7 @@ def generate_jac_proc_dpdx_partial_cse(poly):
     decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
     return decl + c_code + "\n}\n"
 
-def generate_jac_proc_dpdr(poly, jac_name="jac", skip_zeros=True):
+def generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True):
     """
     Produces code for elements of jacobian matrix with dimensions [ndist, npoly]
 
@@ -322,7 +324,8 @@ def generate_jac_proc_dpdr(poly, jac_name="jac", skip_zeros=True):
     """
     nvars = len(poly[0].monomials[0].degrees)
 
-    code = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> jac, double* x) {\n"
+    jac_name = "jac"
+    code = "void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* x) {{\n".format(jac_func_name)
 
     for indp, p in enumerate(poly):
         for nvar in range(nvars):
@@ -331,6 +334,9 @@ def generate_jac_proc_dpdr(poly, jac_name="jac", skip_zeros=True):
             rhs = generate_poly_expr(pd)
             if rhs == "0.0":
                 continue
+
+            # remove annoying multiplications by 1
+            rhs = rhs.replace("1*", "")
 
             lhs = f"    {jac_name}({nvar}, {indp}) = "
             code += lhs + rhs + ";\n"
@@ -367,12 +373,38 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     assert os.path.isfile(args.basis_file)
-    poly = load_polynomials(args.basis_file)
+    poly = load_polynomials_from_bas(args.basis_file)
+
+    stub = args.basis_file.split("MOL_")[1].split(".BAS")[0]
 
     if args.generate_poly:
         proc = generate_poly_proc(poly)
         print(proc)
 
     if args.generate_jac:
-        proc = generate_jac_proc_dpdx_partial_cse(poly)
-        print(proc)
+        jac_func_name = "evpoly_jac_{}".format(stub)
+
+        print("Generating jacobian code...")
+        jac_code = generate_jac_proc_dpdr(poly, jac_func_name, skip_zeros=True)
+        print("Finished.")
+
+        jac_cc_fname = "c_jac_" + stub + ".cc"
+        jac_h_fname  = "c_jac_" + stub + ".h"
+
+        print("Writing generated code to CC={}".format(jac_cc_fname))
+        print("Writing corresponding header file H={}".format(jac_h_fname))
+
+        with open(jac_cc_fname, mode='w') as out:
+            out.write("#include \"{}\"\n\n".format(jac_h_fname))
+            out.write(jac_code)
+
+        include_guard = "c_jac_" + stub + "_h"
+        include_guard = include_guard.upper()
+        with open(jac_h_fname, mode='w') as out:
+            out.write("#ifndef {}\n".format(include_guard))
+            out.write("#define {}\n".format(include_guard))
+            out.write("\n")
+            out.write("#include <Eigen/Dense>\n")
+            out.write("void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* x);\n".format(jac_func_name))
+            out.write("\n")
+            out.write("#endif")
