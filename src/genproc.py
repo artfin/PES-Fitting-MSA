@@ -2,6 +2,13 @@ import argparse
 import dataclasses
 import json
 import os
+import re
+
+import itertools
+import sympy as sp
+from sympy.codegen.ast import Assignment
+
+from tqdm import tqdm
 
 @dataclasses.dataclass
 class Monomial:
@@ -79,7 +86,7 @@ def diff_mono(m, nvar):
     result = Monomial(coeffs=m.coeffs.copy(), degrees=m.degrees.copy())
 
     result.degrees[nvar] = degree - 1
-    result.coeffs[nvar] = float(coeff * degree)
+    result.coeffs[nvar] = int(coeff * degree)
 
     return simplify_mono(result)
 
@@ -99,13 +106,13 @@ def generate_mono_expr(m):
         degree = m.degrees[j]
 
         if coeff > 0 and len(expr) == 0:
-            expr += str(float(coeff))
+            expr += str(int(coeff))
             if degree > 0:
-                expr += "*" + "*".join([f"x[{j}]"] * degree)
+                expr += "*" + "*".join([f"y[{j}]"] * degree)
         elif coeff > 0 and len(expr) > 0:
-            expr += "*" + str(float(coeff))
+            expr += "*" + str(int(coeff))
             if degree > 0:
-                expr += "*" + "*".join([f"x[{j}]"] * degree)
+                expr += "*" + "*".join([f"y[{j}]"] * degree)
 
     return expr
 
@@ -123,9 +130,193 @@ def generate_poly_expr(p):
 
     return expr
 
-def generate_jac_proc(poly, jac_name="jac", skip_zeros=True):
+def make_drdx(natoms):
+    ndist = natoms * (natoms - 1) // 2
+    drdx = sp.zeros(3 * natoms, ndist)
+
+    ts = sp.zeros(3*natoms, 3*natoms)
+    for i, j in itertools.product(range(3*natoms), range(3*natoms)):
+        ts[i, j] = sp.Symbol("t[{},{}]".format(i, j))
+
+    k = 0
+    for i, j in itertools.combinations(range(natoms), 2):
+        drdx[3*i,     k] = sp.Symbol("dydx[{}, {}]".format(3*i, k))     #ts[3*i,     3*j    ]
+        drdx[3*i + 1, k] = sp.Symbol("dydx[{}, {}]".format(3*i + 1, k)) # ts[3*i + 1, 3*j + 1]
+        drdx[3*i + 2, k] = sp.Symbol("dydx[{}, {}]".format(3*i + 2, k)) # ts[3*i + 2, 3*j + 2]
+
+        drdx[3*j,     k] = -sp.Symbol("dydx[{}, {}]".format(3*i, k)) # ts[3*i    , 3*j    ]
+        drdx[3*j + 1, k] = -sp.Symbol("dydx[{}, {}]".format(3*i+1, k)) #ts[3*i + 1, 3*j + 1]
+        drdx[3*j + 2, k] = -sp.Symbol("dydx[{}, {}]".format(3*i+2, k)) #ts[3*i + 2, 3*j + 2]
+
+        k += 1
+
+
+    return drdx
+
+def generate_jac_proc_dpdx_full_cse(poly):
+    ndist = len(poly[0].monomials[0].degrees)
+    npoly = len(poly)
+
+    natoms = 9
+    drdx = make_drdx(natoms)
+    dpdr = sp.zeros(ndist, npoly)
+
+    # See issue: https://github.com/sympy/sympy/issues/15348 
+    # set up variables to replace IndexedBase->MatrixSymbol
+    # for code generation to work properly
+    y        = sp.IndexedBase('y')
+    y_matrix = sp.MatrixSymbol('y_m', ndist, 1)
+    subs_vars = {y[k] : y_matrix[k] for k in range(ndist)}
+
+    # Infinite generator yielding unique sympy.Symbols
+    # to be used for labeling common subexpressions
+    def symbols():
+        n = 0
+        while True:
+            yield sp.Symbol(f"cse[{n}]")
+            n = n + 1
+
+    print("Creating symbolic Jacobian matrix of d(polynomials)/d(morse-variables")
+
+    for indp, p in enumerate(tqdm(poly)):
+        for nvar in range(ndist):
+            poly_der = diff_poly(p, nvar)
+            poly_der_expr = generate_poly_expr(poly_der)
+
+            expr = sp.sympify(poly_der_expr, locals={'y': y})
+            dpdr[nvar, indp] = expr
+
+    dpdx = drdx * dpdr
+    #dpdx_sym = sp.MatrixSymbol(f"dpdx[{indp}]", 3*natoms, 1)
+    dpdx_sym = sp.MatrixSymbol(f"dpdx", 3 * natoms, npoly)
+
+    print("drdx: {}".format(drdx.shape))
+    print("dpdr: {}".format(dpdr.shape))
+    print("dpdx: {}".format(dpdx.shape))
+
+    # the following approach works but common subexpressions (CSE) are not eliminated
+    #   > dpdx_sym = sp.MatrixSymbol('dpdx[0]', 3*natoms, 1)
+    #   > print_ccode(dpdx, assign_to=dpdx_sym)
+
+    # Perform common subexpression elimination on the
+    # derivatives of the current polynomial
+    gensym = symbols()
+    replacements, reduced_exprs = sp.cse(dpdx, symbols=gensym)
+
+    cse_code = ""
+    for rep in replacements:
+        eq = Assignment(rep[0], rep[1].subs(subs_vars))
+        line = sp.ccode(eq)
+        line = line.replace("y_m", "y")
+
+        cse_code += line + "\n"
+
+    red_expr_code = sp.ccode(reduced_exprs[0], assign_to=dpdx_sym)
+
+    # Converting 1d indexing -> 2d indexing consistent with Eigen syntax
+    pattern = r"dpdx\[(\d+)\]"
+    red_expr_code = re.sub(pattern, lambda expr: "dpdx({0}, {1})".format(
+        int(expr.groups()[0]) % npoly, int(expr.groups()[0]) // npoly
+    ), red_expr_code)
+
+    # eliminate zero elements of the jacobian
+    red_expr_code = [line for line in red_expr_code.split("\n") if line and line.split('=')[1].strip() != "0;"]
+    red_expr_code = "\n".join(red_expr_code)
+
+    c_code = cse_code + red_expr_code
+
+    # change formatting of temporary variables
+    pattern = r"dydx\[(\d+), (\d+)\]"
+    c_code = re.sub(pattern, lambda expr: "dydx({0}, {1})".format(
+        expr.groups()[0], expr.groups()[1]
+    ), c_code)
+
+    decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
+    return decl + c_code + "\n}\n"
+
+def generate_jac_proc_dpdx_partial_cse(poly):
+    ndist = len(poly[0].monomials[0].degrees)
+    npoly = len(poly)
+
+    natoms = 9
+    drdx = make_drdx(natoms)
+    dpdr = sp.zeros(ndist, 1)
+
+    # See issue: https://github.com/sympy/sympy/issues/15348 
+    # set up variables to replace IndexedBase->MatrixSymbol
+    # for code generation to work properly
+    y        = sp.IndexedBase('y')
+    y_matrix = sp.MatrixSymbol('y_m', ndist, 1)
+    subs_vars = {y[k] : y_matrix[k] for k in range(ndist)}
+
+    # Infinite generator yielding unique sympy.Symbols
+    # to be used for labeling common subexpressions
+    def symbols():
+        n = 0
+        while True:
+            yield sp.Symbol(f"cse[{n}]")
+            n = n + 1
+
+    print("Creating symbolic Jacobian matrix of d(polynomials)/d(morse-variables")
+
+    c_code = ""
+
+    for indp, p in enumerate(tqdm(poly)):
+        for nvar in range(ndist):
+            poly_der = diff_poly(p, nvar)
+            poly_der_expr = generate_poly_expr(poly_der)
+
+            expr = sp.sympify(poly_der_expr, locals={'y': y})
+            dpdr[nvar, 0] = expr
+
+        dpdx = drdx * dpdr
+        dpdx_sym = sp.MatrixSymbol(f"dpdx[{indp}]", 3*natoms, 1)
+
+        # the following approach works but common subexpressions (CSE) are not eliminated
+        #   > dpdx_sym = sp.MatrixSymbol('dpdx[0]', 3*natoms, 1)
+        #   > print_ccode(dpdx, assign_to=dpdx_sym)
+
+        # Perform common subexpression elimination on the
+        # derivatives of the current polynomial
+        gensym = symbols()
+        replacements, reduced_exprs = sp.cse(dpdx, symbols=gensym)
+
+        cse_code = ""
+        for rep in replacements:
+            eq = Assignment(rep[0], rep[1].subs(subs_vars))
+            line = sp.ccode(eq)
+            line = line.replace("y_m", "y")
+
+            cse_code += line + "\n"
+
+        red_expr_code = sp.ccode(reduced_exprs[0], assign_to=dpdx_sym)
+
+        # Converting 1d indexing -> 2d indexing consistent with Eigen syntax
+        pattern = r"dpdx\[(\d+)\]\[(\d+)\]"
+        red_expr_code = re.sub(pattern, lambda expr: "dpdx({0}, {1})".format(
+            int(expr.groups()[0]), int(expr.groups()[1])
+        ), red_expr_code)
+
+        # eliminate zero elements of the jacobian
+        red_expr_code = [line for line in red_expr_code.split("\n") if line and line.split('=')[1].strip() != "0;"]
+        red_expr_code = "\n".join(red_expr_code)
+
+        c_code_iter = cse_code + red_expr_code
+
+        # change formatting of temporary variables
+        pattern = r"dydx\[(\d+), (\d+)\]"
+        c_code_iter = re.sub(pattern, lambda expr: "dydx({0}, {1})".format(
+            expr.groups()[0], expr.groups()[1]
+        ), c_code_iter)
+
+        c_code += c_code_iter + "\n"
+
+    decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
+    return decl + c_code + "\n}\n"
+
+def generate_jac_proc_dpdr(poly, jac_name="jac", skip_zeros=True):
     """
-    Produces code for elements of jacobian matrix with dimensions [3 * natoms, npoly]
+    Produces code for elements of jacobian matrix with dimensions [ndist, npoly]
 
     Assumes Eigen format for selecting element of the matrix
     """
@@ -177,12 +368,11 @@ if __name__ == "__main__":
 
     assert os.path.isfile(args.basis_file)
     poly = load_polynomials(args.basis_file)
-    #poly = [poly[ind] for ind in poly_index]
 
     if args.generate_poly:
         proc = generate_poly_proc(poly)
         print(proc)
 
     if args.generate_jac:
-        proc = generate_jac_proc(poly)
+        proc = generate_jac_proc_dpdx_partial_cse(poly)
         print(proc)
