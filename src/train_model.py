@@ -290,18 +290,20 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         nconfigs = forces.size()[0]
         for n in range(nconfigs):
             lf = 0.0
-            fp = forces_pred[n].resize_(9, 3)
+            fp = forces_pred[n].reshape(9, 3)
 
             for natom in range(self.natoms):
                 df = forces[n, natom, :] - fp[natom, :]
                 lf += torch.dot(df, df)
+                #print(forces[n, natom, :], fp[natom, :])
 
             wmse_forces += lf * w[n] / self.natoms
 
+        _lambda = 1e-2
         wmse_forces = wmse_forces / nconfigs
-        wmse_forces = wmse_forces.item()
+        wmse_forces = _lambda * wmse_forces.item()
 
-        print("wmse_en: {}; wmse_forces: {}".format(wmse_en, wmse_forces))
+        print("wmse_en: {}; _lambda * wmse_forces: {}".format(wmse_en, wmse_forces))
         return wmse_en + wmse_forces
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -763,23 +765,30 @@ class Training:
         return self.model
 
     def compute_forces(self, dataset):
+        self.model.eval()
+
         dataset.X.requires_grad = True
 
-        sz     = dataset.X.size()
-        y_pred = torch.zeros(sz[0], 1)
+        y_pred    = self.model(dataset.X)
+        ders_pred = torch.autograd.grad(outputs=y_pred, inputs=dataset.X, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+
+        dataset.X.requires_grad = False
+
+        ###sz     = dataset.X.size()
+        ###y_pred = torch.zeros(sz[0], 1)
 
         # derivative of (normalized) energy w.r.t. to (normalized) polynomials for all configurations
         #   dims: [nconfigs x npoly]
-        ders_pred = torch.zeros(sz)
+        ###ders_pred = torch.zeros(sz)
 
-        for k in range(sz[0]):
-            inputs = dataset.X[k, :]
-            pred   = self.model(inputs)
+        ###for k in range(sz[0]):
+        ###    inputs = dataset.X[k, :]
+        ###    pred   = self.model(inputs)
 
-            y_pred[k]       = pred
-            ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True, create_graph=False)[0]
+        ###    y_pred[k]       = pred
+        ###    ders_pred[k, :] = torch.autograd.grad(outputs=pred, inputs=inputs, retain_graph=True, create_graph=False)[0]
 
-        dataset.X.requires_grad = False
+        ### dataset.X.requires_grad = False
 
         # take into account normalization of polynomials
         # now we have derivatives of energy w.r.t. to polynomials 
