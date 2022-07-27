@@ -301,9 +301,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
         _lambda = 1e-2
         wmse_forces = wmse_forces / nconfigs
-        wmse_forces = _lambda * wmse_forces.item()
+        wmse_forces = _lambda * wmse_forces
 
-        print("wmse_en: {}; _lambda * wmse_forces: {}".format(wmse_en, wmse_forces))
+        print("wmse_en: {}; _lambda * wmse_forces: {}".format(wmse_en, wmse_forces.item()))
         return wmse_en + wmse_forces
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -690,8 +690,15 @@ class Training:
         self.model = self.model.to(DEVICE)
         self.train.X = self.train.X.to(DEVICE)
         self.train.y = self.train.y.to(DEVICE)
+
+        self.train.dX = self.train.dX.to(DEVICE)
+        self.train.dy = self.train.dy.to(DEVICE)
+
         self.val.X = self.val.X.to(DEVICE)
         self.val.y = self.val.y.to(DEVICE)
+        
+        self.val.dX = self.val.dX.to(DEVICE)
+        self.val.dy = self.val.dy.to(DEVICE)
 
         self.loss_fn = self.loss_fn.to(DEVICE)
 
@@ -765,12 +772,11 @@ class Training:
         return self.model
 
     def compute_forces(self, dataset):
-        self.model.eval()
-
         dataset.X.requires_grad = True
 
         y_pred    = self.model(dataset.X)
         ders_pred = torch.autograd.grad(outputs=y_pred, inputs=dataset.X, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+        #ders_pred = torch.ones_like(dataset.X)
 
         dataset.X.requires_grad = False
 
@@ -791,14 +797,17 @@ class Training:
         ### dataset.X.requires_grad = False
 
         # take into account normalization of polynomials
-        # now we have derivatives of energy w.r.t. to polynomials 
-        ders_pred = torch.div(ders_pred, torch.from_numpy(self.xscaler.scale_))
+        # now we have derivatives of energy w.r.t. to polynomials
+
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        ders_pred = torch.div(ders_pred, x_scale)
 
         # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
         # `torch.einsum` throws a Runtime error with explicit conversion to Double 
         dy_pred = torch.einsum('ijk,ij -> ik', dataset.dX.double(), ders_pred.double())
         # take into account normalization of model energy
-        dy_pred = - torch.mul(dy_pred, torch.from_numpy(self.yscaler.scale_))
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        dy_pred = - torch.mul(dy_pred, y_scale)
 
         return y_pred, dy_pred
 
