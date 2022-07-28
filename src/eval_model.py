@@ -43,6 +43,7 @@ Boltzmann = 1.380649e-23      # SI: J / K
 Hartree   = 4.3597447222071e-18 # SI: J
 HkT       = Hartree/Boltzmann       # to use as:  -V[a.u.]*`HkT`/T
 BOHRTOANG = 0.529177249
+KCALTOCM  = 349.757
 
 class Evaluator:
     def __init__(self, model, xscaler, yscaler, meta_info):
@@ -51,11 +52,41 @@ class Evaluator:
         self.yscaler = yscaler
         self.meta_info = meta_info
 
-    def __call__(self, X):
+    def energy(self, X):
         self.model.eval()
+
         Xtr = self.xscaler.transform(X)
-        ytr = self.model(torch.from_numpy(Xtr))
+
+        with torch.no_grad():
+            ytr = self.model(torch.from_numpy(Xtr))
+
         return self.yscaler.inverse_transform(ytr.detach().numpy())
+
+    def forces(self, dataset):
+        Xtr = self.xscaler.transform(dataset.X)
+        Xtr = torch.from_numpy(Xtr)
+
+        Xtr.requires_grad = True
+
+        y_pred = self.model(Xtr)
+        dEdp   = torch.autograd.grad(outputs=y_pred, inputs=Xtr, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+
+        Xtr.requires_grad = False
+
+        # take into account normalization of polynomials
+        # now we have derivatives of energy w.r.t. to polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_)
+        dEdx = -torch.mul(dEdx, y_scale)
+
+        return dEdx
 
 
 def trim_png(figname):
@@ -65,8 +96,11 @@ def retrieve_checkpoint(cfg, chk_fpath):
     checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    cfg_model = cfg['MODEL']
-    model = build_network_yaml(cfg_model, input_features=meta_info["NPOLY"])
+    if cfg['TYPE'] == 'ENERGY':
+        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+    elif cfg['TYPE'] == 'DIPOLE':
+        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
+
     model.load_state_dict(checkpoint["model"])
 
     nparams = 0
@@ -105,9 +139,11 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, ylim, ylocato
         published_abs_error = calc - published_fit
         plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=1.0, label='Symmetry-adapted angular basis')
 
-    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
-    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
-    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
+    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
+    plt.scatter(val.y, error_val, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
+    plt.scatter(test.y, error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
+    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
+    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
 
     plt.xlim((0.0, EMAX))
     plt.ylim(ylim)
@@ -250,17 +286,45 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
 
     plt.show()
 
+def model_evaluation_forces(evaluator, train, val, test, emax):
+    natoms = train.NATOMS
 
-def show_model_evaluation(evaluator, train, val, test, emax, add_reference_pes=False):
+    mean_diff = []
+
+    for sampling_set in [train, val, test]:
+        en_pred = evaluator.energy(sampling_set.X)
+        forces_pred = evaluator.forces(sampling_set)
+
+        ind = (sampling_set.y < emax).nonzero()[:,0]
+
+        fs    = sampling_set.dy[ind].reshape(-1, 3 * natoms)
+        preds = forces_pred[ind]
+
+        diff_atoms = torch.abs(fs - preds)
+        diff       = torch.sum(diff_atoms, dim=1) / (3 * natoms)
+
+        mean = torch.mean(diff)
+        #maxx = torch.max(diff)
+        mean_diff.append(mean)
+
+    mean_diff_kcal_mol_A = [ff / KCALTOCM / BOHRTOANG for ff in mean_diff]
+
+    logging.info("[< {:.0f} cm-1] MEAN FORCE DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} cm-1/bohr".format(emax, *mean_diff))
+    logging.info("[< {:.0f} cm-1] MEAN FORCE DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} kcal/mol/A".format(emax, *mean_diff_kcal_mol_A))
+
+
+def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes=False):
     mean_diff, max_diff = [], []
     mse, rmse = [], []
 
     for sampling_set in [train, val, test]:
-        pred = torch.from_numpy(evaluator(sampling_set.X))
+        pred = evaluator.energy(sampling_set.X)
+        pred = torch.from_numpy(pred)
 
         ind = (sampling_set.y < emax).nonzero()[:,0]
         ys = sampling_set.y[ind]
         preds = pred[ind]
+
         diff = torch.abs(ys - preds)
 
         mean = torch.mean(diff)
@@ -272,6 +336,10 @@ def show_model_evaluation(evaluator, train, val, test, emax, add_reference_pes=F
         _rmse = torch.sqrt(_mse)
         mse.append(_mse)
         rmse.append(_rmse)
+
+    min_energy = train.y.min()
+    max_energy = train.y.max()
+    logging.info(" (train) ENERGY RANGE: {:.3f} - {:.3f} cm-1".format(min_energy, max_energy))
 
     logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *mean_diff))
     logging.info("[< {:.0f} cm-1] MAX  DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *max_diff))
@@ -318,8 +386,10 @@ if __name__ == '__main__':
                         help="the name of the general checkpoint file without extension [default: same as model_name]")
     parser.add_argument("--EMAX",         required=True, type=float,
                         help="maximum value of the energy range over which model should be evaluated")
-    parser.add_argument("--learning_overview", required=False, type=str2bool, default=False,
-                        help="whether to create on overview over train/val/test sets [False]")
+    parser.add_argument("--energy_overview", required=False, type=str2bool, default=False,
+                        help="whether to create an overview of errors in energies over train/val/test sets [False]")
+    parser.add_argument("--forces_overview", required=False, type=str2bool, default=False,
+                        help="whether to create an overview of errors in forces over trian/val/test sets [False]")
     parser.add_argument("--ch4_overview",  required=False, type=str2bool, default=False,
                         help="whether to create an overview over CH4 energies [False]")
     parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=False,
@@ -339,7 +409,8 @@ if __name__ == '__main__':
 
     logging.info("Values of optional parameters:")
     logging.info("  chk_name:          {}".format(args.chk_name))
-    logging.info("  learning_overview: {}".format(args.learning_overview))
+    logging.info("  energy_overview:   {}".format(args.energy_overview))
+    logging.info("  forces_overview:   {}".format(args.forces_overview))
     logging.info("  ch4_overview:      {}".format(args.ch4_overview))
     logging.info("  add_reference:     {}".format(args.add_reference_pes))
     logging.info("  EMAX:              {}".format(args.EMAX))
@@ -353,29 +424,38 @@ if __name__ == '__main__':
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
 
+    assert 'TYPE' in cfg
+    assert cfg['TYPE'] in ('ENERGY', 'DIPOLE')
+
+    cfg_dataset = cfg['DATASET']
     # in order to plot ALL the points of the RIGID dataset
     # instead of only the clipped part of it
-    cfg_dataset = cfg['DATASET']
-    if cfg_dataset['TYPE'] == 'NONRIGID-CLIP':
-        cfg_dataset['TYPE'] = 'NONRIGID'
+    #if cfg_dataset['TYPE'] == 'NONRIGID-CLIP':
+    #    cfg_dataset['TYPE'] = 'NONRIGID'
 
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
-    if args.learning_overview:
+    if args.energy_overview:
         train, val, test = load_dataset(cfg_dataset)
 
-        show_model_evaluation(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
+        model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
 
-        ylim      = (-10.0, 10.0)
-        ylocators = (1.0, 1.0)
+        ylim      = (-50.0, 50.0)
+        ylocators = (10.0, 5.0)
 
         errors_png = None
         if args.save:
-            errors_png = os.path.join(MODEL_FOLDER, MODEL + "-EMAX={}.png".format(args.EMAX))
+            errors_png = os.path.join(MODEL_FOLDER, MODEL_NAME + "-EMAX={}.png".format(args.EMAX))
             logging.info("errors_png: {}".format(errors_png))
 
         plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, ylim=ylim, ylocators=ylocators,
                                     figpath=errors_png, add_reference_pes=args.add_reference_pes)
+
+    if args.forces_overview:
+        train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
+
+        model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
+        model_evaluation_forces(evaluator, train, val, test, args.EMAX)
 
     if args.ch4_overview:
         assert cfg_dataset['TYPE'] == 'NONRIGID'

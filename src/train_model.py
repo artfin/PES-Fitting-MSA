@@ -90,6 +90,30 @@ def preprocess_dataset(train, val, test, cfg):
     #plt.scatter(train.X[:,6], np.zeros_like(train.X[:,6]) + 1)
     #plt.show()
 
+def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
+    logging.info("Saving the checkpoint.")
+
+    #architecture = [m.out_features for m in next(model.modules()) if isinstance(m, torch.nn.modules.linear.Linear)]
+    #architecture = tuple(architecture[:-1])
+
+    #import inspect
+    #torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
+    #for module in model.modules():
+    #    module_str = repr(module).strip("()")
+    #    if module_str in torch_activations:
+    #        activation = module_str
+    #        break
+
+    checkpoint = {
+        "model"        :  model.state_dict(),
+        "X_mean"       :  xscaler.mean_,
+        "X_std"        :  xscaler.scale_,
+        "y_mean"       :  yscaler.mean_,
+        "y_std"        :  yscaler.scale_,
+        "meta_info"    :  meta_info,
+    }
+    torch.save(checkpoint, chk_path)
+
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
@@ -421,11 +445,11 @@ class EarlyStopping:
     def __call__(self, epoch, score, model, xscaler, yscaler, meta_info):
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(model, xscaler, yscaler, meta_info)
+            save_checkpoint(model, xscaler, yscaler, meta_info, self.chk_path)
         elif score < self.best_score and (self.best_score - score) > self.tol:
             self.best_score = score
             self.counter = 0
-            self.save_checkpoint(model, xscaler, yscaler, meta_info)
+            save_checkpoint(model, xscaler, yscaler, meta_info, self.chk_path)
         else:
             self.counter += 1
             if self.counter >= self.patience:
@@ -435,29 +459,6 @@ class EarlyStopping:
             logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
             logging.info("(Early Stopping) ES counter: {}; ES patience: {}".format(self.counter, self.patience))
 
-    def save_checkpoint(self, model, xscaler, yscaler, meta_info):
-        logging.info("Saving the checkpoint.")
-
-        #architecture = [m.out_features for m in next(model.modules()) if isinstance(m, torch.nn.modules.linear.Linear)]
-        #architecture = tuple(architecture[:-1])
-
-        #import inspect
-        #torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
-        #for module in model.modules():
-        #    module_str = repr(module).strip("()")
-        #    if module_str in torch_activations:
-        #        activation = module_str
-        #        break
-
-        checkpoint = {
-            "model"        :  model.state_dict(),
-            "X_mean"       :  xscaler.mean_,
-            "X_std"        :  xscaler.scale_,
-            "y_mean"       :  yscaler.mean_,
-            "y_std"        :  yscaler.scale_,
-            "meta_info"    :  meta_info,
-        }
-        torch.save(checkpoint, self.chk_path)
 
 def count_params(model):
     nparams = 0
@@ -686,13 +687,13 @@ class Training:
         self.train.y = self.train.y.to(DEVICE)
         self.val.X = self.val.X.to(DEVICE)
         self.val.y = self.val.y.to(DEVICE)
-        
+
         self.loss_fn = self.loss_fn.to(DEVICE)
-        
+
         if self.train.dX is not None:
             self.train.dX = self.train.dX.to(DEVICE)
             self.train.dy = self.train.dy.to(DEVICE)
-        
+
             self.val.dX = self.val.dX.to(DEVICE)
             self.val.dy = self.val.dy.to(DEVICE)
 
@@ -719,7 +720,7 @@ class Training:
             print("loss function: {}".format(self.loss_fn))
 
             self.train_epoch(epoch, self.optimizer)
-            
+
             self.scheduler.step(self.loss_val)
             current_lr = self.optimizer.param_groups[0]['lr']
 
@@ -729,7 +730,7 @@ class Training:
 
             # writing all pending events to disk
             self.writer.flush()
-        
+
             # pass loss values to EarlyStopping mechanism 
             self.es(epoch, self.loss_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
@@ -749,26 +750,29 @@ class Training:
         return self.model
 
     def compute_forces(self, dataset):
-        dataset.X.requires_grad = True
+        Xtr = dataset.X
 
-        y_pred    = self.model(dataset.X)
-        ders_pred = torch.autograd.grad(outputs=y_pred, inputs=dataset.X, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+        Xtr.requires_grad = True
 
-        dataset.X.requires_grad = False
+        y_pred = self.model(Xtr)
+        dEdp   = torch.autograd.grad(outputs=y_pred, inputs=Xtr, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+
+        Xtr.requires_grad = False
 
         # take into account normalization of polynomials
         # now we have derivatives of energy w.r.t. to polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
-        ders_pred = torch.div(ders_pred, x_scale)
+        x_scale = torch.from_numpy(self.xscaler.scale_)
+        dEdp = torch.div(dEdp, x_scale)
 
         # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
-        # `torch.einsum` throws a Runtime error with explicit conversion to Double 
-        dy_pred = torch.einsum('ijk,ij -> ik', dataset.dX.double(), ders_pred.double())
-        # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dy_pred = - torch.mul(dy_pred, y_scale)
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
-        return y_pred, dy_pred
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_)
+        dEdx = -torch.mul(dEdx, y_scale)
+
+        return y_pred, dEdx
 
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
@@ -800,7 +804,7 @@ class Training:
         elapsed = timeit.default_timer() - start_time
         logging.info("Optimizer makes step in {:.2f}s".format(elapsed))
         logging.info("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
-        
+
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
         self.model.eval()
@@ -808,18 +812,18 @@ class Training:
         if self.cfg_loss['USE_FORCES']:
             train_y_pred, train_dy_pred = self.compute_forces(self.train)
             loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
-             
+
             val_y_pred, val_dy_pred = self.compute_forces(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
             logging.info("Epoch: {}; (energy) loss train: {:.3f} cm-1; (force) loss train: {:.3f} cm-1/bohr\n \
-                                     (energy) loss val:   {:.3f} cm-1; (force) loss val:   {:.3f} cm-1/bohr".format(
+                                          (energy) loss val:   {:.3f} cm-1; (force) loss val:   {:.3f} cm-1/bohr".format(
                 epoch, loss_train_e, loss_train_f, loss_val_e, loss_val_f
             ))
-            
+
             # value to be passed to EarlyStopping/ReduceLR mechanisms
             self.loss_val = loss_val_e
-            
+
             self.writer.add_scalar("loss/train", loss_train_e, epoch)
             self.writer.add_scalar("loss/val", loss_val_e, epoch)
 
@@ -837,10 +841,10 @@ class Training:
                 self.loss_val = loss_val
 
             logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(epoch, loss_train, loss_val))
-           
+
             self.writer.add_scalar("loss/train", loss_train, epoch)
             self.writer.add_scalar("loss/val", loss_val, epoch)
-        
+
 
     def model_eval(self):
         self.test.X = self.test.X.to(DEVICE)
@@ -863,7 +867,7 @@ class Training:
 
             test_y_pred, test_dy_pred = self.compute_forces(self.test)
             loss_test_e, loss_test_f = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
-            
+
             logging.info("Model evaluation after training:")
             logging.info("Train      loss: {:.2f} cm-1; force loss: {:.2f} cm-1/bohr".format(loss_train_e, loss_train_f))
             logging.info("Validation loss: {:.2f} cm-1; force loss: {:.2f} cm-1/bohr".format(loss_val_e, loss_val_f))
@@ -962,10 +966,10 @@ def load_dataset(cfg_dataset, typ):
     cfg_dataset['TYPE'] = typ
 
     if not os.path.isdir(cfg_dataset['INTERIM_FOLDER']):
-        os.makedirs(interim_folder) # can create nested directories
+        os.makedirs(cfg_dataset['INTERIM_FOLDER']) # can create nested directories
 
     if not os.path.isdir(cfg_dataset['EXTERNAL_FOLDER']):
-        os.makedirs(external_folder) # can create nested directories
+        os.makedirs(cfg_dataset['EXTERNAL_FOLDER']) # can create nested directories
 
     logging.info("Dataset options:")
     for keyword, value in cfg_dataset.items():
