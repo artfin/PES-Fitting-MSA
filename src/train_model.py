@@ -279,10 +279,11 @@ class WMSELoss_Ratio_dipole(torch.nn.Module):
         return wmse
 
 class WMSELoss_Ratio_wforces(torch.nn.Module):
-    def __init__(self, natoms, dwt=1.0):
+    def __init__(self, natoms, dwt=1.0, f_lambda=1.0):
         super().__init__()
         self.natoms = natoms
         self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
 
         self.en_mean = None
         self.en_std  = None
@@ -317,10 +318,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
 
-        _lambda = 1e-2
         df = forces - forces_pred
         wdf = torch.einsum('ijk,il->ijk', df, w)
-        wmse_forces = _lambda * torch.einsum('ijk,ijk->i', wdf, df).sum() / self.natoms / nconfigs
+        wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->i', wdf, df).sum() / (3.0 * self.natoms) / nconfigs
 
         return wmse_en, wmse_forces
 
@@ -551,7 +551,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -590,7 +590,8 @@ class Training:
 
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and use_forces:
             dwt = self.cfg_loss.get('dwt', 1.0)
-            loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt)
+            f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
+            loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
 
         else:
             print(self.cfg_loss)
@@ -761,7 +762,7 @@ class Training:
 
         # take into account normalization of polynomials
         # now we have derivatives of energy w.r.t. to polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_)
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
         # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
@@ -769,7 +770,7 @@ class Training:
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
         # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_)
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
         dEdx = -torch.mul(dEdx, y_scale)
 
         return y_pred, dEdx
