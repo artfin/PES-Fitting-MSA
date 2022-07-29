@@ -341,7 +341,11 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
     max_energy = train.y.max()
     logging.info(" (train) ENERGY RANGE: {:.3f} - {:.3f} cm-1".format(min_energy, max_energy))
 
-    logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *mean_diff))
+    mean_diff_kcal_mol = [ff / KCALTOCM for ff in mean_diff]
+
+    logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} cm-1".format(emax, *mean_diff))
+    logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} kcal/mol".format(emax, *mean_diff_kcal_mol))
+
     logging.info("[< {:.0f} cm-1] MAX  DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *max_diff))
     logging.info("[< {:.0f} cm-1] RMSE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}; total mean: {:.3f}".format(emax, *rmse, np.mean(rmse)))
 
