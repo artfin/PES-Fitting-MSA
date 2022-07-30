@@ -120,8 +120,8 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         NCONFIGS = dataset.X.size()[0]
         indices = list(range(NCONFIGS))
 
-        train_ind, test_ind = data_split(indices, test_size=0.2)
-        val_ind, test_ind   = data_split(test_ind, test_size=0.5)
+        train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
+        val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
 
         X_train, y_train = dataset.X[train_ind, :], dataset.y[train_ind]
         X_val, y_val     = dataset.X[val_ind,   :], dataset.y[val_ind]
@@ -152,8 +152,8 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         label = 0
 
         for file_path in cfg_dataset['SOURCE']:
-            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], load_forces=cfg_dataset['LOAD_FORCES'],
-                                  symmetry=cfg_dataset['SYMMETRY'], intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
+                                  load_forces=cfg_dataset['LOAD_FORCES'], atom_mapping=cfg_dataset['ATOM_MAPPING'], intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
 
             if cfg_dataset['TYPE'] == 'DIPOLE':
                 anchor_pos = tuple(map(int, cfg_dataset['ANCHOR_POSITIONS'].split()))
@@ -247,8 +247,8 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X_val, y_val  = X_val[indl], y_val[indl]
 
     #print("Size of training dataset: {}".format(X_train.size()))
-    #train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
-    #print("Indices of training elements: {}".format(train_index))
+    train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
+    print("Indices of training elements: {}".format(train_index))
     #train_index_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train-index.json")
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)

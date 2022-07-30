@@ -943,11 +943,12 @@ def load_dataset(cfg_dataset, typ):
         # DATASET PREPROCESSING
         ('NORMALIZE',        KeywordType.KEYWORD_REQUIRED, None),  # `str`  : how to perform data normalization  
         ('ANCHOR_POSITIONS', KeywordType.KEYWORD_OPTIONAL, None),  # [REQUIRED for TYPE=dipole] `int`s : which atoms to place on the OZ axis  
-        # PIP CONSTRUCTION 
+        # PIP CONSTRUCTION
         ('ORDER',                  KeywordType.KEYWORD_REQUIRED, None),  # `int`  : maximum order of PIPs 
         ('SYMMETRY',               KeywordType.KEYWORD_REQUIRED, None),  # `int`s : permutational symmetry of the molecule | molecular pair
         ('INTRAMOLECULAR_TO_ZERO', KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use intermolecular basis of PIPs 
         ('PURIFY',                 KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
+        ('ATOM_MAPPING',           KeywordType.KEYWORD_OPTIONAL, False), # `list` : mapping atoms->monomer (which atom belongs to which monomer)
     ]
 
     from operator import itemgetter

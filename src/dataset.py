@@ -59,6 +59,14 @@ class XYZConfig:
         assert np.all(rr > MIN_CH) and np.all(rr < MAX_CH), "Check the distance units; Angstrom instead of Bohrs are suspected"
 
 @dataclass
+class XYZConfigPair:
+    coords1 : np.array
+    coords2 : np.array
+    z1      : np.array
+    z2      : np.array
+    energy  : np.array
+
+@dataclass
 class PolyDataset_t:
     NATOMS       : int
     NMON         : int
@@ -73,6 +81,64 @@ class PolyDataset_t:
     energy_limit : float = None
     intramz      : bool  = False
     purify       : bool  = False
+
+
+def load_npz(fpath, load_forces=False):
+    fd = np.load(fpath)
+
+    if "theory" in fd:
+        logging.info("  Theory: {}".format(fd['theory']))
+
+    energy_min = min(fd['E'])[0]
+    energy_max = max(fd['E'])[0]
+    logging.info("    Energy range: {} - {} cm-1".format(energy_min, energy_max))
+
+    if fd['nmol'] == 1:
+        assert(fd['E'].shape[0] == fd['R'].shape[0])
+        NCONFIGS = fd['E'].shape[0]
+        NATOMS   = fd['R'].shape[1]
+        z        = fd['z']
+
+        xyz_configs = []
+        if load_forces:
+            for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
+                #coords_bohr    = coords / BOHRTOANG
+                #energy_cm      = (energy[0] - energy_min) * KCALTOCM
+                #forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
+
+                xyz_configs.append(
+                    XYZConfig(
+                        coords=coords,
+                        z=z,
+                        energy=energy,
+                        forces=forces
+                    )
+                )
+        else:
+            for coords, energy in zip(fd['R'], fd['E']):
+                #coords_bohr    = coords / BOHRTOANG
+                #energy_cm      = (energy[0] - energy_min) * KCALTOCM
+
+                xyz_configs.append(
+                    XYZConfig(
+                        coords=coords,
+                        z=z,
+                        energy=energy,
+                        forces=None
+                    )
+                )
+    elif fd['nmol'] == 2:
+        NCONFIGS = fd['E'].shape[0]
+        z1, z2   = fd['z1'], fd['z2']
+        NATOMS   = z1.shape[0] + z2.shape[0]
+
+        assert fd['R1'].shape[0] == NCONFIGS
+        assert fd['R2'].shape[0] == NCONFIGS
+
+        xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy)
+                       for c1, c2, energy in zip(fd['R1'], fd['R2'], fd['E'])]
+
+    return NATOMS, NCONFIGS, xyz_configs
 
 def load_xyz_with_energy(fpath):
     nlines = sum(1 for line in open(fpath, mode='r'))
@@ -149,57 +215,10 @@ def print_molpro_format(xyz_config):
         print(f"{k+1}, {symbol}{k+1},, {xyz_config.coords[k, 0]:.10f}, {xyz_config.coords[k, 1]:.10f}, {xyz_config.coords[k, 2]:.10f}")
 
 
-def load_npz(fpath, load_forces=False):
-    fd = np.load(fpath)
-
-    if "theory" in fd:
-        logging.info("  Theory: {}".format(fd['theory']))
-
-    assert(fd['E'].shape[0] == fd['R'].shape[0])
-    NCONFIGS = fd['E'].shape[0]
-    NATOMS   = fd['R'].shape[1]
-    z        = fd['z']
-
-    energy_min = min(fd['E'])[0]
-    energy_max = max(fd['E'])[0]
-    logging.info("    Energy range: {} - {} cm-1".format(energy_min, energy_max))
-
-    xyz_configs = []
-
-    if load_forces:
-        for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
-            #coords_bohr    = coords / BOHRTOANG
-            #energy_cm      = (energy[0] - energy_min) * KCALTOCM
-            #forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
-
-            xyz_configs.append(
-                XYZConfig(
-                    coords=coords,
-                    z=z,
-                    energy=energy,
-                    forces=forces
-                )
-            )
-    else:
-        for coords, energy in zip(fd['R'], fd['E']):
-            #coords_bohr    = coords / BOHRTOANG
-            #energy_cm      = (energy[0] - energy_min) * KCALTOCM
-
-            xyz_configs.append(
-                XYZConfig(
-                    coords=coords,
-                    z=z,
-                    energy=energy,
-                    forces=None
-                )
-            )
-
-    return NATOMS, NCONFIGS, xyz_configs
-
 def write_npz(npz_path, xyz_configs):
     from random import shuffle
     shuffle(xyz_configs)
-    xyz_configs = xyz_configs[:10000]
+    xyz_configs = xyz_configs[:50000]
 
     natoms   = xyz_configs[0].coords.shape[0]
     nconfigs = len(xyz_configs)
@@ -213,16 +232,17 @@ def write_npz(npz_path, xyz_configs):
 
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, intramz=False, purify=False):
+    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, atom_mapping=None, intramz=False, purify=False):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
-        self.typ         = typ
-        self.order       = order
-        self.symmetry    = symmetry
-        self.load_forces = load_forces
-        self.intramz     = intramz
-        self.purify      = purify
+        self.typ          = typ
+        self.order        = order
+        self.symmetry     = symmetry
+        self.load_forces  = load_forces
+        self.atom_mapping = atom_mapping
+        self.intramz      = intramz
+        self.purify       = purify
 
         logging.info("Loading configurations from file_path: {}".format(file_path))
         if file_path.endswith(".xyz"):
@@ -243,7 +263,7 @@ class PolyDataset(Dataset):
             else:
                 assert False
 
-            #write_npz("ethanol_dft-10000.npz", self.xyz_configs)
+            #write_npz("ethanol_dft-50000.npz", self.xyz_configs)
         else:
             raise ValueError("Unrecognized file format.")
 
@@ -323,16 +343,16 @@ class PolyDataset(Dataset):
 
             self.F_LIBNAME = os.path.join(self.wdir, 'f_basis' + stub + '.so')
             if not os.path.isfile(self.F_LIBNAME):
-                from genpip import compile_basis_dlib
-                compile_basis_dlib(self.order, self.symmetry, self.wdir)
+                from genpip import compile_basis_dlib_f
+                compile_basis_dlib_f(self.order, self.symmetry, self.wdir)
 
             assert os.path.isfile(self.F_LIBNAME), "No F_BASIS_LIBRARY={} found".format(self.F_LIBNAME)
 
             if self.load_forces:
                 self.F_DER_LIBNAME = os.path.join(self.wdir, 'f_gradbasis' + stub + '.so')
                 if not os.path.isfile(self.F_DER_LIBNAME):
-                    from genpip import compile_derivatives_dlib
-                    compile_derivatives_dlib(self.order, self.symmetry, self.wdir)
+                    from genpip import compile_derivatives_dlib_f
+                    compile_derivatives_dlib_f(self.order, self.symmetry, self.wdir)
 
                 assert os.path.isfile(self.F_DER_LIBNAME), "No F_DERIVATIVES_LIBRARY={} found".format(self.F_DER_LIBNAME)
 
@@ -342,16 +362,16 @@ class PolyDataset(Dataset):
             stub       = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             self.C_LIBNAME = os.path.join(self.wdir, 'c_basis' + stub + '.so')
             if not os.path.isfile(self.C_LIBNAME):
-                from genpip import compile_basis_dlib
-                compile_basis_dlib(self.order, self.symmetry, self.wdir)
+                from genpip import compile_basis_dlib_c
+                compile_basis_dlib_c(self.order, self.symmetry, self.wdir)
 
             assert os.path.isfile(self.C_LIBNAME), "No C_LIBRARY={} found".format(self.C_LIBNAME)
 
             if self.load_forces:
                 self.C_DER_LIBNAME = os.path.join(self.wdir, 'c_jac' + stub + '.so')
                 if not os.path.isfile(self.C_DER_LIBNAME):
-                    from genpip import compile_derivatives_dlib
-                    compile_derivatives_dlib(self.order, self.symmetry, self.wdir)
+                    from genpip import compile_derivatives_dlib_c
+                    compile_derivatives_dlib_c(self.order, self.symmetry, self.wdir)
 
                 assert os.path.isfile(self.C_DER_LIBNAME), "No C_DERIVATIVES_LIBRARY={} found".format(self.C_DER_LIBNAME)
 
@@ -476,6 +496,7 @@ class PolyDataset(Dataset):
 
                 poly[n, :]          = p.copy()
                 poly_derivatives[n] = dpdx.T
+
         else:
             assert False
 
@@ -585,6 +606,7 @@ class PolyDataset(Dataset):
 
         return drdx
 
+
     def make_yij(self, xyz_configs, intramz=False, intermz=False):
         """
             intramz: True -> intramolecular distances are set to zero
@@ -601,43 +623,66 @@ class PolyDataset(Dataset):
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")
 
-        for n in range(NCONFIGS):
-            c = xyz_configs[n]
+        if intramz:
+            for n in range(NCONFIGS):
+                c = xyz_configs[n]
 
-            k = 0
-            for i, j in combinations(range(self.NATOMS), 2):
-                # CH4-N2
-                if intramz:
-                    # TODO: get rid of this by introducing the concept of monomer
-                    #       formalize the notion of intra- and intermolecular coordinates
-                    if i == 0 and j == 1: yij[n, k] = 0.0; k = k + 1; continue; # H1 H2 
-                    if i == 0 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H1 H3
-                    if i == 0 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H1 H4
-                    if i == 1 and j == 2: yij[n, k] = 0.0; k = k + 1; continue; # H2 H3
-                    if i == 1 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H2 H4
-                    if i == 2 and j == 3: yij[n, k] = 0.0; k = k + 1; continue; # H3 H4
-                    if i == 0 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H1 C
-                    if i == 1 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H2 C
-                    if i == 2 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H3 C
-                    if i == 3 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # H4 C
-                    if i == 4 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # N1 N2
+                coords = []
+                iter1, iter2 = 0, 0
+                for mapping in self.atom_mapping:
+                    (monomer, z), = mapping.items()
+                    if monomer == 0:
+                        assert c.z1[iter1] == z
+                        coords.append(c.coords1[iter1])
+                        iter1 = iter1 + 1
+                    elif monomer == 1:
+                        assert c.z2[iter2] == z
+                        coords.append(c.coords2[iter2])
+                        iter2 = iter2 + 1
 
-                if intermz:
-                    # TODO: get rid of this by introducing the concept of monomer
-                    if i == 0 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H1 N1
-                    if i == 0 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H1 N2
-                    if i == 1 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H2 N1
-                    if i == 1 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H2 N2
-                    if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H3 N1
-                    if i == 2 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H3 N2
-                    if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H4 N1
-                    if i == 3 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H4 N2
-                    if i == 4 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N1 C
-                    if i == 5 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N2 C
+                k = 0
+                for i, j in combinations(range(self.NATOMS), 2):
+                    (monomer_i, _), = self.atom_mapping[i].items()
+                    (monomer_j, _), = self.atom_mapping[j].items()
 
-                yij[n, k] = np.linalg.norm(c.coords[i] - c.coords[j])
-                yij[n][k] = np.exp(-yij[n, k] / a0)
-                k = k + 1
+                    if monomer_i == monomer_j:
+                        yij[n, k] = 0.0
+                    else:
+                        yij[n, k] = np.linalg.norm(coords[i] - coords[j])
+                        yij[n][k] = 1.0 / yij[n, k]**6
+                        #yij[n][k] = np.exp(-yij[n, k] / a0)
+
+                    k = k + 1
+
+            return yij
+
+        if intermz:
+            assert False
+
+            # TODO: get rid of this by introducing the concept of monomer
+            #if i == 0 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H1 N1
+            #if i == 0 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H1 N2
+            #if i == 1 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H2 N1
+            #if i == 1 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H2 N2
+            #if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H3 N1
+            #if i == 2 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H3 N2
+            #if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H4 N1
+            #if i == 3 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H4 N2
+            #if i == 4 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N1 C
+            #if i == 5 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N2 C
+
+        if isinstance(self.xyz_configs[0], XYZConfig):
+            for n in range(NCONFIGS):
+                c = xyz_configs[n]
+
+                k = 0
+                for i, j in combinations(range(self.NATOMS), 2):
+                    yij[n, k] = np.linalg.norm(c.coords[i] - c.coords[j])
+                    yij[n][k] = np.exp(-yij[n, k] / a0)
+                    k = k + 1
+
+        if isinstance(xyz_config[0], XYZConfigPair):
+            assert False
 
         return yij
 

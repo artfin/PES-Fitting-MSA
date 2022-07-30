@@ -78,38 +78,51 @@ def generate_fortran(order, symmetry, wdir):
     assert os.path.exists(fpath), "some problem with gradient file generation; see src/derivative.pl"
     logging.info("Created PIP gradient file: {}".format(fpath))
 
-def compile_basis_dlib(order, symmetry, wdir):
+def compile_basis_dlib_c(order, symmetry, wdir):
     logging.info("compiling basis dynamic lib...")
-
-    f_fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
-    f_fpath = os.path.join(wdir, f_fname)
 
     c_fname = "c_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
     c_fpath = os.path.join(wdir, c_fname)
 
-    if os.path.isfile(f_fpath + ".f90"):
-        st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(f_fpath))
-        logging.info(st.stdout)
-    elif os.path.isfile(c_fpath + ".cc"):
+    if os.path.isfile(c_fpath + ".cc"):
         st = cl("gcc -shared -fPIC {0}.cc -o {0}.so".format(c_fpath))
         logging.info(st.stdout)
     else:
         raise RuntimeError("[compile_basis_dlib] no source code for polynomials with symmetry={} and order={} is detected".format(symmetry, order))
 
-def compile_derivatives_dlib(order, symmetry, wdir):
+def compile_basis_dlib_f(order, symmetry, wdir):
+    logging.info("compiling basis dynamic lib...")
+
+    f_fname = "f_basis_{}_{}".format(symmetry.replace(' ', '_'), order)
+    f_fpath = os.path.join(wdir, f_fname)
+
+    if os.path.isfile(f_fpath + ".f90"):
+        st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(f_fpath))
+        logging.info(st.stdout)
+    else:
+        raise RuntimeError("[compile_basis_dlib] no source code for polynomials with symmetry={} and order={} is detected".format(symmetry, order))
+
+def compile_derivatives_dlib_c(order, symmetry, wdir):
+    logging.info("compiling derivatives dynamic lib...")
+
+    c_fname = "c_jac_{}_{}".format(symmetry.replace(' ', '_'), order)
+    c_fpath = os.path.join(wdir, c_fname)
+
+    if os.path.isfile(c_fpath + ".cc"):
+        st = cl("gcc -shared -fPIC {0}.cc -o {0}.so".format(c_fpath))
+        logging.info(st.stdout)
+    else:
+        raise RuntimeError("[compile_derivatives_dlib] no source code for derivatives of polynomials with symmetry={} and order={} is detected".format(symmetry, order))
+
+
+def compile_derivatives_dlib_f(order, symmetry, wdir):
     logging.info("compiling derivatives dynamic lib...")
 
     f_fname = "f_gradbasis_{}_{}".format(symmetry.replace(' ', '_'), order)
     f_fpath = os.path.join(wdir, f_fname)
 
-    c_fname = "c_jac_{}_{}".format(symmetry.replace(' ', '_'), order)
-    c_fpath = os.path.join(wdir, c_fname)
-
     if os.path.isfile(f_fpath + ".f90"):
         st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
-        logging.info(st.stdout)
-    elif os.path.isfile(c_fpath + ".cc"):
-        st = cl("gcc -shared -fPIC {0}.cc -o {0}.so".format(c_fpath))
         logging.info(st.stdout)
     else:
         raise RuntimeError("[compile_derivatives_dlib] no source code for derivatives of polynomials with symmetry={} and order={} is detected".format(symmetry, order))
@@ -138,5 +151,5 @@ if __name__   == "__main__":
 
     run_msa(order, symmetry, wdir)
     generate_fortran(order, symmetry, wdir)
-    compile_basis_dlib(order, symmetry, wdir)
-    compile_derivatives_dlib(order, symmetry, wdir)
+    compile_basis_dlib_f(order, symmetry, wdir)
+    compile_derivatives_dlib_f(order, symmetry, wdir)
