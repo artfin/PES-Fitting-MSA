@@ -297,8 +297,9 @@ class PolyDataset(Dataset):
                 raise ValueError("Conflicting options: PURIFY and INTRAMZ")
 
             purify_mask = self.make_purify_mask(self.xyz_configs)
+            self.X      = self.X[:, purify_mask.astype(np.bool)]
+
             self.NPOLY = purify_mask.sum()
-            self.X = self.X[:, purify_mask.astype(np.bool)]
 
 
         if self.intramz:
@@ -614,6 +615,16 @@ class PolyDataset(Dataset):
                     that do not vanish when monomers are infinitely separated.
         """
 
+        def switch(x):
+            x_i = 6.0
+            x_f = 20.0
+            if (x < x_i):
+                return 0.0
+            elif (x < x_f):
+                return 10*((x - x_i) / (x_f - x_i))**3 - 15*((x - x_i) / (x_f - x_i))**4 + 6*((x - x_i) / (x_f - x_i))**5
+            else:
+                return 1.0
+
         logging.info("Constructing an array of interatomic distances with options:")
         logging.info(" [INTRAMOLECULAR COORDINATES=ZERO] INTRAMZ={}".format(intramz))
         logging.info(" [INTERMOLECULAR COORDINATES=ZERO] INTERMZ={}".format(intermz))
@@ -662,7 +673,9 @@ class PolyDataset(Dataset):
                 if monomer_i == monomer_j:
                     yij[n, k] = np.exp(-dist / a0)
                 else:
-                    yij[n, k] = 1000.0 / dist**6
+                    #yij[n, k] = np.exp(-dist / a0) #+ 1000.0 / dist**6
+                    s = switch(dist)
+                    yij[n, k] = (1 - s) * np.exp(-dist / a0) + s * 1e4 / dist**6
 
                 if intramz:
                     if monomer_i == monomer_j:
