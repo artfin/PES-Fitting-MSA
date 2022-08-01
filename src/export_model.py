@@ -47,8 +47,14 @@ def retrieve_checkpoint(cfg, chk_path):
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    cfg_model = cfg['MODEL']
-    model = build_network_yaml(cfg_model, input_features=meta_info["NPOLY"])
+    typ = cfg['TYPE']
+    if typ == 'ENERGY':
+        model = build_network_yaml(cfg["MODEL"], input_features=meta_info["NPOLY"], output_features=1)
+    elif typ == 'DIPOLE':
+        model = build_network_yaml(cfg["MODEL"], input_features=meta_info["NPOLY"], output_features=3)
+    else:
+        assert False
+
     model.load_state_dict(checkpoint["model"])
 
     xscaler        = StandardScaler_impl()
@@ -510,6 +516,10 @@ if __name__ == "__main__":
 
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
+    
+    assert 'TYPE' in cfg
+    typ = cfg['TYPE']
+    assert typ in ('ENERGY', 'DIPOLE')
 
     if args.chk_name is not None:
         chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
@@ -591,15 +601,16 @@ if __name__ == "__main__":
         torchscript_fname = MODEL_NAME + "-torchscript.pt"
         Export(cfg, MODEL_FOLDER, evaluator, poly_source="MSA").generate_torchscript(torchscript_fname=torchscript_fname)
 
-    cfg_dataset = cfg['DATASET']
-    train, val, test = load_dataset(cfg_dataset)
+    if False:
+        cfg_dataset = cfg['DATASET']
+        train, val, test = load_dataset(cfg_dataset, typ=typ)
 
-    X0 = train.X[0].view((1, train.NPOLY))
-    X0 = torch.zeros((1, 79))
+        X0 = train.X[0].view((1, train.NPOLY))
+        X0 = torch.zeros((1, 79))
 
-    y0 = evaluator(X0)
-    logging.info("Expected output of the exported model on the first configuration: {}".format(y0.item()))
-    logging.info("Dataset energy value: {:.10f}".format(train.y[0].item()))
+        y0 = evaluator(X0)
+        logging.info("Expected output of the exported model on the first configuration: {}".format(y0.item()))
+        logging.info("Dataset energy value: {:.10f}".format(train.y[0].item()))
 
 
     #inf_poly = torch.zeros(1, NPOLY, dtype=torch.double)

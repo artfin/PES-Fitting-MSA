@@ -122,7 +122,7 @@ def compile_derivatives_dlib_f(order, symmetry, wdir):
     f_fpath = os.path.join(wdir, f_fname)
 
     if os.path.isfile(f_fpath + ".f90"):
-        st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(fpath))
+        st = cl('gfortran -shared -fPIC -fdefault-real-8 {0}.f90 -o {0}.so'.format(f_fpath))
         logging.info(st.stdout)
     else:
         raise RuntimeError("[compile_derivatives_dlib] no source code for derivatives of polynomials with symmetry={} and order={} is detected".format(symmetry, order))

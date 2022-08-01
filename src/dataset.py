@@ -275,12 +275,6 @@ class PolyDataset(Dataset):
 
         self.prepare_poly_lib()
 
-        if self.purify:
-            if self.intramz:
-                raise ValueError("Conflicting options: PURIFY and INTRAMZ")
-
-            self.make_purify_mask(xyz_configs)
-
         #  X: values of polynomials
         # dX: derivatives of polynomials w.r.t. cartesian coordinates
         #  y: values of energies | dipoles
@@ -298,11 +292,14 @@ class PolyDataset(Dataset):
 
             self.dX, self.dy = None, None
 
-        # TODO: create mask explicitly when `purify` and `intramz` options are selected
         if self.purify:
-            assert False
-            self.NPOLY = self.purify_mask.sum()
-            X = X[:, self.purify_mask.astype(np.bool)]
+            if self.intramz:
+                raise ValueError("Conflicting options: PURIFY and INTRAMZ")
+
+            purify_mask = self.make_purify_mask(self.xyz_configs)
+            self.NPOLY = purify_mask.sum()
+            self.X = self.X[:, purify_mask.astype(np.bool)]
+
 
         if self.intramz:
             self.mask = self.X.abs().sum(dim=0).bool().numpy().astype(int)
@@ -404,13 +401,13 @@ class PolyDataset(Dataset):
 
             assert ~np.isnan(np.sum(m)), "There are NaN values in monomials produced by Fortran_evmono"
             assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by Fortran_evpoly"
-            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by Fortran_evpoly"
+            assert np.max(p) < 1e12, "There are suspicious values of polynomials produced by Fortran_evpoly; max(p) = {}".format(np.max(p))
 
         elif POLYNOMIAL_LIB == "CUSTOM":
             self.evpoly(x, p)
 
             assert ~np.isnan(np.sum(p)), "There are NaN values in polynomials produced by C_evpoly"
-            assert np.max(p) < 1e10, "There are suspicious values of polynomials produced by C_evpoly"
+            assert np.max(p) < 1e12, "There are suspicious values of polynomials produced by C_evpoly; max(p) = {}".format(np.max(p))
         else:
             raise ValueError("unreachable")
 
@@ -436,15 +433,16 @@ class PolyDataset(Dataset):
         logging.info("Done.")
 
         X = torch.from_numpy(poly)
-        self.purify_mask = 1 - X.abs().sum(dim=0).bool().numpy().astype(int)
+        purify_mask = 1 - X.abs().sum(dim=0).bool().numpy().astype(int)
         logging.info("Selecting {} purified polynomials out of {} initially...".format(
-            self.purify_mask.sum(), len(self.purify_mask)
+            purify_mask.sum(), len(purify_mask)
         ))
 
         #purify_index = self.purify_mask.nonzero()[0].tolist()
         #logging.info("indices of purified polynomials: {}".format(purify_index))
         #logging.info(json.dumps(purify_index))
 
+        return purify_mask
 
     def prepare_dataset_with_derivatives_from_configs(self):
         logging.info("Preparing interatomic distances and their derivatives.")
@@ -610,7 +608,7 @@ class PolyDataset(Dataset):
     def make_yij(self, xyz_configs, intramz=False, intermz=False):
         """
             intramz: True -> intramolecular distances are set to zero
-                             (interatomic distances between atoms within one monomer)
+                    (interatomic distances between atoms within one monomer)
             intermz: True -> intermolecular distances are set to zero
                     This option is used for basis purification to find polynomials
                     that do not vanish when monomers are infinitely separated.
@@ -623,54 +621,8 @@ class PolyDataset(Dataset):
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")
 
-        if intramz:
-            for n in range(NCONFIGS):
-                c = xyz_configs[n]
-
-                coords = []
-                iter1, iter2 = 0, 0
-                for mapping in self.atom_mapping:
-                    (monomer, z), = mapping.items()
-                    if monomer == 0:
-                        assert c.z1[iter1] == z
-                        coords.append(c.coords1[iter1])
-                        iter1 = iter1 + 1
-                    elif monomer == 1:
-                        assert c.z2[iter2] == z
-                        coords.append(c.coords2[iter2])
-                        iter2 = iter2 + 1
-
-                k = 0
-                for i, j in combinations(range(self.NATOMS), 2):
-                    (monomer_i, _), = self.atom_mapping[i].items()
-                    (monomer_j, _), = self.atom_mapping[j].items()
-
-                    if monomer_i == monomer_j:
-                        yij[n, k] = 0.0
-                    else:
-                        yij[n, k] = np.linalg.norm(coords[i] - coords[j])
-                        yij[n][k] = 1.0 / yij[n, k]**6
-                        #yij[n][k] = np.exp(-yij[n, k] / a0)
-
-                    k = k + 1
-
-            return yij
-
-        if intermz:
-            assert False
-
-            # TODO: get rid of this by introducing the concept of monomer
-            #if i == 0 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H1 N1
-            #if i == 0 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H1 N2
-            #if i == 1 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H2 N1
-            #if i == 1 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H2 N2
-            #if i == 2 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H3 N1
-            #if i == 2 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H3 N2
-            #if i == 3 and j == 4: yij[n, k] = 0.0; k = k + 1; continue; # H4 N1
-            #if i == 3 and j == 5: yij[n, k] = 0.0; k = k + 1; continue; # H4 N2
-            #if i == 4 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N1 C
-            #if i == 5 and j == 6: yij[n, k] = 0.0; k = k + 1; continue; # N2 C
-
+        # Case of one molecule
+        # Fill the whole `y` with Morse-type variables 
         if isinstance(self.xyz_configs[0], XYZConfig):
             for n in range(NCONFIGS):
                 c = xyz_configs[n]
@@ -681,8 +633,46 @@ class PolyDataset(Dataset):
                     yij[n][k] = np.exp(-yij[n, k] / a0)
                     k = k + 1
 
-        if isinstance(xyz_config[0], XYZConfigPair):
-            assert False
+        # Case of molecule pair
+        for n in range(NCONFIGS):
+            c = xyz_configs[n]
+
+            coords = []
+            iter1, iter2 = 0, 0
+            for mapping in self.atom_mapping:
+                (monomer, z), = mapping.items()
+                if monomer == 0:
+                    assert c.z1[iter1] == z
+                    coords.append(c.coords1[iter1])
+                    iter1 = iter1 + 1
+                elif monomer == 1:
+                    assert c.z2[iter2] == z
+                    coords.append(c.coords2[iter2])
+                    iter2 = iter2 + 1
+
+            k = 0
+            for i, j in combinations(range(self.NATOMS), 2):
+                (monomer_i, _), = self.atom_mapping[i].items()
+                (monomer_j, _), = self.atom_mapping[j].items()
+
+                # default behaviour:
+                # [`y` corresponds to the interatomic distance within monomer]      y = exp(-r/a0)
+                # [`y` corresponds to the interatomic distance in-between monomers] y = c/r**6
+                dist = np.linalg.norm(coords[i] - coords[j])
+                if monomer_i == monomer_j:
+                    yij[n, k] = np.exp(-dist / a0)
+                else:
+                    yij[n, k] = 1000.0 / dist**6
+
+                if intramz:
+                    if monomer_i == monomer_j:
+                        yij[n, k] = 0.0
+
+                if intermz:
+                    if monomer_i != monomer_j:
+                        yij[n, k] = 0.0
+
+                k = k + 1
 
         return yij
 
