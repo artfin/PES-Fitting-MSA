@@ -1,3 +1,4 @@
+import collections
 import json
 import logging
 import numpy as np
@@ -71,9 +72,19 @@ def save_json(d, fpath):
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
 def make_dataset_fpaths(cfg_dataset):
+    def flatten(d, parent_key='', sep='_'):
+        items = []
+        for k, v in d.items():
+            new_key = parent_key + sep + k if parent_key else k
+            if isinstance(v, collections.MutableMapping):
+                items.extend(flatten(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
     # keywords to be considered to make a hash
-    keywords = ('SOURCE', 'LOAD_FORCES', 'ENERGY_LIMIT', 'NORMALIZE', 'ANCHOR_POSITIONS', 'ORDER', 'SYMMETRY', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY')
-    d = {kw : cfg_dataset[kw] for kw in keywords}
+    keywords = ('SOURCE', 'LOAD_FORCES', 'ENERGY_LIMIT', 'NORMALIZE', 'ANCHOR_POSITIONS', 'ORDER', 'SYMMETRY', 'VARIABLES', 'PURIFY')
+    d = flatten({kw : cfg_dataset[kw] for kw in keywords})
 
     from hashlib import sha1
     _hash = sha1(repr(sorted(d.items())).encode('utf-8')).hexdigest() # sorting dictionary makes the hash consistent across runs (since dictionary is unordered collection)
@@ -153,7 +164,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
         for file_path in cfg_dataset['SOURCE']:
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
-                                  load_forces=cfg_dataset['LOAD_FORCES'], atom_mapping=cfg_dataset['ATOM_MAPPING'], intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
+                                  load_forces=cfg_dataset['LOAD_FORCES'], atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
             if cfg_dataset['TYPE'] == 'DIPOLE':
                 anchor_pos = tuple(map(int, cfg_dataset['ANCHOR_POSITIONS'].split()))
@@ -231,7 +242,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
     if cfg_dataset['ENERGY_LIMIT'] is not None:
         # TODO:
-        # Don't know if this whole idea is worth using in the future
+        # Don't know if this whole idea of capping the max energy is worthy 
         # Need to look more into this
         assert False
         logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
@@ -257,7 +268,6 @@ def make_dataset(cfg_dataset, dataset_fpaths):
     val_fpath   = dataset_fpaths["val"]
     test_fpath  = dataset_fpaths["test"]
 
-
     dict_pk = dict(
         NATOMS=dataset.NATOMS,
         NMON=dataset.NMON,
@@ -265,7 +275,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         symmetry=cfg_dataset['SYMMETRY'],
         order=cfg_dataset['ORDER'],
         energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        variables=cfg_dataset['VARIABLES'],
         purify=cfg_dataset['PURIFY'],
         X=X_train,
         y=y_train,
@@ -283,7 +293,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         symmetry=cfg_dataset['SYMMETRY'],
         order=cfg_dataset['ORDER'],
         energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        variables=cfg_dataset['VARIABLES'],
         purify=cfg_dataset['PURIFY'],
         X=X_val,
         y=y_val,
@@ -300,7 +310,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         symmetry=cfg_dataset['SYMMETRY'],
         order=cfg_dataset['ORDER'],
         energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'],
+        variables=cfg_dataset['VARIABLES'],
         purify=cfg_dataset['PURIFY'],
         X=X_test,
         y=y_test,

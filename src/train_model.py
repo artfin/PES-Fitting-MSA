@@ -946,9 +946,10 @@ def load_dataset(cfg_dataset, typ):
         # PIP CONSTRUCTION
         ('ORDER',                  KeywordType.KEYWORD_REQUIRED, None),  # `int`  : maximum order of PIPs 
         ('SYMMETRY',               KeywordType.KEYWORD_REQUIRED, None),  # `int`s : permutational symmetry of the molecule | molecular pair
-        ('INTRAMOLECULAR_TO_ZERO', KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use intermolecular basis of PIPs 
+        #('INTRAMOLECULAR_TO_ZERO', KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use intermolecular basis of PIPs 
         ('PURIFY',                 KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
         ('ATOM_MAPPING',           KeywordType.KEYWORD_OPTIONAL, False), # `list` : mapping atoms->monomer (which atom belongs to which monomer)
+        ('VARIABLES' ,             KeywordType.KEYWORD_REQUIRED, None), # `dict` : mapping interatomic distances->polynomial variables 
     ]
 
     from operator import itemgetter
@@ -964,6 +965,10 @@ def load_dataset(cfg_dataset, typ):
     if typ == 'DIPOLE':
         assert 'ANCHOR_POSITIONS' in cfg_dataset
         assert not cfg_dataset['LOAD_FORCES']
+
+    VARIABLES_BLOCK_REQUIRED = ('INTRAMOLECULAR', 'INTERMOLECULAR', 'EXP_LAMBDA')
+    for keyword in VARIABLES_BLOCK_REQUIRED:
+        assert keyword in cfg_dataset['VARIABLES']
 
     cfg_dataset['TYPE'] = typ
 
@@ -991,19 +996,16 @@ def load_dataset(cfg_dataset, typ):
 
     train = PolyDataset.from_pickle(train_fpath)
     assert train.energy_limit == cfg_dataset['ENERGY_LIMIT']
-    assert train.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
     assert train.purify       == cfg_dataset['PURIFY']
     logging.info("Loading training dataset: {}; len: {}".format(train_fpath, len(train.y)))
 
     val   = PolyDataset.from_pickle(val_fpath)
     assert val.energy_limit == cfg_dataset['ENERGY_LIMIT']
-    assert val.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
     assert val.purify       == cfg_dataset['PURIFY']
     logging.info("Loading validation dataset: {}; len: {}".format(val_fpath, len(val.y)))
 
     test  = PolyDataset.from_pickle(test_fpath)
     assert test.energy_limit == cfg_dataset['ENERGY_LIMIT']
-    assert test.intramz      == cfg_dataset['INTRAMOLECULAR_TO_ZERO']
     assert test.purify       == cfg_dataset['PURIFY']
     logging.info("Loading testing dataset: {}; len: {}".format(test_fpath, len(test.y)))
 
