@@ -243,10 +243,10 @@ class PolyDataset(Dataset):
         self.atom_mapping = atom_mapping
         self.purify       = purify
 
-        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', )
+        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'EXP')
         self.intermolecular_variables = variables['INTERMOLECULAR']
 
-        assert variables['INTRAMOLECULAR'] in ('ZERO', )
+        assert variables['INTRAMOLECULAR'] in ('ZERO', 'EXP')
         self.intramolecular_variables = variables['INTRAMOLECULAR']
 
         self.exp_lambda = variables['EXP_LAMBDA']
@@ -300,8 +300,8 @@ class PolyDataset(Dataset):
             self.dX, self.dy = None, None
 
         if self.purify:
-            if self.intramz:
-                raise ValueError("Conflicting options: PURIFY and INTRAMZ")
+            if self.intermolecular_variables == "ZERO":
+                raise RuntimeError("Inconsistent set of options: PURIFY + INTERMOLECULAR_VARIABLES=ZERO")
 
             purify_mask = self.make_purify_mask(self.xyz_configs)
             self.X      = self.X[:, purify_mask.astype(np.bool)]
@@ -425,7 +425,7 @@ class PolyDataset(Dataset):
         # Calculate interatomic distances for each configuration 
         # and zero out intermolecular coordinates 
         logging.info("Preparing interatomic distances.")
-        yij = self.make_yij(xyz_configs, intermz=True)
+        yij = self.make_yij(xyz_configs, intramolecular_variables=self.intramolecular_variables, intermolecular_variables="ZERO")
         logging.info("Done.")
 
         NCONFIGS = len(xyz_configs)
@@ -661,6 +661,8 @@ class PolyDataset(Dataset):
             Y_INTRAMOLECULAR = lambda r: 0.0
         elif intramolecular_variables == "EXP":
             Y_INTRAMOLECULAR = lambda r: np.exp(-r / self.exp_lambda)
+        else:
+            assert False, "Unreachable"
 
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")

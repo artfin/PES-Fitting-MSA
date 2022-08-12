@@ -258,8 +258,8 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X_val, y_val  = X_val[indl], y_val[indl]
 
     #print("Size of training dataset: {}".format(X_train.size()))
-    train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
-    print("Indices of training elements: {}".format(train_index))
+    #train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
+    #print("Indices of training elements: {}".format(train_index))
     #train_index_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train-index.json")
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
