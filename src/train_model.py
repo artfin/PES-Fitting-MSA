@@ -740,7 +740,7 @@ class Training:
                 break
 
         if self.loss_val < self.es.best_score:
-            self.es.save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+            save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
         logging.info("\nReloading best model from the last checkpoint")
 
