@@ -12,8 +12,8 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
+#from pydrive.auth import GoogleAuth
+#from pydrive.drive import GoogleDrive
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1027,12 +1027,6 @@ if __name__ == "__main__":
     cfg_path = os.path.join(MODEL_FOLDER, MODEL_NAME + ".yaml")
     assert os.path.isfile(cfg_path), "YAML configuration file does not exist at {}".format(cfg_path)
 
-    seed_torch()
-    if DEVICE.type == 'cuda':
-        logging.info(torch.cuda.get_device_name(0))
-        logging.info("Memory usage:")
-        logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
-
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
 
@@ -1061,9 +1055,17 @@ if __name__ == "__main__":
     consoleHandler.setFormatter(logFormatter)
     rootLogger.addHandler(consoleHandler)
     rootLogger.setLevel(logging.INFO)
+    
+    seed_torch()
+    if DEVICE.type == 'cuda':
+        logging.info("CUDA Device found: {}".format(torch.cuda.get_device_name(0)))
+        logging.info("Memory usage:")
+        logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
+    else:
+        assert False
 
     import psutil
-    print("Memory at the very start: ", psutil.virtual_memory())
+    logging.info("[psutil] Memory status: \n {}".format(psutil.virtual_memory()))
 
     assert 'TYPE' in cfg
     typ = cfg['TYPE']
