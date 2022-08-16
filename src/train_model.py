@@ -1055,14 +1055,14 @@ if __name__ == "__main__":
     consoleHandler.setFormatter(logFormatter)
     rootLogger.addHandler(consoleHandler)
     rootLogger.setLevel(logging.INFO)
-    
+
     seed_torch()
     if DEVICE.type == 'cuda':
         logging.info("CUDA Device found: {}".format(torch.cuda.get_device_name(0)))
         logging.info("Memory usage:")
         logging.info("Allocated: {} GB".format(round(torch.cuda.memory_allocated(0)/1024**3, 1)))
     else:
-        assert False
+        logging.info("No CUDA Device Found. Using CPU")
 
     import psutil
     logging.info("[psutil] Memory status: \n {}".format(psutil.virtual_memory()))

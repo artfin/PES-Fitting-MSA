@@ -126,7 +126,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
         dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=cfg_dataset['SOURCE'][0],
                               order=cfg_dataset['ORDER'], load_forces=True, symmetry=cfg_dataset['SYMMETRY'],
-                              intramz=cfg_dataset['INTRAMOLECULAR_TO_ZERO'], purify=cfg_dataset['PURIFY'])
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
         NCONFIGS = dataset.X.size()[0]
         indices = list(range(NCONFIGS))

@@ -199,10 +199,12 @@ def write_xyz(xyz_path, xyz_configs, prop={"energy", "dipole"}):
 
     with open(xyz_path, mode='w') as fd:
         for xyz_config in xyz_configs:
+            charges = xyz_config.z.flatten().astype(dtype=np.int)
+
             fd.write("    {}\n".format(natoms))
             fd.write("    {:.10f}\n".format(xyz_config.energy))
             for k in range(natoms):
-                charge = xyz_config.z[k]
+                charge = charges[k]
                 symbol = SYMBOLS[charge - 1]
                 fd.write("{} \t {:.10f} \t {:.10f} \t {:.10f}\n".format(symbol, xyz_config.coords[k, 0], xyz_config.coords[k, 1], xyz_config.coords[k, 2]))
 
@@ -243,7 +245,7 @@ class PolyDataset(Dataset):
         self.atom_mapping = atom_mapping
         self.purify       = purify
 
-        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'EXP')
+        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'EXP', 'None')
         self.intermolecular_variables = variables['INTERMOLECULAR']
 
         assert variables['INTRAMOLECULAR'] in ('ZERO', 'EXP')
@@ -308,6 +310,17 @@ class PolyDataset(Dataset):
 
             self.NPOLY = purify_mask.sum()
 
+            stub = '_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
+            basis_file = os.path.join(self.wdir, 'MOL' + stub + '.BAS')
+
+            from genproc import load_polynomials_from_bas, save_polynomials_to_bas
+            poly = load_polynomials_from_bas(basis_file)
+
+            nonzero_index = purify_mask.nonzero()[0].tolist()
+            poly_masked = [poly[k] for k in nonzero_index]
+            basis_file_masked = os.path.join(self.wdir, 'MOL' + stub + '_purify.BAS')
+            save_polynomials_to_bas(basis_file_masked, poly_masked)
+            logging.info("Saving .BAS file for the basis set to: {}".format(basis_file_masked))
 
         if self.intramolecular_variables == "ZERO":
             self.mask = self.X.abs().sum(dim=0).bool().numpy().astype(int)
@@ -454,8 +467,8 @@ class PolyDataset(Dataset):
 
     def prepare_dataset_with_derivatives_from_configs(self):
         logging.info("Preparing interatomic distances and their derivatives.")
-        yij  = self.make_yij(self.xyz_configs, intramz=self.intramz, intermz=False)
-        drdx = self.make_drdx(self.xyz_configs, intramz=self.intramz, intermz=False)
+        yij = self.make_yij(self.xyz_configs, intermolecular_variables=self.intermolecular_variables, intramolecular_variables=self.intramolecular_variables)
+        drdx = self.make_drdx(self.xyz_configs, intermolecular_variables=self.intermolecular_variables, intramolecular_variables=self.intramolecular_variables)
         logging.info("Done.")
 
         NCONFIGS = len(self.xyz_configs)
@@ -492,7 +505,7 @@ class PolyDataset(Dataset):
 
             for n in range(0, NCONFIGS):
                 _yij  = yij[n, :].copy()
-                _dydr = -1.0 / a0 * np.diag(_yij)
+                _dydr = -1.0 / self.exp_lambda * np.diag(_yij)
                 _drdx = drdx[n, :, :].copy()
 
                 self.evpoly(_yij, p)
@@ -586,48 +599,68 @@ class PolyDataset(Dataset):
     def __len__(self):
         return len(self.y)
 
-    def make_drdx(self, xyz_configs, intramz=False, intermz=False):
+    def make_drdx(self, xyz_configs, intermolecular_variables=None, intramolecular_variables=None):
         NCONFIGS = len(xyz_configs)
         drdx = np.zeros((NCONFIGS, self.NATOMS * 3, self.NDIS), order="F")
 
-        k = 1
-        for n in range(NCONFIGS):
-            c = xyz_configs[n]
+        # Case of one molecule
+        if isinstance(self.xyz_configs[0], XYZConfig):
+            for n in range(NCONFIGS):
+                c = xyz_configs[n]
 
-            k = 0
-            for i, j in combinations(range(self.NATOMS), 2):
-                if intramz:
-                    assert False
+                k = 0
+                for i, j in combinations(range(self.NATOMS), 2):
+                    dr      = c.coords[i] - c.coords[j]
+                    dr_norm = np.linalg.norm(dr)
 
-                if intermz:
-                    assert False
+                    drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
+                    drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
 
-                dr      = c.coords[i] - c.coords[j]
-                dr_norm = np.linalg.norm(dr)
+                    k = k + 1
 
-                drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
-                drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
+            return drdx
 
-                k = k + 1
+        # 15/08 probably wouldn't be needed for quite some time though
+        assert False, "Implement calculation of `drdx` for the molecule pair"
+
+        #for n in range(NCONFIGS):
+        #    c = xyz_configs[n]
+
+        #    k = 0
+        #    for i, j in combinations(range(self.NATOMS), 2):
+        #        if intramz:
+        #            assert False
+
+        #        if intermz:
+        #            assert False
+
+        #        dr      = c.coords[i] - c.coords[j]
+        #        dr_norm = np.linalg.norm(dr)
+
+        #        drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
+        #        drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
+
+        #        k = k + 1
 
         return drdx
 
 
     def make_yij(self, xyz_configs, intermolecular_variables=None, intramolecular_variables=None):
         """
-        intermolecular_variables: (ZERO, SWITCH-EXP6) = interatomic distances between atoms within one monomer
-            ZERO        => intramolecular distances are set to zero
-            SWITCH-EXP6 => smooth switch between exponent and R^(-6)
-        intramolecular_variables: (ZERO, EXP)
-            ZERO => intermolecular distances are set to zero
-                This option is used for basis purification to find polynomials
+        intermolecular_variables: (ZERO, SWITCH-EXP6)
+            None => there is no intermolecular variables (we deal with a separate molecule)
+            ZERO => intramolecular variables are set to zero
+                This option is used for basis purification to separate out polynomials
                 that do not vanish when monomers are infinitely separated
+            SWITCH-EXP6 => smooth switch between exponent and R^(-6)
+        intramolecular_variables: (ZERO, EXP) = interatomic distances between atoms within one monomer
+            ZERO => intramolecular distances are set to zero
             EXP  => [default] morse-like dependence
 
         13/08/22
-        The following strategy is considered to be the best: 
-            `y` corresponds to the interatomic distance within monomer       =>  y = exp(-r/a0)
-            `y` corresponds to the interatomic distance in-between monomers  =>  y = SWITCH_FUNCTION(exp(-r/a0) -> c/r**6)
+        The following strategy is considered to be the best:
+            intramolecular variable => y = exp(-r/a0)
+            intermolecular variable => y = SWITCH_FUNCTION(exp(-r/a0) -> c/r**6)
         """
 
         def switch(x):
@@ -650,7 +683,9 @@ class PolyDataset(Dataset):
         logging.info(" INTERMOLECULAR COORDINATES = {}".format(intermolecular_variables))
         logging.info(" INTRAMOLECULAR COORDINATES = {}".format(intramolecular_variables))
 
-        if intermolecular_variables == "ZERO":
+        if intermolecular_variables == "None":
+            Y_INTERMOLECULAR = None
+        elif intermolecular_variables == "ZERO":
             Y_INTERMOLECULAR = lambda r: 0.0
         elif intermolecular_variables == "SWITCH-EXP6":
             Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e4 / r**6
@@ -675,7 +710,7 @@ class PolyDataset(Dataset):
                 k = 0
                 for i, j in combinations(range(self.NATOMS), 2):
                     r = np.linalg.norm(c.coords[i] - c.coords[j])
-                    yij[n, k] = Y_INTERMOLECULAR(r)
+                    yij[n, k] = Y_INTRAMOLECULAR(r)
                     k = k + 1
 
             # early return!

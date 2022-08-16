@@ -127,25 +127,26 @@ def load_published():
     return data[:,1], data[:,2]
 
 def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, ylim, ylocators, figpath=None, add_reference_pes=True):
-    error_train = (train.y - evaluator(train.X)).detach().numpy()
-    error_val   = (val.y - evaluator(val.X)).detach().numpy()
-    error_test  = (test.y - evaluator(test.X)).detach().numpy()
+    error_train = (train.y - evaluator.energy(train.X)).detach().numpy()
+    error_val   = (val.y   - evaluator.energy(val.X)).detach().numpy()
+    error_test  = (test.y  - evaluator.energy(test.X)).detach().numpy()
 
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)
 
+    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
+    #plt.scatter(val.y, error_val, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
+    #plt.scatter(test.y, error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
+    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
+    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
+
     if add_reference_pes:
         calc, published_fit = load_published()
         published_abs_error = calc - published_fit
-        plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=1.0, label='Symmetry-adapted angular basis')
+        plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color='#CFBFF7', lw=1.0, label='Symmetry-adapted angular basis', zorder=5)
 
-    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
-    plt.scatter(val.y, error_val, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
-    plt.scatter(test.y, error_test, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0)
-    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
-    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
-
-    plt.xlim((0.0, EMAX))
+    EMIN = min(train.y)
+    plt.xlim((EMIN, EMAX))
     plt.ylim(ylim)
 
     plt.xlabel(r"Energy, cm$^{-1}$")
@@ -200,31 +201,18 @@ def timeit_model(model, X):
     logging.info("Execution time per point: {} mcs".format(point_t * 1e6))
 
 
-def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim, ylocators, figpath=None):
-    wdir = "datasets/external"
-
-    known_options = ('ORDER', 'SYMMETRY', 'TYPE', 'INTRAMOLECULAR_TO_ZERO', 'PURIFY', 'NORMALIZE', 'ENERGY_LIMIT')
-    for option in cfg_dataset.keys():
-        assert option in known_options, "Unknown option: {}".format(option)
-
-    order        = cfg_dataset['ORDER']
-    symmetry     = cfg_dataset['SYMMETRY']
-    typ          = cfg_dataset['TYPE'].lower()
-    intramz      = cfg_dataset.get('INTRAMOLECULAR_TO_ZERO', False)
-    purify       = cfg_dataset.get('PURIFY', False)
-
-    assert order in (3, 4, 5)
-    assert typ in ('rigid', 'nonrigid', 'nonrigid-clip')
-
+def plot_errors_for_files(cfg_dataset, evaluator, EMAX, labels, ylim, ylocators, figpath=None):
     res_blocks = []
     c_rmse = 0.0
     c_points = 0.0
 
-    for block in xyz_paths:
-        pd = PolyDataset(wdir=wdir, xyz_file=block["xyz_path"], limit_file=block["limits_path"], order=order,
-                         symmetry=symmetry, intramz=intramz, purify=purify)
+    file_paths = cfg_dataset['SOURCE']
 
-        intermol_energy = evaluator(pd.X)
+    for file_path in file_paths:
+        pd = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
+                         load_forces=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+        intermol_energy = evaluator.energy(pd.X)
         error = (pd.y - intermol_energy).detach().numpy()
 
         ind = (pd.y < EMAX).nonzero()[:,0]
@@ -236,7 +224,7 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
         c_rmse += _rmse.item() * ys.size()[0]
         c_points += ys.size()[0]
 
-        logging.info("[< {:.0f} cm-1] file: {}; RMSE: {:.3f}".format(EMAX, block["xyz_path"], _rmse))
+        logging.info("[< {:.0f} cm-1] file: {}; RMSE: {:.3f}".format(EMAX, file_path, _rmse))
 
         r = np.hstack((intermol_energy, error))
         res_blocks.append(r)
@@ -252,7 +240,7 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
 
     for res_block, color, label in zip(res_blocks, colors, labels):
         ind = res_block[:,0] < EMAX
-        plt.scatter(res_block[:,0][ind], res_block[:,1][ind], s=20.0, color=color, facecolor='none', lw=1.0, 
+        plt.scatter(res_block[:,0][ind], res_block[:,1][ind], s=20.0, color=color, facecolor='none', lw=1.0,
                     label=label, zorder=zorder)
         zorder = zorder - 1
 
@@ -265,11 +253,9 @@ def plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, EMAX, labels, ylim,
     if np.isclose(EMAX, 2000.0):
         ax.xaxis.set_major_locator(plt.MultipleLocator(500.0))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(100.0))
-    elif np.isclose(EMAX, 10000.0):
+    else: #np.isclose(EMAX, 10000.0):
         ax.xaxis.set_major_locator(plt.MultipleLocator(2000.0))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1000.0))
-    else:
-        raise NotImplementedError
 
     ax.yaxis.set_major_locator(plt.MultipleLocator(ylocators[0]))
     ax.yaxis.set_minor_locator(plt.MultipleLocator(ylocators[1]))
@@ -440,9 +426,12 @@ if __name__ == '__main__':
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
     if args.energy_overview:
-        train, val, test = load_dataset(cfg_dataset)
+        train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
 
         model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
+
+        #plot_errors_for_files(cfg_dataset, evaluator, ["test.npz"], args.EMAX, labels=None, ylim=None, ylocators=None, figpath=None)
+        #assert False
 
         ylim      = (-50.0, 50.0)
         ylocators = (10.0, 5.0)
@@ -462,11 +451,6 @@ if __name__ == '__main__':
         model_evaluation_forces(evaluator, train, val, test, args.EMAX)
 
     if args.ch4_overview:
-        assert cfg_dataset['TYPE'] == 'NONRIGID'
-
-        from make_dataset import RAW_DATASET_PATHS
-        xyz_paths = RAW_DATASET_PATHS["NONRIGID"]
-
         ylim      = (-20.0, 20.0)
         ylocators = (5.0, 1.0)
 
@@ -474,7 +458,7 @@ if __name__ == '__main__':
 
         overview_png = None
         if args.save:
-            overview_png = os.path.join(MODEL_FOLDER, MODEL + "-ch4-overview.png")
+            overview_png = os.path.join(MODEL_FOLDER, MODEL_NAME + "-ch4-overview.png")
             logging.info("overview_png: {}".format(overview_png))
 
-        plot_errors_for_files(cfg_dataset, evaluator, xyz_paths, args.EMAX, labels, ylim, ylocators, figpath=overview_png)
+        plot_errors_for_files(cfg_dataset, evaluator, args.EMAX, labels, ylim, ylocators, figpath=overview_png)
