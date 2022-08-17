@@ -24,7 +24,9 @@ KCALTOCM  = 349.757
 #POLYNOMIAL_LIB = "MSA"
 POLYNOMIAL_LIB = "CUSTOM"
 
-SYMBOLS = ('H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F',)
+SYMBOLS = ('H', 'He',\
+           'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',\
+           'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar')
 
 # Optional actually means that variable is either T or None
 # so to make optional you have to specify None as default value
@@ -726,12 +728,18 @@ class PolyDataset(Dataset):
                 (monomer, z), = mapping.items()
                 if monomer == 0:
                     assert c.z1[iter1] == z
+                    assert isinstance(c.coords1[iter1], np.ndarray), "c.coords1: {}".format(c.coords1)
+
                     coords.append(c.coords1[iter1])
                     iter1 = iter1 + 1
                 elif monomer == 1:
                     assert c.z2[iter2] == z
+                    assert isinstance(c.coords2[iter2], np.ndarray), "c.coords2: {}".format(c.coords2)
+
                     coords.append(c.coords2[iter2])
                     iter2 = iter2 + 1
+
+            assert len(coords) == self.NATOMS
 
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):

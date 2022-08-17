@@ -28,6 +28,7 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 PRINT_TRAINING_STEPS = 1
+PRINT_PRECISION      = 3
 
 def seed_torch(seed=42):
     random.seed(seed)
@@ -223,9 +224,6 @@ class WMSELoss_Ratio(torch.nn.Module):
         # descale energies
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
-
-        #print("yd: {}".format(yd))
-        #print("yd_pred: {}".format(yd_pred))
 
         #ydnp = yd.detach().numpy()
         #yd_prednp = yd_pred.detach().numpy()
@@ -456,8 +454,8 @@ class EarlyStopping:
                 self.status = True
 
         if epoch % PRINT_TRAINING_STEPS == 0:
-            logging.info("(Early Stopping) Best validation RMSE: {:.2f}; current validation RMSE: {:.2f}".format(self.best_score, score))
-            logging.info("(Early Stopping) ES counter: {}; ES patience: {}".format(self.counter, self.patience))
+            logging.info("(Early Stopping) Best validation RMSE: {1:.{0}f}; current validation RMSE: {2:.{0}f}".format(PRINT_PRECISION, self.best_score, score))
+            logging.info("(Early Stopping) counter: {}; patience: {}; tolerance: {}".format(self.counter, self.patience, self.tol))
 
 
 def count_params(model):
@@ -740,7 +738,7 @@ class Training:
                 break
 
         if self.loss_val < self.es.best_score:
-            save_checkpoint(self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+            save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
 
         logging.info("\nReloading best model from the last checkpoint")
 
@@ -841,7 +839,7 @@ class Training:
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
-            logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(epoch, loss_train, loss_val))
+            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
             self.writer.add_scalar("loss/train", loss_train, epoch)
             self.writer.add_scalar("loss/val", loss_val, epoch)
@@ -870,9 +868,9 @@ class Training:
             loss_test_e, loss_test_f = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
             logging.info("Model evaluation after training:")
-            logging.info("Train      loss: {:.2f} cm-1; force loss: {:.2f} cm-1/bohr".format(loss_train_e, loss_train_f))
-            logging.info("Validation loss: {:.2f} cm-1; force loss: {:.2f} cm-1/bohr".format(loss_val_e, loss_val_f))
-            logging.info("Test       loss: {:.2f} cm-1; force loss: {:.2f} cm-1/bohr".format(loss_test_e, loss_test_f))
+            logging.info("Train      loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_f))
+            logging.info("Validation loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_f))
+            logging.info("Test       loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_f))
         else:
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
@@ -887,9 +885,9 @@ class Training:
                 loss_test  = self.loss_fn(self.test.y, pred_test)
 
             logging.info("Model evaluation after training:")
-            logging.info("Train      loss: {:.2f} cm-1".format(loss_train))
-            logging.info("Validation loss: {:.2f} cm-1".format(loss_val))
-            logging.info("Test       loss: {:.2f} cm-1".format(loss_test))
+            logging.info("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
+            logging.info("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
+            logging.info("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
 
 def setup_google_folder():
     assert os.path.exists('client_secrets.json')
@@ -916,7 +914,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
@@ -1029,6 +1027,9 @@ if __name__ == "__main__":
 
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
+
+    if 'PRINT_PRECISION' in cfg:
+        PRINT_PRECISION = cfg['PRINT_PRECISION'] 
 
     if args.log_name is not None:
         log_path = os.path.join(MODEL_FOLDER, args.log_name + ".log")
