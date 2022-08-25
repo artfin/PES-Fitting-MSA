@@ -1,6 +1,8 @@
 #ifndef MLP_H
 #define MLP_H 
 
+#include <mutex>
+
 #include "scaler.hpp"
 
 // https://github.com/rogersce/cnpy
@@ -325,7 +327,13 @@ StandardScaler build_scaler(cnpy::npz_t& npz, std::string const& scaler_type) {
 }
 
 MLPModel build_model_from_npz(std::string const& npz_fname)
+/*
+ * use mutex to make it thread-safe
+ */
 {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
     cnpy::npz_t npz = cnpy::npz_load(npz_fname);
 
     std::map<std::string, cnpy::NpyArray>::iterator it; 
