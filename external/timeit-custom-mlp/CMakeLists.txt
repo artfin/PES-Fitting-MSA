@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
-project(mynn LANGUAGES Fortran C CXX)
+
+# see https://stackoverflow.com/questions/45933732/how-to-specify-a-compiler-in-cmake
+# compilers should be set BEFORE a call to `project` which looks for a default compiler executable
+set(CMAKE_C_COMPILER "/share/apps/tools/gcc/9.2.0/bin/gcc")
+set(CMAKE_CXX_COMPILER "/share/apps/tools/gcc/9.2.0/bin/g++")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+project(mynn LANGUAGES C CXX)
 
 find_package(MPI REQUIRED)
 if (MPI_FOUND)
@@ -14,12 +20,12 @@ endif()
 
 find_package(Eigen3 REQUIRED CONFIG)
 find_package(ZLIB REQUIRED)
-find_package(GSL REQUIRED)
+#find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
 
-#set(CMAKE_CXX_FLAGS "-O2 -ggdb")
-set(CMAKE_CXX_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
-set(CMAKE_C_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
+set(CMAKE_CXX_FLAGS "-O2 -ggdb")
+#set(CMAKE_CXX_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
+#set(CMAKE_C_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
 
 add_executable(
     ch4-n2-nonrigid.exe 
@@ -95,8 +101,8 @@ add_executable(
     c_jac_2_1_4_purify.h
 )
 
-target_link_libraries(ch4-n2-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} GSL::gsl GSL::gslcblas)
-target_link_libraries(ch4-n2-rigid.exe     PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} GSL::gsl GSL::gslcblas)
-target_link_libraries(ethanol.exe          PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} GSL::gsl GSL::gslcblas)
-target_link_libraries(n2-ar-nonrigid.exe   PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} GSL::gsl GSL::gslcblas)
-target_link_libraries(n2-ar-svc.exe        PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} GSL::gsl GSL::gslcblas ${MPI_CXX_LIBRARIES})
+target_link_libraries(ch4-n2-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(ch4-n2-rigid.exe     PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(ethanol.exe          PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(n2-ar-nonrigid.exe   PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(n2-ar-svc.exe        PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})

@@ -161,7 +161,7 @@ double sample_N2(double T)
 static double ensemble[NWALKERS][DIM];
 
 #define BURNIN_LEN 10000
-#define MAX_NPOINTS 500000
+#define MAX_NPOINTS 50000000
 #define THINNING 100
     
 static std::random_device rd;
@@ -273,17 +273,19 @@ void mixed_ensemble_nonrigid_svc() {
     double Tref[] = {510.0, 410.0, 310.0, 210.0, 160.0, 130.0, 110.0};
     int NTR = ARR_LEN(Tref);
 
-    //double TT[] = {100.0, 200.0};
     double TT[] = {100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 
                           210.0, 220.0, 230.0, 240.0, 250.0, 260.0, 270.0, 280.0, 290.0, 300.0,
                           310.0, 320.0, 330.0, 340.0, 350.0, 360.0, 370.0, 380.0, 390.0, 400.0, 
                           410.0, 420.0, 430.0, 440.0, 450.0, 460.0, 470.0, 480.0, 490.0, 500.0};
     int NT = ARR_LEN(TT);
         
-    double f[NT]     = {0.0};
-    double f2[NT]    = {0.0};
-    double nstar[NT] = {0};
-    
+    double f[NT];
+    double f2[NT];
+    double nstar[NT];
+    memset(f, 0, NT * sizeof(double));
+    memset(f2, 0, NT * sizeof(double));
+    memset(nstar, 0, NT * sizeof(double));
+ 
     std::vector<double> x(9);
 
     for (int l = 0; l < NTR; ++l) {
@@ -347,9 +349,12 @@ void mixed_ensemble_nonrigid_svc() {
             printf("Tref = %.2f done. [0] Collected %d points.\n", Tref[l], acc);
         }
 
-        double f_t[NT]     = {0};
-        double f2_t[NT]    = {0};
-        double nstar_t[NT] = {0};
+        double f_t[NT];
+        double f2_t[NT];
+        double nstar_t[NT];
+        memset(f_t, 0, NT * sizeof(double));
+        memset(f2_t, 0, NT * sizeof(double));
+        memset(nstar_t, 0, NT * sizeof(double));
 
         for (int j = 0; j < NT; ++j) {
             f_t[j]     = f[j] *  V / 2.0 * AVOGADRO * 1e6;
@@ -357,9 +362,12 @@ void mixed_ensemble_nonrigid_svc() {
             nstar_t[j] = nstar[j];
         }
         
-        double f_t_root[NT] = {0};
-        double f2_t_root[NT] = {0};
-        double nstar_t_root[NT] = {0};
+        double f_t_root[NT];
+        double f2_t_root[NT];
+        double nstar_t_root[NT];
+        memset(f_t_root, 0, NT * sizeof(double));
+        memset(f2_t_root, 0, NT * sizeof(double));
+        memset(nstar_t_root, 0, NT * sizeof(double));
 
         MPI_Reduce(f_t,     f_t_root,     NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(f2_t,    f2_t_root,    NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -376,9 +384,12 @@ void mixed_ensemble_nonrigid_svc() {
         }
     }
 
-    double f_root[NT]     = {0};
-    double f2_root[NT]    = {0};
-    double nstar_root[NT] = {0};
+    double f_root[NT];
+    double f2_root[NT];
+    double nstar_root[NT];
+    memset(f_root, 0, NT * sizeof(double));
+    memset(f2_root, 0, NT * sizeof(double));
+    memset(nstar_root, 0, NT * sizeof(double));
 
     MPI_Reduce(f,     f_root,     NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(f2,    f2_root,    NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -460,7 +471,7 @@ void plain_mc_rigid_svc() {
     int NPOINTS = 250000;
     double RMAX_INT = 40.0; 
     
-    int NT = 3;
+    const int NT = 3;
     double TT[NT] = {100.0, 200.0, 300.0};
 
     double f[NT]  = {0.0};
