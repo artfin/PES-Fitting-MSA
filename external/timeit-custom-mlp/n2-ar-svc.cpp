@@ -1,7 +1,5 @@
 #include <mpi.h>
 
-#include <iostream>
-#include <iomanip>
 #include <cassert>
 #include <chrono>
 #include <vector>
@@ -161,7 +159,7 @@ double sample_N2(double T)
 static double ensemble[NWALKERS][DIM];
 
 #define BURNIN_LEN 10000
-#define MAX_NPOINTS 50000000
+#define MAX_NPOINTS 5000
 #define THINNING 100
     
 static std::random_device rd;
@@ -261,14 +259,9 @@ void mixed_ensemble_nonrigid_svc() {
 
     auto model = build_model_from_npz("models/n2-ar-nonrigid-18-32-1.npz");
     double INFVAL = internal_pes_n2_ar(model, 1000.0, 0.0, 2.078); 
-    double Vmin = -97.282; // cm-1, approximate min of PES
 
     double RMAX_INT = 40.0;
     double V = 4.0 / 3.0 * M_PI * RMAX_INT * RMAX_INT * RMAX_INT * ALU3;
-    
-    for (int k = 0; k < NWALKERS; ++k) {
-        generate_initial_geom(ensemble[k]);
-    }
     
     double Tref[] = {510.0, 410.0, 310.0, 210.0, 160.0, 130.0, 110.0};
     int NTR = ARR_LEN(Tref);
@@ -410,18 +403,21 @@ void mixed_ensemble_nonrigid_svc() {
     }
 }
 
-void mixed_mc_nonrigid_svc()
-{
+void mixed_mc_nonrigid_svc() {
     auto model = build_model_from_npz("models/n2-ar-nonrigid-18-32-1.npz");
     double INFVAL = internal_pes_n2_ar(model, 1000.0, 0.0, 2.078); 
 
     std::vector<double> x(9);
     double RMAX_INT = 40.0; 
+    
+    int NPOINTS = 1000000;
 
     double svc = 0.0;
     double TT = 200.0;
-    
-    for (int k = 0; k < MAX_NPOINTS; ++k) {
+   
+    FILE* fd = fopen("nn.txt", "w");
+
+    for (int k = 0; k < NPOINTS; ++k) {
         double R3 = uni_distr(gen) * RMAX_INT * RMAX_INT * RMAX_INT; 
         double R  = pow(R3, 1.0/3.0);
         
@@ -445,15 +441,20 @@ void mixed_mc_nonrigid_svc()
         double en    = model.forward(x) - INFVAL;
         double en_N2 = pot_N2(l_N2);
 
-        //printf("en: %.6f; en_N2: %.6f\n", en, en_N2);
+        {
+            static std::mutex mutex;
+            std::lock_guard<std::mutex> lock(mutex);
+            fprintf(fd, "%.6f %.6f\n", l_N2, en_N2);
+        }
 
         svc += (1.0 - exp(-en * VkT / TT)); 
     }
     
     double V = 4.0 / 3.0 * M_PI * RMAX_INT * RMAX_INT * RMAX_INT * ALU3;
-    svc *= V / 2.0 * AVOGADRO * 1e6 / MAX_NPOINTS;
+    svc *= V / 2.0 * AVOGADRO * 1e6 / NPOINTS;
    
-    printf("  (npoints=%d) svc = %.6f\n", MAX_NPOINTS, svc); 
+    printf("  (npoints=%d) svc = %.6f\n", NPOINTS, svc);
+    fclose(fd); 
 }
 
 void plain_mc_rigid_svc() {
@@ -468,11 +469,14 @@ void plain_mc_rigid_svc() {
     double INFVAL = internal_pes_n2_ar(model, 1000.0, 0.0, l_N2); 
 
     std::vector<double> x(9);
-    int NPOINTS = 250000;
+    int NPOINTS = 2000000000;
     double RMAX_INT = 40.0; 
     
-    const int NT = 3;
-    double TT[NT] = {100.0, 200.0, 300.0};
+    double TT[] = {100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 
+                          210.0, 220.0, 230.0, 240.0, 250.0, 260.0, 270.0, 280.0, 290.0, 300.0,
+                          310.0, 320.0, 330.0, 340.0, 350.0, 360.0, 370.0, 380.0, 390.0, 400.0, 
+                          410.0, 420.0, 430.0, 440.0, 450.0, 460.0, 470.0, 480.0, 490.0, 500.0};
+    int NT = ARR_LEN(TT);
 
     double f[NT]  = {0.0};
     double f2[NT] = {0.0};
@@ -538,7 +542,8 @@ int main(int argc, char* argv[])
     MPI_Init(&argc, &argv);
 
     //plain_mc_rigid_svc();
-    mixed_ensemble_nonrigid_svc();
+    mixed_mc_nonrigid_svc();
+    //mixed_ensemble_nonrigid_svc();
     
     MPI_Finalize();
     

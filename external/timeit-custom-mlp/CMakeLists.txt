@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-project(mynn LANGUAGES C CXX)
+project(mynn LANGUAGES C CXX Fortran)
 
 find_package(MPI REQUIRED)
 if (MPI_FOUND)
@@ -23,9 +23,12 @@ find_package(ZLIB REQUIRED)
 #find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
 
+set(CMAKE_C_FLAGS "-O2")
+set(CMAKE_Fortran_FLAGS "-Ofast -march=native")
 set(CMAKE_CXX_FLAGS "-O2 -ggdb")
 #set(CMAKE_CXX_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
 #set(CMAKE_C_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
+
 
 add_executable(
     ch4-n2-nonrigid.exe 
@@ -101,8 +104,24 @@ add_executable(
     c_jac_2_1_4_purify.h
 )
 
-target_link_libraries(ch4-n2-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
-target_link_libraries(ch4-n2-rigid.exe     PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
-target_link_libraries(ethanol.exe          PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
-target_link_libraries(n2-ar-nonrigid.exe   PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
-target_link_libraries(n2-ar-svc.exe        PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
+add_executable(
+    ch4-n2-svc.exe
+    ch4-n2-svc.cpp
+    ../pes/xy4.f90
+    cnpy.h
+    cnpy.cpp
+    mlp.hpp
+    scaler.hpp
+    scaler.cpp
+    c_basis_4_2_1_4_purify.h
+    c_basis_4_2_1_4_purify.cc
+    c_jac_4_2_1_4_purify.h
+    c_jac_4_2_1_4_purify.cc
+)
+
+target_link_libraries(ch4-n2-nonrigid.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(ch4-n2-rigid.exe    PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(ethanol.exe         PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(n2-ar-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(n2-ar-svc.exe       PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
+target_link_libraries(ch4-n2-svc.exe      PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
