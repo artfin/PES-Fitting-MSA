@@ -1,6 +1,7 @@
 #include <mpi.h>
 
 #include <cassert>
+#include <cstdint>
 #include <chrono>
 #include <vector>
 #include <random>
@@ -159,7 +160,7 @@ double sample_N2(double T)
 static double ensemble[NWALKERS][DIM];
 
 #define BURNIN_LEN 10000
-#define MAX_NPOINTS 5000
+#define MAX_NPOINTS 250000000
 #define THINNING 100
     
 static std::random_device rd;
@@ -294,10 +295,10 @@ void mixed_ensemble_nonrigid_svc() {
             printf("      acceptance rate: %f\n", acc_rate);
         }
 
-        int acc = 0; 
+        uint64_t acc = 0; 
         double en;
 
-        for (int i = 0; acc < MAX_NPOINTS; i++) {
+        for (uint64_t i = 0; acc < MAX_NPOINTS; i++) {
             make_ensemble_step(Tref[l]); 
 
             if (i % THINNING == 0) {
@@ -469,7 +470,7 @@ void plain_mc_rigid_svc() {
     double INFVAL = internal_pes_n2_ar(model, 1000.0, 0.0, l_N2); 
 
     std::vector<double> x(9);
-    int NPOINTS = 2000000000;
+    uint64_t NPOINTS = 500000000; 
     double RMAX_INT = 40.0; 
     
     double TT[] = {100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 
@@ -481,7 +482,7 @@ void plain_mc_rigid_svc() {
     double f[NT]  = {0.0};
     double f2[NT] = {0.0};
 
-    for (int k = 0; k < NPOINTS; ++k) {
+    for (uint64_t k = 0; k < NPOINTS; ++k) {
         double R3 = uni_distr(gen) * RMAX_INT * RMAX_INT * RMAX_INT; 
         double R  = pow(R3, 1.0/3.0);
         
@@ -519,20 +520,22 @@ void plain_mc_rigid_svc() {
         f2[j] *= (V / 2.0 * AVOGADRO * 1e6) * (V / 2.0 * AVOGADRO * 1e6) / NPOINTS;
     }
 
-    MPI_Allreduce(MPI_IN_PLACE, &f,  NT, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, &f2, NT, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    double f_root[NT] = {0};
+    double f2_root[NT] = {0};
+    MPI_Reduce(f,  f_root,  NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(f2, f2_root, NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (world_rank == 0) {
-        int npoints_total = NPOINTS * world_size; 
-        printf("  (npoints=%d)\n", npoints_total);
+        uint64_t npoints_total = NPOINTS * world_size; 
+        printf("  (npoints=%lu)\n", npoints_total);
 
         double sigma;
         for (int j = 0; j < NT; ++j) {
-            f[j]  /= world_size;
-            f2[j] /= world_size;
+            f_root[j]  /= world_size;
+            f2_root[j] /= world_size;
             
-            sigma = sqrt((f2[j] - f[j]*f[j]) / (npoints_total - 1));
-            printf("> T = %.2f: svc = %.6f +- %.6f\n", TT[j], f[j], sigma);
+            sigma = sqrt((f2_root[j] - f_root[j]*f_root[j]) / (npoints_total - 1));
+            printf("> T = %.2f: svc = %.6f +- %.6f\n", TT[j], f_root[j], sigma);
         } 
     }
 }
