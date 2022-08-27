@@ -11,7 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(mynn LANGUAGES C CXX Fortran)
 
-find_package(MPI REQUIRED)
+find_package(MPI REQUIRED COMPONENTS C CXX)
 if (MPI_FOUND)
     include_directories(${MPI_INCLUDE_PATH})
 else()
@@ -124,4 +124,4 @@ target_link_libraries(ch4-n2-rigid.exe    PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES
 target_link_libraries(ethanol.exe         PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(n2-ar-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(n2-ar-svc.exe       PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
-target_link_libraries(ch4-n2-svc.exe      PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
+target_link_libraries(ch4-n2-svc.exe      PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES} -static-libstdc++)
