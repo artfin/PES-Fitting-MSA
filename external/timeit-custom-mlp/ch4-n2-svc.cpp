@@ -208,8 +208,8 @@ double density_CH4(double x[15], double T) {
 #define DIM 15 
 static double ensemble[NWALKERS][DIM];
    
-#define BURNIN_LEN  10000
-#define MAX_NPOINTS 3000000 
+#define BURNIN_LEN  100
+#define MAX_NPOINTS 1000 
 #define THINNING    10 
 
 #define ARR_LEN(x)  (sizeof(x) / sizeof((x)[0]))
@@ -406,7 +406,7 @@ double internal_pes_ch4_n2(MLPModel & model, double R, double PH1, double TH1, d
     return model.forward(cart);
 }
 
-
+#include <math.h>
 bool is_denormal(double f) {
     return isinf(f) || isnan(f); 
 }
@@ -423,114 +423,147 @@ void ensemble_nonrigid_svc() {
     
     double RMAX_INT = 40.0;
     double V = 4.0 / 3.0 * M_PI * RMAX_INT * RMAX_INT * RMAX_INT * ALU3;
+    
+    double Tref[] = {510.0, 410.0};
+    int NTR = ARR_LEN(Tref);
 
-    double Tref = 400.11; 
     double TT[] = {100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 
                           210.0, 220.0, 230.0, 240.0, 250.0, 260.0, 270.0, 280.0, 290.0, 300.0,
                           310.0, 320.0, 330.0, 340.0, 350.0, 360.0, 370.0, 380.0, 390.0, 400.0}; 
                           
     int NT = ARR_LEN(TT);
 
-    for (int k = 0; k < NWALKERS; ++k) {
-        generate_initial_geom(ensemble[k]);
-    }
-
-    double acc_rate = burnin(Tref);
-    if (world_rank == 0) {
-        printf(" Run burn-in for %d steps with stretch move (GW10).\n", BURNIN_LEN);
-        printf("      acceptance rate: %f\n", acc_rate);
-    }
-
     double en, en_N2, en_CH4, sigma;
     std::vector<double> x(21);
 
-    int acc = 0;
     double f[NT]     = {0};
     double f2[NT]    = {0};
     double nstar[NT] = {0};
 
-    for (int i = 0; acc < MAX_NPOINTS; i++) {
-        make_ensemble_step(Tref); 
+    for (int l = 0; l < NTR; ++l) { 
+        for (int k = 0; k < NWALKERS; ++k) {
+            generate_initial_geom(ensemble[k]);
+        }
 
-        if (i % THINNING == 0) {
-            for (int k = 0; k < NWALKERS; ++k) {
-                x[0]  = ensemble[k][3];  x[1]  = ensemble[k][4];  x[2]  = ensemble[k][5];  // H1
-                x[3]  = ensemble[k][6];  x[4]  = ensemble[k][7];  x[5]  = ensemble[k][8];  // H2
-                x[6]  = ensemble[k][9];  x[7]  = ensemble[k][10]; x[8]  = ensemble[k][11]; // H3
-                x[9]  = ensemble[k][12]; x[10] = ensemble[k][13]; x[11] = ensemble[k][14]; // H4
-                x[18] = ensemble[k][0];  x[19] = ensemble[k][1];  x[20] = ensemble[k][2];  // C
+        double acc_rate = burnin(Tref[l]);
+        if (world_rank == 0) {
+            printf(" Tref = %.2f\n", Tref[l]);
+            printf(" Run burn-in for %d steps with stretch move (GW10).\n", BURNIN_LEN);
+            printf("      acceptance rate: %f\n", acc_rate);
+        }
 
-                double l_N2  = sample_N2(Tref);
-                double phi   = uni_distr(gen) * 2.0 * M_PI;
-                double theta = acos(uni_distr(gen) * 2.0 - 1.0);
-                x[12] =  l_N2/2*cos(phi)*sin(theta); x[13] =  l_N2/2*sin(phi)*sin(theta); x[14] =  l_N2/2*cos(theta); // N1
-                x[15] = -l_N2/2*cos(phi)*sin(theta); x[16] = -l_N2/2*sin(phi)*sin(theta); x[17] = -l_N2/2*cos(theta); // N2
+        uint64_t acc = 0;
+        for (uint64_t i = 0; acc < MAX_NPOINTS; i++) {
+            make_ensemble_step(Tref[l]); 
 
-                double R3    = uni_distr(gen) * RMAX_INT * RMAX_INT * RMAX_INT;
-                double R     = pow(R3, 1.0/3.0);
-                double Phi   = uni_distr(gen) * 2.0 * M_PI;
-                double Theta = acos(uni_distr(gen) * 2.0 - 1.0);
+            if (i % THINNING == 0) {
+                for (int k = 0; k < NWALKERS; ++k) {
+                    x[0]  = ensemble[k][3];  x[1]  = ensemble[k][4];  x[2]  = ensemble[k][5];  // H1
+                    x[3]  = ensemble[k][6];  x[4]  = ensemble[k][7];  x[5]  = ensemble[k][8];  // H2
+                    x[6]  = ensemble[k][9];  x[7]  = ensemble[k][10]; x[8]  = ensemble[k][11]; // H3
+                    x[9]  = ensemble[k][12]; x[10] = ensemble[k][13]; x[11] = ensemble[k][14]; // H4
+                    x[18] = ensemble[k][0];  x[19] = ensemble[k][1];  x[20] = ensemble[k][2];  // C
 
-                double trsl[3];
-                trsl[0] = R*cos(Phi)*sin(Theta); 
-                trsl[1] = R*sin(Phi)*sin(Theta);
-                trsl[2] = R*cos(Theta);
+                    double l_N2  = sample_N2(Tref[l]);
+                    double phi   = uni_distr(gen) * 2.0 * M_PI;
+                    double theta = acos(uni_distr(gen) * 2.0 - 1.0);
+                    x[12] =  l_N2/2*cos(phi)*sin(theta); x[13] =  l_N2/2*sin(phi)*sin(theta); x[14] =  l_N2/2*cos(theta); // N1
+                    x[15] = -l_N2/2*cos(phi)*sin(theta); x[16] = -l_N2/2*sin(phi)*sin(theta); x[17] = -l_N2/2*cos(theta); // N2
 
-                x[12] += trsl[0]; x[13] += trsl[1]; x[14] += trsl[2];
-                x[15] += trsl[0]; x[16] += trsl[1]; x[17] += trsl[2]; 
+                    double R3    = uni_distr(gen) * RMAX_INT * RMAX_INT * RMAX_INT;
+                    double R     = pow(R3, 1.0/3.0);
+                    double Phi   = uni_distr(gen) * 2.0 * M_PI;
+                    double Theta = acos(uni_distr(gen) * 2.0 - 1.0);
 
-                en_N2  = pot_N2(l_N2);
-                en_CH4 = pot_CH4(ensemble[k]);
+                    double trsl[3];
+                    trsl[0] = R*cos(Phi)*sin(Theta); 
+                    trsl[1] = R*sin(Phi)*sin(Theta);
+                    trsl[2] = R*cos(Theta);
 
-		if (is_denormal(en_N2)) {
-                    fprintf(stderr, "l_N2: %.6f\n", l_N2);
-		    assert(!is_denormal(en_N2) && "en_N2 is denormal");
-		}
-		if (is_denormal(en_CH4)) {
-                    fprintf(stderr, "C1 %.6f %.6f %.6f\n", ensemble[k][0],  ensemble[k][1],  ensemble[k][2] );
-                    fprintf(stderr, "H1 %.6f %.6f %.6f\n", ensemble[k][3],  ensemble[k][4],  ensemble[k][5] );
-                    fprintf(stderr, "H2 %.6f %.6f %.6f\n", ensemble[k][6],  ensemble[k][7],  ensemble[k][8] );
-                    fprintf(stderr, "H3 %.6f %.6f %.6f\n", ensemble[k][9],  ensemble[k][10], ensemble[k][11]);
-                    fprintf(stderr, "H4 %.6f %.6f %.6f\n", ensemble[k][12], ensemble[k][13], ensemble[k][14]);
-		    assert(!is_denormal(en_CH4) && "en_CH4 is denormal");
-		}
-            
-                double fi, w;   
-                for (int j = 0; j < NT; ++j) {
-                    if (TT[j] < Tref + 0.1) {
-                        if (R < 4.5) {
-                            fi = 1.0;
-                        } else {
-                            en = model.forward(x) - INFVAL;
-                            fi = (1.0 - exp(-en * VkT / TT[j]));
+                    x[12] += trsl[0]; x[13] += trsl[1]; x[14] += trsl[2];
+                    x[15] += trsl[0]; x[16] += trsl[1]; x[17] += trsl[2]; 
 
-			    if (is_denormal(fi)) {
-                    		fprintf(stderr, "H1 %.6f %.6f %.6f\n", x[0],  x[1],  x[2] );
-                    		fprintf(stderr, "H2 %.6f %.6f %.6f\n", x[3],  x[4],  x[5] );
-                    		fprintf(stderr, "H3 %.6f %.6f %.6f\n", x[6],  x[7],  x[8] );
-                    		fprintf(stderr, "H4 %.6f %.6f %.6f\n", x[9],  x[10], x[11]);
-                    		fprintf(stderr, "N1 %.6f %.6f %.6f\n", x[12], x[13], x[14]);
-                    		fprintf(stderr, "N2 %.6f %.6f %.6f\n", x[15], x[16], x[17]);
-                    		fprintf(stderr, "C1 %.6f %.6f %.6f\n", x[18], x[19], x[20]);
-		    		assert(!is_denormal(fi) && "fi is denormal");
-			    }
-                        }
+                    en_N2  = pot_N2(l_N2);
+                    en_CH4 = pot_CH4(ensemble[k]);
 
-                        w = exp(-(en_N2 + en_CH4)*VkT / TT[j]) / exp(-(en_N2 + en_CH4) * VkT / Tref);
-
-                        nstar[j] += w;
-                        f[j]     += fi * w;
-                        f2[j]    += (fi * w) * (fi * w);
+                    if (is_denormal(en_N2)) {
+                        fprintf(stderr, "l_N2: %.6f\n", l_N2);
+                        assert(!is_denormal(en_N2) && "en_N2 is denormal");
                     }
-                }
+                    if (is_denormal(en_CH4)) {
+                        fprintf(stderr, "C1 %.6f %.6f %.6f\n", ensemble[k][0],  ensemble[k][1],  ensemble[k][2] );
+                        fprintf(stderr, "H1 %.6f %.6f %.6f\n", ensemble[k][3],  ensemble[k][4],  ensemble[k][5] );
+                        fprintf(stderr, "H2 %.6f %.6f %.6f\n", ensemble[k][6],  ensemble[k][7],  ensemble[k][8] );
+                        fprintf(stderr, "H3 %.6f %.6f %.6f\n", ensemble[k][9],  ensemble[k][10], ensemble[k][11]);
+                        fprintf(stderr, "H4 %.6f %.6f %.6f\n", ensemble[k][12], ensemble[k][13], ensemble[k][14]);
+                        assert(!is_denormal(en_CH4) && "en_CH4 is denormal");
+                    }
 
-                acc++;
+                    double fi, w;   
+                    for (int j = 0; j < NT; ++j) {
+                        if (TT[j] < Tref[l] + 0.1) {
+                            if (R < 4.5) {
+                                fi = 1.0;
+                            } else {
+                                en = model.forward(x) - INFVAL;
+                                fi = (1.0 - exp(-en * VkT / TT[j]));
+
+                                if (is_denormal(fi)) {
+                                    fprintf(stderr, "H1 %.6f %.6f %.6f\n", x[0],  x[1],  x[2] );
+                                    fprintf(stderr, "H2 %.6f %.6f %.6f\n", x[3],  x[4],  x[5] );
+                                    fprintf(stderr, "H3 %.6f %.6f %.6f\n", x[6],  x[7],  x[8] );
+                                    fprintf(stderr, "H4 %.6f %.6f %.6f\n", x[9],  x[10], x[11]);
+                                    fprintf(stderr, "N1 %.6f %.6f %.6f\n", x[12], x[13], x[14]);
+                                    fprintf(stderr, "N2 %.6f %.6f %.6f\n", x[15], x[16], x[17]);
+                                    fprintf(stderr, "C1 %.6f %.6f %.6f\n", x[18], x[19], x[20]);
+                                    assert(!is_denormal(fi) && "fi is denormal");
+                                }
+                            }
+
+                            w = exp(-(en_N2 + en_CH4)*VkT / TT[j]) / exp(-(en_N2 + en_CH4) * VkT / Tref[l]);
+
+                            nstar[j] += w;
+                            f[j]     += fi * w;
+                            f2[j]    += (fi * w) * (fi * w);
+                        }
+                    }
+
+                    acc++;
+                }
             }
         }
-    }
-    
-    if (world_rank == 0) {
-        printf("Tref = %.2f done. [0] Collected %d points.\n", Tref, acc);
+        
+        if (world_rank == 0) {
+            printf("Tref = %.2f done. [0] Collected %lu points.\n", Tref[l], acc);
+        }
+
+        double f_t[NT]     = {0};
+        double f2_t[NT]    = {0};
+        double nstar_t[NT] = {0};
+
+        for (int j = 0; j < NT; ++j) {
+            f_t[j]     = f[j] *  V / 2.0 * AVOGADRO * 1e6;
+            f2_t[j]    = f2[j] * (V / 2.0 * AVOGADRO * 1e6) * (V / 2.0 * AVOGADRO * 1e6);
+            nstar_t[j] = nstar[j];
+        }
+
+        double f_t_root[NT] = {0};
+        double f2_t_root[NT] = {0};
+        double nstar_t_root[NT] = {0};
+
+        MPI_Reduce(f_t,     f_t_root,     NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(f2_t,    f2_t_root,    NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(nstar_t, nstar_t_root, NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+        if (world_rank == 0) {
+            for (int j = 0; j < NT; ++j) {
+                f_t_root[j] /= nstar_t_root[j];
+                f2_t_root[j] /= nstar_t_root[j];
+
+                double sigma = sqrt((f2_t_root[j] - f_t_root[j]*f_t_root[j]) / (nstar_t_root[j] - 1));
+                printf("> T = %.2f: nstar = %.2f, svc = %.6f +- %.6f\n", TT[j], nstar_t_root[j], f_t_root[j], sigma);
+            }
+        }
     }
     
     double f_root[NT]     = {0};
@@ -540,12 +573,17 @@ void ensemble_nonrigid_svc() {
     MPI_Reduce(f,     f_root,     NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(f2,    f2_root,    NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(nstar, nstar_root, NT, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-
+    
     if (world_rank == 0) {
+        printf("\n\n");
+        printf("Results over multiple reference temperatures:\n");
+
         for (int j = 0; j < NT; ++j) {
             f_root[j]  *=  V / 2.0 * AVOGADRO * 1e6 / nstar_root[j];
             f2_root[j] *= (V / 2.0 * AVOGADRO * 1e6) * (V / 2.0 * AVOGADRO * 1e6) / nstar_root[j];
-            sigma = sqrt((f2_root[j] - f_root[j]*f_root[j]) / (nstar_root[j] - 1));
+        
+            double sigma = sqrt((f2_root[j] - f_root[j]*f_root[j]) / (nstar_root[j] - 1));
+   
             printf("> T = %.2f: nstar = %.2f, svc = %.6f +- %.6f\n", TT[j], nstar_root[j], f_root[j], sigma);
         }
     }
