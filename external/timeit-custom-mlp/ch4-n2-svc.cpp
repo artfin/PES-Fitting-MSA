@@ -204,12 +204,12 @@ double density_CH4(double x[15], double T) {
     return exp(-V * VkT / T);
 }
 
-#define NWALKERS 16 
+#define NWALKERS 64 
 #define DIM 15 
 static double ensemble[NWALKERS][DIM];
    
-#define BURNIN_LEN  1000
-#define MAX_NPOINTS 10000 
+#define BURNIN_LEN  10000
+#define MAX_NPOINTS 3000000 
 #define THINNING    10 
 
 #define ARR_LEN(x)  (sizeof(x) / sizeof((x)[0]))
@@ -407,6 +407,10 @@ double internal_pes_ch4_n2(MLPModel & model, double R, double PH1, double TH1, d
 }
 
 
+bool is_denormal(double f) {
+    return isinf(f) || isnan(f); 
+}
+
 void ensemble_nonrigid_svc() {
     int world_size, world_rank;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -477,7 +481,19 @@ void ensemble_nonrigid_svc() {
 
                 en_N2  = pot_N2(l_N2);
                 en_CH4 = pot_CH4(ensemble[k]);
-                //printf("%.6f\n", en_CH4);
+
+		if (is_denormal(en_N2)) {
+                    fprintf(stderr, "l_N2: %.6f\n", l_N2);
+		    assert(!is_denormal(en_N2) && "en_N2 is denormal");
+		}
+		if (is_denormal(en_CH4)) {
+                    fprintf(stderr, "C1 %.6f %.6f %.6f\n", ensemble[k][0],  ensemble[k][1],  ensemble[k][2] );
+                    fprintf(stderr, "H1 %.6f %.6f %.6f\n", ensemble[k][3],  ensemble[k][4],  ensemble[k][5] );
+                    fprintf(stderr, "H2 %.6f %.6f %.6f\n", ensemble[k][6],  ensemble[k][7],  ensemble[k][8] );
+                    fprintf(stderr, "H3 %.6f %.6f %.6f\n", ensemble[k][9],  ensemble[k][10], ensemble[k][11]);
+                    fprintf(stderr, "H4 %.6f %.6f %.6f\n", ensemble[k][12], ensemble[k][13], ensemble[k][14]);
+		    assert(!is_denormal(en_CH4) && "en_CH4 is denormal");
+		}
             
                 double fi, w;   
                 for (int j = 0; j < NT; ++j) {
@@ -487,6 +503,17 @@ void ensemble_nonrigid_svc() {
                         } else {
                             en = model.forward(x) - INFVAL;
                             fi = (1.0 - exp(-en * VkT / TT[j]));
+
+			    if (is_denormal(fi)) {
+                    		fprintf(stderr, "H1 %.6f %.6f %.6f\n", x[0],  x[1],  x[2] );
+                    		fprintf(stderr, "H2 %.6f %.6f %.6f\n", x[3],  x[4],  x[5] );
+                    		fprintf(stderr, "H3 %.6f %.6f %.6f\n", x[6],  x[7],  x[8] );
+                    		fprintf(stderr, "H4 %.6f %.6f %.6f\n", x[9],  x[10], x[11]);
+                    		fprintf(stderr, "N1 %.6f %.6f %.6f\n", x[12], x[13], x[14]);
+                    		fprintf(stderr, "N2 %.6f %.6f %.6f\n", x[15], x[16], x[17]);
+                    		fprintf(stderr, "C1 %.6f %.6f %.6f\n", x[18], x[19], x[20]);
+		    		assert(!is_denormal(fi) && "fi is denormal");
+			    }
                         }
 
                         w = exp(-(en_N2 + en_CH4)*VkT / TT[j]) / exp(-(en_N2 + en_CH4) * VkT / Tref);

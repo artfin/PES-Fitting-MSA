@@ -23,12 +23,11 @@ find_package(ZLIB REQUIRED)
 #find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
 
-set(CMAKE_C_FLAGS "-O2")
 set(CMAKE_Fortran_FLAGS "-Ofast -march=native")
-set(CMAKE_CXX_FLAGS "-O2 -ggdb")
-#set(CMAKE_CXX_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
-#set(CMAKE_C_FLAGS "-O3 -march=native -mfpmath=sse -msse2")
-
+set(CMAKE_CXX_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+set(CMAKE_C_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+#set(CMAKE_C_FLAGS "-O2 -ggdb")
+#set(CMAKE_CXX_FLAGS "-O2 -ggdb")
 
 add_executable(
     ch4-n2-nonrigid.exe 
