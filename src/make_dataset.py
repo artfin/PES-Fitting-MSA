@@ -134,15 +134,37 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
         val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
 
-        X_train, y_train = dataset.X[train_ind, :], dataset.y[train_ind]
-        X_val, y_val     = dataset.X[val_ind,   :], dataset.y[val_ind]
-        X_test, y_test   = dataset.X[test_ind,  :], dataset.y[test_ind]
+        #X_train, y_train = dataset.X[train_ind, :], dataset.y[train_ind]
+        #X_val, y_val     = dataset.X[val_ind,   :], dataset.y[val_ind]
+        #X_test, y_test   = dataset.X[test_ind,  :], dataset.y[test_ind]
+
+        import psutil
+        print("Memory: ", psutil.Process().memory_info().rss / (1024 * 1024))
+
+        logging.info("Saving training dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(
+            NATOMS=dataset.NATOMS,
+            NMON=dataset.NMON,
+            NPOLY=dataset.NPOLY,
+            symmetry=cfg_dataset['SYMMETRY'],
+            order=cfg_dataset['ORDER'],
+            energy_limit=cfg_dataset['ENERGY_LIMIT'],
+            variables=cfg_dataset['VARIABLES'],
+            purify=cfg_dataset['PURIFY'],
+            X=dataset.X[train_ind, :].clone(),
+            y=dataset.y[train_ind].clone(),
+            dX=dataset.dX[train_ind, :, :].clone(),
+            dy=dataset.dy[train_ind, :, :].clone()
+        ), dataset_fpaths["train"])
+
+        assert False
 
         import psutil
         print("Memory: ", psutil.virtual_memory())
 
-        GB = 1024 * 1024 * 1024
-        print("Memory size of dX: {} GB", dataset.dX.element_size() * dataset.dX.nelement() / GB)
+        #GB = 1024 * 1024 * 1024
+        #print("Memory size of dX: {} GB", dataset.dX.element_size() * dataset.dX.nelement() / GB)
+
 
         dX_train, dy_train = dataset.dX[train_ind, :, :], dataset.dy[train_ind, :, :]
         dX_val, dy_val     = dataset.dX[val_ind,   :, :], dataset.dy[val_ind,   :, :]
