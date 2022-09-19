@@ -297,6 +297,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces, forces_pred)
         return wmse_en + wmse_forces
 
+    def descale_energies(self, en):
+        return en * self.en_std + self.en_mean
+
     def forward_separate(self, en, en_pred, forces, forces_pred):
         assert self.en_mean is not None
         assert self.en_std is not None
@@ -305,8 +308,8 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
         # descale energies
         # forces are supposed to be unnormalized already here
-        _en      = en      * self.en_std + self.en_mean
-        _en_pred = en_pred * self.en_std + self.en_mean
+        _en      = self.descale_energies(en) 
+        _en_pred = self.descale_energies(en_pred) 
 
         enmin   = _en.min()
         w       = self.dwt / (self.dwt + _en - enmin)
@@ -815,9 +818,31 @@ class Training:
             val_y_pred, val_dy_pred = self.compute_forces(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
-            logging.info("Epoch: {}; (energy) loss train: {:.3f} cm-1; (force) loss train: {:.3f} cm-1/bohr\n \
-                                          (energy) loss val:   {:.3f} cm-1; (force) loss val:   {:.3f} cm-1/bohr".format(
-                epoch, loss_train_e, loss_train_f, loss_val_e, loss_val_f
+            train_e_d    = self.loss_fn.descale_energies(self.train.y)
+            train_e_pred = self.loss_fn.descale_energies(train_y_pred)
+            train_e_mae  = torch.mean(torch.abs(train_e_d - train_e_pred))
+            train_e_rmse = torch.sqrt(torch.mean((train_e_d - train_e_pred)*(train_e_d - train_e_pred)))
+
+            val_e_d    = self.loss_fn.descale_energies(self.val.y)
+            val_e_pred = self.loss_fn.descale_energies(val_y_pred)
+            val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred)) 
+            val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred) * (val_e_d - val_e_pred)))
+
+            natoms   = self.train.NATOMS
+            train_dy = train.dy.reshape(-1, 3 * natoms)
+            val_dy   = val.dy.reshape(-1, 3 * natoms)
+            train_f_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
+            val_f_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
+            train_f_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
+            val_f_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))	
+
+            logging.info("Epoch: {}; (energy) loss train: {:.3f}; (force) loss train: {:.3f}\n \
+                                           (energy) loss val:   {:.3f}; (force) loss val:   {:.3f}\n \
+                                           (energy) MAE train:  {:.3f} cm-1; (force) MAE train:  {:.3f} cm-1/bohr\n \
+                                           (energy) MAE val:    {:.3f} cm-1; (force) MAE val:    {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE train: {:.3f} cm-1; (force) RMSE train: {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE val:   {:.3f} cm-1; (force) RMSE val:   {:.3f} cm-1/bohr".format(
+                epoch, loss_train_e, loss_train_f, loss_val_e, loss_val_f, train_e_mae, train_f_mae, val_e_mae, val_f_mae, train_e_rmse, val_e_rmse, train_f_rmse, val_f_rmse
             ))
 
             # value to be passed to EarlyStopping/ReduceLR mechanisms
