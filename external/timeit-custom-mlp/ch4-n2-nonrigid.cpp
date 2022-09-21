@@ -9,6 +9,8 @@
 
 #include "ai_pes_ch4_n2_opt1.hpp"
 
+const double ANGTOBOHR = 1.0 / 0.529177249;
+
 #include "c_basis_4_2_1_4_purify.h"
 #include "c_jac_4_2_1_4_purify.h"
 const int natoms = 7;
@@ -367,6 +369,26 @@ void test_configs()
     };
 
     std::cout << "Expected: 1343.658; model: " << model.forward(cc2) << "\n";
+
+    std::vector<double> cc3 = {
+     -0.137956, -0.031288, -0.287879, 
+      1.712465, -0.567328,  0.305291,
+     -1.758933, -1.561701,  1.891735,
+     -0.061375,  0.747853,  0.267814,
+      0.203510,  6.144505, -5.122519,
+      1.288908,  7.517696, -3.965603,
+      0.170828, -0.759110,  1.578783,
+    };
+
+    std::cout << "Expected: ---; model: " << model.forward(cc3) << "\n";
+
+    printf("H %.6lf %.6lf %.6lf\n", cc3[0]  * ANGTOBOHR, cc3[1]  * ANGTOBOHR, cc3[2]  * ANGTOBOHR); 
+    printf("H %.6lf %.6lf %.6lf\n", cc3[3]  * ANGTOBOHR, cc3[4]  * ANGTOBOHR, cc3[5]  * ANGTOBOHR); 
+    printf("H %.6lf %.6lf %.6lf\n", cc3[6]  * ANGTOBOHR, cc3[7]  * ANGTOBOHR, cc3[8]  * ANGTOBOHR); 
+    printf("H %.6lf %.6lf %.6lf\n", cc3[9]  * ANGTOBOHR, cc3[10] * ANGTOBOHR, cc3[11] * ANGTOBOHR); 
+    printf("N %.6lf %.6lf %.6lf\n", cc3[12] * ANGTOBOHR, cc3[13] * ANGTOBOHR, cc3[14] * ANGTOBOHR); 
+    printf("N %.6lf %.6lf %.6lf\n", cc3[15] * ANGTOBOHR, cc3[16] * ANGTOBOHR, cc3[17] * ANGTOBOHR); 
+    printf("C %.6lf %.6lf %.6lf\n", cc3[18] * ANGTOBOHR, cc3[19] * ANGTOBOHR, cc3[20] * ANGTOBOHR); 
 }
 
 void timeit() {
@@ -408,13 +430,12 @@ void timeit() {
 
 int main()
 {
-    forces_qc_comparison();
-
-    min_crossection_qc_table();
+    //forces_qc_comparison();
+    //min_crossection_qc_table();
 
     test_configs();
 
-    timeit();
+    //timeit();
 
     return 0;
 }

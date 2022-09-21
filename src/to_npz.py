@@ -36,8 +36,31 @@ def write_npz_n2_ar(npz_path, natoms, nconfigs, xyz_configs):
 
     np.savez(npz_path, nmol=2, E=energy, z1=z1, z2=z2, R1=R1, R2=R2)
 
-
 if __name__ == "__main__":
+    from dataset import load_npz
+    from random import sample
+
+    fpath = "datasets/raw/ethanol/ethanol_dft.npz"
+    natoms, nconfigs, xyz_configs = load_npz(fpath, load_forces=True)
+
+    print(natoms, nconfigs)
+    #print(xyz_configs)
+
+    #seq = sample(xyz_configs, k=50000)
+    nconfigs = 100
+    seq = xyz_configs[:nconfigs]
+
+    E = [c.energy for c in seq]
+    F = [c.forces for c in seq]
+    R = [c.coords for c in seq]
+    z = seq[0].z
+
+    npz_path = "ethanol_dft-{}.npz".format(nconfigs)
+    np.savez(npz_path, nmol=1, E=E, F=F, R=R, z=z)
+    print("Saving {} configs to npz_path={}".format(nconfigs, npz_path))
+
+
+if __name__ == "__main3__":
     fname = "datasets/raw/n2-ar/N2-AR-EN-VQZ.xyz"
     natoms, nconfigs, xyz_configs = load_xyz_with_energy(fname)
 

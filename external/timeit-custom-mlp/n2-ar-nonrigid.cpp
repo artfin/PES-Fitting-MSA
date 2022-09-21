@@ -84,6 +84,44 @@ double internal_pes_n2_ar(MLPModel & model, double R, double TH, double NN_BOND_
     return model.forward(cart);
 }
 
+template <typename T>
+std::vector<T> linspace(const T start, const T end, const size_t size) {
+
+    if (size == 1) {
+        return std::vector<T>{start};
+    }
+
+    const T step = (end - start) / (size - 1);
+
+    std::vector<T> v(size);
+    for (size_t k = 0; k < size; ++k) {
+        v[k] = start + step * k;
+    }
+
+    return v;
+}
+
+void min_crossection()
+{
+    std::cout << std::fixed;
+    auto model = build_model_from_npz("models/n2-ar-nonrigid-18-32-1.npz");
+    
+    const double deg = M_PI / 180.0;
+    double TH = 90.0 * deg;
+    
+    double NN_BOND_LENGTH = 2.078;
+    double INFVAL = internal_pes_n2_ar(model, 1000.0, TH, NN_BOND_LENGTH); 
+   
+    auto rr = linspace(4.0, 30.0, 1000);
+
+    for (size_t k = 0; k < rr.size(); ++k) {
+        double R     = rr[k];
+        double nnval = internal_pes_n2_ar(model, R, TH, NN_BOND_LENGTH) - INFVAL;
+
+        std::cout << "  " << std::setprecision(2) << R << "\t" << std::right << std::setw(12) << std::setprecision(5) << nnval << "\n";
+    }
+}
+
 void min_crossection_qc_table()
 {
     auto model = build_model_from_npz("models/n2-ar-nonrigid-18-32-1.npz");
@@ -165,6 +203,7 @@ void test_configs()
 int main()
 {
     //test_configs();
+    min_crossection();
     //min_crossection_qc_table();
 
     return 0;

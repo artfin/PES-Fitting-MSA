@@ -291,7 +291,7 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         self.en_std  = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_Ratio_wforces(natoms={}, dwt={})".format(self.natoms, self.dwt)
+        return "WMSELoss_Ratio_wforces(natoms={}, dwt={}, f_lambda={})".format(self.natoms, self.dwt, self.f_lambda)
 
     def forward(self, en, en_pred, forces, forces_pred):
         wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces, forces_pred)
@@ -307,9 +307,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         en_pred = en_pred.to(DEVICE)
 
         # descale energies
-        # forces are supposed to be unnormalized already here
-        _en      = self.descale_energies(en) 
-        _en_pred = self.descale_energies(en_pred) 
+        # forces are supposed to be already unnormalized
+        _en      = self.descale_energies(en)
+        _en_pred = self.descale_energies(en_pred)
 
         enmin   = _en.min()
         w       = self.dwt / (self.dwt + _en - enmin)
