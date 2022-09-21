@@ -275,35 +275,40 @@ def plot_errors_for_files(cfg_dataset, evaluator, EMAX, labels, ylim, ylocators,
 def model_evaluation_forces(evaluator, train, val, test, emax):
     natoms = train.NATOMS
 
-    mean_diff = []
+    rmse = []
 
     for sampling_set in [train, val, test]:
-        en_pred = evaluator.energy(sampling_set.X)
+        if sampling_set is None:
+            rmse.append(0.0)
+            continue
+
+        ind   = (sampling_set.y < emax).nonzero()[:,0]
+
+        fs          = sampling_set.dy[ind]
         forces_pred = evaluator.forces(sampling_set)
+        preds       = forces_pred[ind].reshape(-1, natoms, 3)
 
-        ind = (sampling_set.y < emax).nonzero()[:,0]
+        df = fs - preds
+        _mse = torch.mean(torch.einsum('ijk,ijk->i', df, df)) / (3.0 * natoms)
+        _rmse = torch.sqrt(_mse)
+        rmse.append(_rmse)
 
-        fs    = sampling_set.dy[ind].reshape(-1, 3 * natoms)
-        preds = forces_pred[ind]
+    rmse_kcal_mol_A = [ff / KCALTOCM / BOHRTOANG for ff in rmse]
 
-        diff_atoms = torch.abs(fs - preds)
-        diff       = torch.sum(diff_atoms, dim=1) / (3 * natoms)
-
-        mean = torch.mean(diff)
-        #maxx = torch.max(diff)
-        mean_diff.append(mean)
-
-    mean_diff_kcal_mol_A = [ff / KCALTOCM / BOHRTOANG for ff in mean_diff]
-
-    logging.info("[< {:.0f} cm-1] MEAN FORCE DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} cm-1/bohr".format(emax, *mean_diff))
-    logging.info("[< {:.0f} cm-1] MEAN FORCE DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} kcal/mol/A".format(emax, *mean_diff_kcal_mol_A))
-
+    logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
+    logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
 
 def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes=False):
     mean_diff, max_diff = [], []
     mse, rmse = [], []
 
     for sampling_set in [train, val, test]:
+        if sampling_set is None:
+            mean_diff.append(0.0)
+            max_diff.append(0.0)
+            rmse.append(0.0)
+            continue
+
         pred = evaluator.energy(sampling_set.X)
         pred = torch.from_numpy(pred)
 
@@ -328,12 +333,14 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
     logging.info(" (train) ENERGY RANGE: {:.3f} - {:.3f} cm-1".format(min_energy, max_energy))
 
     mean_diff_kcal_mol = [ff / KCALTOCM for ff in mean_diff]
+    rmse_kcal_mol = [ff/ KCALTOCM for ff in rmse]
 
     logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} cm-1".format(emax, *mean_diff))
     logging.info("[< {:.0f} cm-1] MEAN DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} kcal/mol".format(emax, *mean_diff_kcal_mol))
 
     logging.info("[< {:.0f} cm-1] MAX  DIFFERENCE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}".format(emax, *max_diff))
-    logging.info("[< {:.0f} cm-1] RMSE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f}; total mean: {:.3f}".format(emax, *rmse, np.mean(rmse)))
+    logging.info("[< {:.0f} cm-1] RMSE: (train) {:.3f} \t (val) {:.3f} \t (test) {:.3f} cm-1".format(emax, *rmse))
+    logging.info("[< {:.0f} cm-1] RMSE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol".format(emax, *rmse_kcal_mol))
 
     if add_reference_pes:
         calc, published_fit = load_published()
@@ -386,6 +393,8 @@ if __name__ == '__main__':
                         help="whether to add errors of reference potential on plots [False]")
     parser.add_argument("--save", required=False, type=str2bool, default=False,
                         help="whether to save the produced PNG to default generated path [False]")
+    parser.add_argument("--test_file" , required=False, type=str, default="",
+                        help="the name of the file with configurations to evaluate model on")
 
     args = parser.parse_args()
 
@@ -426,29 +435,46 @@ if __name__ == '__main__':
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
     if args.energy_overview:
-        train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
+        if args.test_file:
+            assert os.path.isfile(args.test_file), "File with test configurations does exist at {}".format(args.test_file)
 
-        model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
+            cfg_dataset.setdefault("ATOM_MAPPING", False)
+            cfg_dataset.setdefault("PURIFY", False)
 
-        #plot_errors_for_files(cfg_dataset, evaluator, ["test.npz"], args.EMAX, labels=None, ylim=None, ylocators=None, figpath=None)
-        #assert False
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=args.test_file, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
+                                  load_forces=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
-        ylim      = (-50.0, 50.0)
-        ylocators = (10.0, 5.0)
+            model_evaluation_energy(evaluator, dataset, None, None, args.EMAX, args.add_reference_pes)
+        else:
+            train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
 
-        errors_png = None
-        if args.save:
-            errors_png = os.path.join(MODEL_FOLDER, MODEL_NAME + "-EMAX={}.png".format(args.EMAX))
-            logging.info("errors_png: {}".format(errors_png))
+            model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
 
-        plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, ylim=ylim, ylocators=ylocators,
-                                    figpath=errors_png, add_reference_pes=args.add_reference_pes)
+            ylim      = (-50.0, 50.0)
+            ylocators = (10.0, 5.0)
+
+            errors_png = None
+            if args.save:
+                errors_png = os.path.join(MODEL_FOLDER, MODEL_NAME + "-EMAX={}.png".format(args.EMAX))
+                logging.info("errors_png: {}".format(errors_png))
+
+            plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, ylim=ylim, ylocators=ylocators,
+                                        figpath=errors_png, add_reference_pes=args.add_reference_pes)
 
     if args.forces_overview:
-        train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
+        if args.test_file:
+            assert os.path.isfile(args.test_file), "File with test configurations does exist at {}".format(args.test_file)
 
-        model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)
-        model_evaluation_forces(evaluator, train, val, test, args.EMAX)
+            cfg_dataset.setdefault("ATOM_MAPPING", False)
+            cfg_dataset.setdefault("PURIFY", False)
+
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=args.test_file, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
+                                  load_forces=True, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+            model_evaluation_forces(evaluator, dataset, None, None, args.EMAX)
+        else:
+            train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
+            model_evaluation_forces(evaluator, train, val, test, args.EMAX)
 
     if args.ch4_overview:
         ylim      = (-20.0, 20.0)
