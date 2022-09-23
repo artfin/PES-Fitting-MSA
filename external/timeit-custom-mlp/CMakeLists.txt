@@ -11,6 +11,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(mynn LANGUAGES C CXX Fortran)
 
+set(CMAKE_Fortran_FLAGS "-Ofast -march=native")
+set(CMAKE_CXX_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+set(CMAKE_C_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+#set(CMAKE_C_FLAGS "-O2 -ggdb")
+#set(CMAKE_CXX_FLAGS "-O2 -ggdb")
+
+find_package(OpenMP REQUIRED COMPONENTS C CXX)
+if (OPENMP_FOUND)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  #message("OpenMP_CXX_FLAGS: ${OpenMP_CXX_FLAGS}")
+  #message("CMake_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+endif()
+
 find_package(MPI REQUIRED COMPONENTS C CXX)
 if (MPI_FOUND)
     include_directories(${MPI_INCLUDE_PATH})
@@ -22,12 +36,6 @@ find_package(Eigen3 REQUIRED CONFIG)
 find_package(ZLIB REQUIRED)
 #find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
-
-set(CMAKE_Fortran_FLAGS "-Ofast -march=native")
-set(CMAKE_CXX_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
-set(CMAKE_C_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
-#set(CMAKE_C_FLAGS "-O2 -ggdb")
-#set(CMAKE_CXX_FLAGS "-O2 -ggdb")
 
 add_executable(
     ch4-n2-nonrigid.exe 
@@ -120,7 +128,7 @@ add_executable(
 
 target_link_libraries(ch4-n2-nonrigid.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(ch4-n2-rigid.exe    PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
-target_link_libraries(ethanol.exe         PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(ethanol.exe         PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${OpenMP_CXX_FLAGS})
 target_link_libraries(n2-ar-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(n2-ar-svc.exe       PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
 target_link_libraries(ch4-n2-svc.exe      PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES} -static-libstdc++)
