@@ -247,7 +247,7 @@ class PolyDataset(Dataset):
         self.atom_mapping = atom_mapping
         self.purify       = purify
 
-        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'EXP', 'None')
+        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'SWITCH-EXP7', 'SWITCH-EXP5', 'EXP', 'None')
         self.intermolecular_variables = variables['INTERMOLECULAR']
 
         assert variables['INTRAMOLECULAR'] in ('ZERO', 'EXP')
@@ -689,8 +689,14 @@ class PolyDataset(Dataset):
             Y_INTERMOLECULAR = None
         elif intermolecular_variables == "ZERO":
             Y_INTERMOLECULAR = lambda r: 0.0
+        elif intermolecular_variables == "EXP":
+            Y_INTERMOLECULAR = lambda r: np.exp(-r / self.exp_lambda)
+        elif intermolecular_variables == "SWITCH-EXP5":
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e3 / r**5
         elif intermolecular_variables == "SWITCH-EXP6":
             Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e4 / r**6
+        elif intermolecular_variables == "SWITCH-EXP7":
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e5 / r**7
         else:
             assert False, "Unreachable"
 
