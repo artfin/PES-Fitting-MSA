@@ -182,12 +182,13 @@ double pot_CH4(double x[15])
 
     int k = 4;
     static double u[3], v[3];
-   
+
     for (int i = 1; i <= 3; ++i) {
         for (int j = i + 1; j <= 4; ++j) {
-            unit_vector(x[3*i], x[3*i + 1], x[3*i + 2], u);
-            unit_vector(x[3*j], x[3*j + 1], x[3*j + 2], v);
+            unit_vector(x[3*i] - x[0], x[3*i + 1] - x[1], x[3*i + 2] - x[2], u);
+            unit_vector(x[3*j] - x[0], x[3*j + 1] - x[1], x[3*j + 2] - x[2], v);
             q[k] = acos(dot_product(u, v));
+
             k++;
         } 
     } 
@@ -195,6 +196,24 @@ double pot_CH4(double x[15])
     // q: distances in Angstrom, angles in radian 
     static double V;
     poten_xy4(q, &V);
+
+    double ang;
+    for (int k = 4; k < 10; ++k) {
+        ang = q[k] / M_PI * 180.0;
+        if ((ang < 90.0) || (ang > 130.0)) {
+             return 100000.0;
+            //std::cout << "q[" << k << "]: " << q[k] << "; ang: " << ang << std::endl; 
+        
+            //std::cout << "V: " << V << "\n";
+            //printf("C %.6f %.6f %.6f\n", x[0]  * BohrToAng,  x[1] * BohrToAng, x[2]  * BohrToAng);
+            //printf("H %.6f %.6f %.6f\n", x[3]  * BohrToAng,  x[4] * BohrToAng, x[5]  * BohrToAng);
+            //printf("H %.6f %.6f %.6f\n", x[6]  * BohrToAng,  x[7] * BohrToAng, x[8]  * BohrToAng);
+            //printf("H %.6f %.6f %.6f\n", x[9]  * BohrToAng,  x[10]* BohrToAng, x[11] * BohrToAng);
+            //printf("H %.6f %.6f %.6f\n", x[12] * BohrToAng,  x[13]* BohrToAng, x[14] * BohrToAng);
+            //
+            //exit(1); 
+        } 
+    }
 
     return V; 
 }
