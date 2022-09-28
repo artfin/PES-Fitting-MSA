@@ -227,9 +227,10 @@ double density_CH4(double x[15], double T) {
 #define DIM 15 
 static double ensemble[NWALKERS][DIM];
    
-#define BURNIN_LEN  100
-#define MAX_NPOINTS 1000 
-#define THINNING    10 
+#define BURNIN_LEN      100
+#define MAX_NPOINTS     10000
+#define RESTART_NPOINTS 1000
+#define THINNING        10 
 
 #define ARR_LEN(x)  (sizeof(x) / sizeof((x)[0]))
 
@@ -443,7 +444,7 @@ void ensemble_nonrigid_svc() {
     double RMAX_INT = 40.0;
     double V = 4.0 / 3.0 * M_PI * RMAX_INT * RMAX_INT * RMAX_INT * ALU3;
     
-    double Tref[] = {510.0, 410.0};
+    double Tref[] = {401.0};
     int NTR = ARR_LEN(Tref);
 
     double TT[] = {100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 
@@ -473,6 +474,15 @@ void ensemble_nonrigid_svc() {
 
         uint64_t acc = 0;
         for (uint64_t i = 0; acc < MAX_NPOINTS; i++) {
+
+            if ((i % RESTART_NPOINTS == 0) && (i != 0)) {
+                printf("Restarting ensemble; i: %lu\n", i);
+
+                for (int k = 0; k < NWALKERS; ++k) {
+                    generate_initial_geom(ensemble[k]);
+                }
+            }
+
             make_ensemble_step(Tref[l]); 
 
             if (i % THINNING == 0) {
@@ -527,19 +537,24 @@ void ensemble_nonrigid_svc() {
                                 en = model.forward(x) - INFVAL;
                                 fi = (1.0 - exp(-en * VkT / TT[j]));
 
-                                if (is_denormal(fi)) {
-                                    fprintf(stderr, "H1 %.6f %.6f %.6f\n", x[0],  x[1],  x[2] );
-                                    fprintf(stderr, "H2 %.6f %.6f %.6f\n", x[3],  x[4],  x[5] );
-                                    fprintf(stderr, "H3 %.6f %.6f %.6f\n", x[6],  x[7],  x[8] );
-                                    fprintf(stderr, "H4 %.6f %.6f %.6f\n", x[9],  x[10], x[11]);
-                                    fprintf(stderr, "N1 %.6f %.6f %.6f\n", x[12], x[13], x[14]);
-                                    fprintf(stderr, "N2 %.6f %.6f %.6f\n", x[15], x[16], x[17]);
-                                    fprintf(stderr, "C1 %.6f %.6f %.6f\n", x[18], x[19], x[20]);
+                                if (is_denormal(fi) || (fi > 1000.0)) {
+                                    fprintf(stderr, "H1 %.6f %.6f %.6f\n", x[0]  * BohrToAng, x[1]  * BohrToAng, x[2]  * BohrToAng);
+                                    fprintf(stderr, "H2 %.6f %.6f %.6f\n", x[3]  * BohrToAng, x[4]  * BohrToAng, x[5]  * BohrToAng);
+                                    fprintf(stderr, "H3 %.6f %.6f %.6f\n", x[6]  * BohrToAng, x[7]  * BohrToAng, x[8]  * BohrToAng);
+                                    fprintf(stderr, "H4 %.6f %.6f %.6f\n", x[9]  * BohrToAng, x[10] * BohrToAng, x[11] * BohrToAng);
+                                    fprintf(stderr, "N1 %.6f %.6f %.6f\n", x[12] * BohrToAng, x[13] * BohrToAng, x[14] * BohrToAng);
+                                    fprintf(stderr, "N2 %.6f %.6f %.6f\n", x[15] * BohrToAng, x[16] * BohrToAng, x[17] * BohrToAng);
+                                    fprintf(stderr, "C1 %.6f %.6f %.6f\n", x[18] * BohrToAng, x[19] * BohrToAng, x[20] * BohrToAng);
                                     assert(!is_denormal(fi) && "fi is denormal");
                                 }
                             }
 
                             w = exp(-(en_N2 + en_CH4)*VkT / TT[j]) / exp(-(en_N2 + en_CH4) * VkT / Tref[l]);
+                            
+                            if (is_denormal(w)) {
+                                fprintf(stderr, "en_N2: %.6f, en_CH4: %.6f, w: %.6f\n", en_N2, en_CH4, w);
+                                assert(!is_denormal(w) && "w is denormal");
+                            }
 
                             nstar[j] += w;
                             f[j]     += fi * w;
