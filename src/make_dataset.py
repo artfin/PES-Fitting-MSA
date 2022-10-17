@@ -119,6 +119,9 @@ def make_dataset(cfg_dataset, dataset_fpaths):
     # default split function [dataset] -> [train, val, test] 
     data_split = sklearn.model_selection.train_test_split
 
+    xyz_configs_train, xyz_configs_val, xyz_configs_test = None, None, None
+    grm_train, grm_val, grm_test = None, None, None
+
     if cfg_dataset['LOAD_FORCES']:
         if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Stratification is not implemented for `use_forces=True`")
@@ -143,6 +146,71 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         dX_train, dy_train = dataset.dX[train_ind, :, :], dataset.dy[train_ind, :, :]
         dX_val, dy_val     = dataset.dX[val_ind,   :, :], dataset.dy[val_ind,   :, :]
         dX_test, dy_test   = dataset.dX[test_ind,  :, :], dataset.dy[test_ind,  :, :]
+    elif cfg_dataset['TYPE'] == 'DIPOLE':
+        if len(cfg_dataset['SOURCE']) > 1:
+            logging.info("Stratification is not implemented for `typ=dipole`")
+            assert False
+
+        anchor_pos = cfg_dataset['ANCHOR_POSITIONS']
+        assert len(anchor_pos) == 3
+
+        dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=cfg_dataset['SOURCE'][0],
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
+                              anchor_pos=cfg_dataset['ANCHOR_POSITIONS'])
+
+
+        nconfigs = len(dataset.xyz_configs)
+        y = np.zeros((nconfigs, 4))
+
+        for k in range(nconfigs):
+            xyz_config = dataset.xyz_configs[k]
+            y[k, :] = np.concatenate((xyz_config.energy, xyz_config.dipole))
+
+        #    anchors = []
+        #    for anc in anchor_pos:
+        #        if anc.get(0) is not None:
+        #            anchors.append(xyz_config.coords1[anc.get(0)])
+        #        elif anc.get(1) is not None:
+        #            anchors.append(xyz_config.coords2[anc.get(1)])
+        #        else:
+        #            assert False, "unreachable"
+
+        #    a1, a2, a3 = anchors[0], anchors[1], anchors[2]
+
+        #    # gram matrix
+        #    g = np.array([
+        #        [np.dot(a1, a1), np.dot(a1, a2), np.dot(a1, a3)],
+        #        [np.dot(a2, a1), np.dot(a2, a2), np.dot(a2, a3)],
+        #        [np.dot(a3, a1), np.dot(a3, a2), np.dot(a3, a3)],
+        #    ])
+
+        #    d = xyz_config.dipole
+        #    dm = np.array([np.dot(d, a1), np.dot(d, a2), np.dot(d, a3)])
+        #    c = np.linalg.inv(g) @ dm
+
+        dataset.y = torch.from_numpy(y)
+        print(dataset.y.size())
+        print(dataset.y)
+
+        indices = list(range(nconfigs))
+        train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
+        val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
+
+        X_train, y_train = dataset.X[train_ind, :], dataset.y[train_ind]
+        X_val, y_val     = dataset.X[val_ind,   :], dataset.y[val_ind]
+        X_test, y_test   = dataset.X[test_ind,  :], dataset.y[test_ind]
+
+        xyz_configs_train = [dataset.xyz_configs[ind] for ind in train_ind]
+        xyz_configs_val   = [dataset.xyz_configs[ind] for ind in val_ind]
+        xyz_configs_test  = [dataset.xyz_configs[ind] for ind in test_ind]
+
+        grm_train = dataset.grm[train_ind]
+        grm_val = dataset.grm[val_ind]
+        grm_test = dataset.grm[test_ind]
+
+        dX_train, dX_val, dX_test = None, None, None
+        dy_train, dy_val, dy_test = None, None, None
     else:
         GLOBAL_SET      = False
         GLOBAL_NATOMS   = None
@@ -159,25 +227,6 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         for file_path in cfg_dataset['SOURCE']:
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
                                   load_forces=cfg_dataset['LOAD_FORCES'], atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
-
-            if cfg_dataset['TYPE'] == 'DIPOLE':
-                anchor_pos = tuple(map(int, cfg_dataset['ANCHOR_POSITIONS'].split()))
-                assert anchor_pos[0] in range(dataset.NATOMS)
-                assert anchor_pos[1] in range(dataset.NATOMS)
-
-                for xyz_config in dataset.xyz_configs:
-                    anchor = xyz_config.coords[anchor_pos[0]] - xyz_config.coords[anchor_pos[1]]
-
-                    x, y, z = anchor[0], anchor[1], anchor[2]
-                    alpha = np.arctan2(-y, x)
-                    beta  = np.arctan2(-np.sqrt(x**2 + y**2), z)
-
-                    S = rot_y(beta) @ rot_z(alpha)
-                    xyz_config.coords = xyz_config.coords @ S.T
-                    xyz_config.dipole = S @ xyz_config.dipole
-
-                    rot_anchor = S @ anchor
-                    assert np.isclose(rot_anchor / np.linalg.norm(rot_anchor), np.array([0.0, 0.0, 1.0])).all()
 
             if GLOBAL_SET:
                 assert GLOBAL_NATOMS == dataset.NATOMS
@@ -274,7 +323,9 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X=X_train,
         y=y_train,
         dX=dX_train,
-        dy=dy_train
+        dy=dy_train,
+        xyz_configs=xyz_configs_train,
+        grm=grm_train,
     )
 
     logging.info("Saving training dataset to: {}".format(train_fpath))
@@ -292,7 +343,9 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X=X_val,
         y=y_val,
         dX=dX_val,
-        dy=dy_val
+        dy=dy_val,
+        xyz_configs=xyz_configs_val,
+        grm=grm_val,
     )
     logging.info("Saving validation dataset to: {}".format(val_fpath))
     torch.save(dict_pk, val_fpath)
@@ -309,7 +362,9 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X=X_test,
         y=y_test,
         dX=dX_test,
-        dy=dy_test
+        dy=dy_test,
+        xyz_configs=xyz_configs_test,
+        grm=grm_test,
     )
     logging.info("Saving testing dataset to: {}".format(test_fpath))
     torch.save(dict_pk, test_fpath)

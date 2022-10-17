@@ -243,38 +243,48 @@ class WMSELoss_Ratio(torch.nn.Module):
 
         return wmse
 
-class WMSELoss_Ratio_dipole(torch.nn.Module):
+class WRMSELoss_Ratio_dipole(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
         self.dwt    = torch.tensor(dwt).to(DEVICE)
 
-        self.dip_mean = None
-        self.dip_std  = None
+        self.y_mean = None
+        self.y_std  = None
 
-    def set_scale(self, dip_mean, dip_std):
-        self.dip_mean = torch.FloatTensor(dip_mean.tolist()).to(DEVICE)
-        self.dip_std  = torch.FloatTensor(dip_std.tolist()).to(DEVICE)
+    def set_scale(self, y_mean, y_std):
+        self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
+        self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_Ratio_dipole(dwt={})".format(self.dwt)
+        return "WRMSELoss_Ratio_dipole(dwt={})".format(self.dwt)
 
-    def forward(self, en, dip, dip_pred):
+    def forward(self, y, y_pred):
+        """
+        y:      (E, dipx,      dipy,      dipz     )
+        y_pred: (   dipx_pred, dipy_pred, dipz_pred)
+        """
         assert self.y_mean is not None
         assert self.y_std is not None
 
-        # descale 
-        dipd      = dip     * self.dip_std + self.dip_mean
-        dipd_pred = dip_pred * self.dip_std + self.dip_mean
+        # descale
+        dip_pred = y_pred * self.y_std[1:] + self.y_mean[1:]
+        yd       = y      * self.y_std     + self.y_mean
+        dip      = yd[:, 1:]
+        en       = yd[:, 0]
 
         en_min = en.min()
         w  = self.dwt / (self.dwt + en - en_min)
 
-        wmse = 0.0
+        dd   = dip - dip_pred
+        wdd  = torch.einsum('ij,i->ij', dd, w)
+        #wmse = torch.mean(torch.einsum('ij,ij->i', wdd, dd))
 
-        nconfigs = yd.size()[0]
-        wmse = torch.tensordot(w * (yd - yd_pred), yd - yd_pred) / nconfigs
+        #for k in range(10):
+        #    print("dip: {}; dip_pred: {}".format(dip[k].detach().numpy(), dip_pred[k].detach().numpy()))
 
-        return wmse
+        #return torch.sqrt(wmse)
+        return 1000.0 * torch.mean(torch.abs(wdd))
+
 
 class WMSELoss_Ratio_wforces(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0):
@@ -512,7 +522,6 @@ class Training:
             "NATOMS":   self.train.NATOMS,
             "symmetry": self.train.symmetry,
             "order":    self.train.order,
-            "mask" :    self.train.mask,
         }
 
     def build_regularization(self):
@@ -563,9 +572,9 @@ class Training:
         use_forces_after_epoch = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
         self.cfg_loss['USE_FORCES_AFTER_EPOCH'] = use_forces_after_epoch
 
-        if self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
+        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
-            loss_fn = WMSELoss_Ratio_dipole(dwt=dwt)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
 
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
@@ -788,6 +797,13 @@ class Training:
             if self.cfg_loss['USE_FORCES']:
                 train_y_pred, train_dy_pred = self.compute_forces(self.train)
                 loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+            elif self.cfg['TYPE'] == 'DIPOLE':
+                # y_pred:    [(d, a1), (d, a2), (d, a3)] -- scalar products with anchor vectors 
+                # dip_pred:  g @ y_pred                  -- Cartesian components of the predicted dipole
+                y_pred = self.model(self.train.X)
+                dip_pred = torch.einsum('ijk,ik->ij', self.train.grm, y_pred)
+
+                loss = self.loss_fn(self.train.y, y_pred)
             else:
                 y_pred = self.model(self.train.X)
                 loss = self.loss_fn(self.train.y, y_pred)
@@ -965,14 +981,13 @@ def load_dataset(cfg_dataset, typ):
         ('ENERGY_LIMIT', KeywordType.KEYWORD_OPTIONAL, None),  # `bool` : NOT SUPPORTED now -- set an upper bound on energies in the training dataset 
         # DATASET PREPROCESSING
         ('NORMALIZE',        KeywordType.KEYWORD_REQUIRED, None),  # `str`  : how to perform data normalization  
-        ('ANCHOR_POSITIONS', KeywordType.KEYWORD_OPTIONAL, None),  # [REQUIRED for TYPE=dipole] `int`s : which atoms to place on the OZ axis  
+        ('ANCHOR_POSITIONS', KeywordType.KEYWORD_OPTIONAL, None),  # [REQUIRED for TYPE=dipole] `int`s : select atoms whose radius-vectors to use as basis 
         # PIP CONSTRUCTION
-        ('ORDER',                  KeywordType.KEYWORD_REQUIRED, None),  # `int`  : maximum order of PIPs 
-        ('SYMMETRY',               KeywordType.KEYWORD_REQUIRED, None),  # `int`s : permutational symmetry of the molecule | molecular pair
-        #('INTRAMOLECULAR_TO_ZERO', KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use intermolecular basis of PIPs 
-        ('PURIFY',                 KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
-        ('ATOM_MAPPING',           KeywordType.KEYWORD_OPTIONAL, False), # `list` : mapping atoms->monomer (which atom belongs to which monomer)
-        ('VARIABLES' ,             KeywordType.KEYWORD_REQUIRED, None), # `dict` : mapping interatomic distances->polynomial variables 
+        ('ORDER',         KeywordType.KEYWORD_REQUIRED, None),  # `int`  : maximum order of PIPs 
+        ('SYMMETRY',      KeywordType.KEYWORD_REQUIRED, None),  # `int`s : permutational symmetry of the molecule | molecular pair
+        ('PURIFY',        KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
+        ('ATOM_MAPPING',  KeywordType.KEYWORD_OPTIONAL, False), # `list` : mapping atoms->monomer (which atom belongs to which monomer)
+        ('VARIABLES' ,    KeywordType.KEYWORD_REQUIRED, None), # `dict` : mapping interatomic distances->polynomial variables 
     ]
 
     from operator import itemgetter

@@ -1,6 +1,3 @@
-# MD17 dataset:
-# http://quantum-machine.org/gdml/#datasets
-
 import ctypes as ct
 import logging
 import json
@@ -64,7 +61,8 @@ class XYZConfigPair:
     coords2 : np.array
     z1      : np.array
     z2      : np.array
-    energy  : np.array
+    energy  : Optional[np.array] = None
+    dipole  : Optional[np.array] = None
 
 @dataclass
 class PolyDataset_t:
@@ -73,27 +71,28 @@ class PolyDataset_t:
     NPOLY        : int
     symmetry     : str
     order        : str
+    variables    : dict
     X            : torch.Tensor
     y            : torch.Tensor
-    variables    : dict
     dX           : Optional[torch.Tensor]
     dy           : Optional[torch.Tensor]
-    mask         : Optional[List[int]] = None
     energy_limit : float = None
     purify       : bool  = False
+    xyz_configs  : Optional[List[XYZConfigPair]] = None
+    grm          : Optional[torch.Tensor] = None
 
-
-def load_npz(fpath, load_forces=False):
+def load_npz(fpath, load_forces=False, load_dipole=False):
     fd = np.load(fpath)
 
     if "theory" in fd:
         logging.info("  Theory: {}".format(fd['theory']))
 
-    energy_min = min(fd['E'])[0]
-    energy_max = max(fd['E'])[0]
-    logging.info("    Energy range: {} - {} cm-1".format(energy_min, energy_max))
+    if 'E' in fd:
+        energy_min = min(fd['E'])[0]
+        energy_max = max(fd['E'])[0]
+        logging.info("    Energy range: {} - {} cm-1".format(energy_min, energy_max))
 
-    nmol =fd.get('nmol', 1)
+    nmol = fd.get('nmol', 1)
 
     if nmol == 1:
         assert(fd['E'].shape[0] == fd['R'].shape[0])
@@ -104,10 +103,6 @@ def load_npz(fpath, load_forces=False):
         xyz_configs = []
         if load_forces:
             for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
-                #coords_bohr    = coords / BOHRTOANG
-                #energy_cm      = (energy[0] - energy_min) * KCALTOCM
-                #forces_cm_bohr = forces * BOHRTOANG * KCALTOCM
-
                 xyz_configs.append(
                     XYZConfig(
                         coords=coords,
@@ -118,9 +113,6 @@ def load_npz(fpath, load_forces=False):
                 )
         else:
             for coords, energy in zip(fd['R'], fd['E']):
-                #coords_bohr    = coords / BOHRTOANG
-                #energy_cm      = (energy[0] - energy_min) * KCALTOCM
-
                 xyz_configs.append(
                     XYZConfig(
                         coords=coords,
@@ -137,8 +129,12 @@ def load_npz(fpath, load_forces=False):
         assert fd['R1'].shape[0] == NCONFIGS
         assert fd['R2'].shape[0] == NCONFIGS
 
-        xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy)
-                       for c1, c2, energy in zip(fd['R1'], fd['R2'], fd['E'])]
+        if load_dipole:
+            xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, dipole=dipole)
+                           for c1, c2, energy, dipole in zip(fd['R1'], fd['R2'], fd['E'], fd['D'])]
+        else:
+            xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy)
+                           for c1, c2, energy in zip(fd['R1'], fd['R2'], fd['E'])]
 
     return NATOMS, NCONFIGS, xyz_configs
 
@@ -194,6 +190,7 @@ def load_xyz_with_dipole(fpath):
             #c.check()
             xyz_configs.append(c)
 
+
     return NATOMS, NCONFIGS, xyz_configs
 
 def write_xyz(xyz_path, xyz_configs, prop={"energy", "dipole"}):
@@ -235,8 +232,36 @@ def write_npz(npz_path, xyz_configs):
     np.savez(npz_path, E=energy, z=z, R=R, F=F)
 
 
+def prepare_grm(xyz_configs, anchor_pos):
+    """
+    compute Gram matrix on anchor vectors
+    """
+    nconfigs = len(xyz_configs)
+    grm = np.zeros((nconfigs, 3, 3))
+
+    for k in range(nconfigs):
+        xyz_config = xyz_configs[k]
+
+        anchors = []
+        for anc in anchor_pos:
+            if anc.get(0) is not None:
+                anchors.append(xyz_config.coords1[anc.get(0)])
+            elif anc.get(1) is not None:
+                anchors.append(xyz_config.coords2[anc.get(1)])
+            else:
+                assert False, "unreachable"
+
+        a1, a2, a3 = anchors[0], anchors[1], anchors[2]
+        grm[k, :, :] = np.array([
+            [np.dot(a1, a1), np.dot(a1, a2), np.dot(a1, a3)],
+            [np.dot(a2, a1), np.dot(a2, a2), np.dot(a2, a3)],
+            [np.dot(a3, a1), np.dot(a3, a2), np.dot(a3, a3)],
+        ])
+
+    return torch.from_numpy(grm)
+
 class PolyDataset(Dataset):
-    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, atom_mapping=None, variables=None, purify=False):
+    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, atom_mapping=None, variables=None, purify=False, anchor_pos=None):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
@@ -271,9 +296,12 @@ class PolyDataset(Dataset):
         elif file_path.endswith(".npz"):
             if self.typ == 'ENERGY':
                 NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_forces)
+            elif self.typ == 'DIPOLE':
+                assert anchor_pos is not None
+                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_dipole=True)
+                self.grm = prepare_grm(self.xyz_configs, anchor_pos)
             else:
                 assert False
-
             #write_npz("ethanol_dft-50000.npz", self.xyz_configs)
         else:
             raise ValueError("Unrecognized file format.")
@@ -538,7 +566,7 @@ class PolyDataset(Dataset):
 
     def prepare_dataset_with_dipoles_from_configs(self):
         logging.info("preparing interatomic distances..")
-        yij = self.make_yij(self.xyz_configs, intramz=self.intramz, intermz=False)
+        yij = self.make_yij(self.xyz_configs, intermolecular_variables=self.intermolecular_variables, intramolecular_variables=self.intramolecular_variables)
         logging.info("Done.")
 
         NCONFIGS = len(self.xyz_configs)
@@ -587,7 +615,6 @@ class PolyDataset(Dataset):
         y = torch.from_numpy(energies)
 
         return X, y
-
 
     @classmethod
     def from_pickle(cls, path):

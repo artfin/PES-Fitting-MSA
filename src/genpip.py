@@ -88,6 +88,7 @@ def compile_basis_dlib_c(order, symmetry, wdir):
         st = cl("gcc -shared -fPIC {0}.cc -o {0}.so".format(c_fpath))
         logging.info(st.stdout)
     else:
+        logging.info("Do not see fname={}.cc".format(c_fpath))
         raise RuntimeError("[compile_basis_dlib] no source code for polynomials with symmetry={} and order={} is detected".format(symmetry, order))
 
 def compile_basis_dlib_f(order, symmetry, wdir):
