@@ -1,0 +1,45 @@
+TYPE: DIPOLE
+PRINT_PRECISION: 4
+
+DATASET:
+  NAME: "CH4-N2-DIPOLE" 
+  SOURCE: [
+    "datasets/raw/ch4-n2/CH4-N2-EN-DIP-RIGID.npz"
+  ]
+  INTERIM_FOLDER: "datasets/interim/ch4-n2"
+  EXTERNAL_FOLDER: "datasets/external/ch4-n2" 
+  ORDER: 3
+  SYMMETRY: 1 1 1 1 2 1 
+  ANCHOR_POSITIONS: [{0 : 0}, {0 : 1}, {0 : 2}]
+  ATOM_MAPPING: [{0 : 1}, {0 : 1}, {0 : 1}, {0 : 1}, {1 : 7}, {1 : 7}, {0 : 6}]
+  NORMALIZE: std
+  VARIABLES:
+    EXP_LAMBDA: 2.0
+    INTERMOLECULAR: SWITCH-EXP6 
+    INTRAMOLECULAR: EXP 
+
+MODEL:
+  ACTIVATION: SiLU
+  HIDDEN_DIMS: [12]
+
+LOSS:
+  NAME: WRMSE
+  WEIGHT_TYPE: Ratio 
+  dwt: 1000.0
+
+TRAINING:
+  MAX_EPOCHS: 1000
+  OPTIMIZER:
+    NAME: LBFGS
+    LR: 1.0
+  SCHEDULER:
+    NAME: ReduceLROnPlateau
+    LR_REDUCE_GAMMA: 0.8
+    PATIENCE: 200 
+    THRESHOLD: 0.1
+    THRESHOLD_MODE: abs
+    COOLDOWN: 3
+    MIN_LR: 1.0e-5
+  EARLY_STOPPING:
+    PATIENCE: 300 
+    TOLERANCE: 0.00001
