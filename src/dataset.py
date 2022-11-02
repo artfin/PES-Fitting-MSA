@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import Dataset
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Union
 
 BOHRTOANG = 0.529177249
 KCALTOCM  = 349.757
@@ -68,8 +68,8 @@ class XYZConfigPair:
 class PolyDataset_t:
     NATOMS       : int
     NMON         : int
-    NPOLY        : int
-    symmetry     : str
+    NPOLY        : List[int]
+    symmetry     : Union[str, Dict[str, List[int]]]
     order        : str
     variables    : dict
     X            : torch.Tensor
@@ -80,6 +80,7 @@ class PolyDataset_t:
     purify       : bool  = False
     xyz_ordered  : Optional[torch.Tensor] = None
     grm          : Optional[torch.Tensor] = None
+
 
 def load_npz(fpath, load_forces=False, load_dipole=False):
     fd = np.load(fpath)

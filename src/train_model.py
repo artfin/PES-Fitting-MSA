@@ -12,8 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -26,7 +25,7 @@ from sklearn.preprocessing import StandardScaler
 
 from dataset import PolyDataset
 from make_dataset import make_dataset, make_dataset_fpaths
-from build_model import build_network_yaml
+from build_model import build_network, QModel
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -923,9 +922,10 @@ class Training:
 
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
-                
+
                 # log metrics to WANDB to visualize model performance
-                wandb.log({"loss_train": loss_train, "loss_val": loss_val})
+                if USE_WANDB:
+                    wandb.log({"loss_train": loss_train, "loss_val": loss_val})
 
             logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
@@ -1200,18 +1200,22 @@ if __name__ == "__main__":
     train, val, test = load_dataset(cfg_dataset, typ)
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
 
+    print("train.NPOLY: {}".format(train.NPOLY))
+    print("train.SYMMETRY: {}".format(train.symmetry))
+
     cfg_model = cfg['MODEL']
     if typ == 'ENERGY':
-        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=1)
+        model = build_network(cfg_model, input_features=train.NPOLY, output_features=1)
     elif typ == 'DIPOLE':
-        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=3)
+        model = build_network(cfg_model, input_features=train.NPOLY, output_features=3)
     elif typ == 'DIPOLEQ':
-        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=train.NATOMS)
+        model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
     elif typ == 'DIPOLEC':
-        model = build_network_yaml(cfg_model, input_features=3 * train.NATOMS, output_features=1)
+        model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
     else:
         assert False, "unreachable"
 
+    logging.info("Build model: {}".format(model))
     nparams = count_params(model)
     logging.info("Number of parameters: {}".format(nparams))
 

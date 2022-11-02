@@ -1,3 +1,4 @@
+import itertools
 import collections
 import json
 import logging
@@ -12,102 +13,46 @@ from dataset import PolyDataset
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
-#RAW_DATASET_PATHS = {
-#    "RIGID" : [
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-#        }
-#    ],
-#    "NONRIGID" : [{
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-#        }
-#    ],
-#    "NONRIGID-CLIP" : [
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-RIGID-10000-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=0-1000-N2=0-1000-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=1000-2000-N2=0-1000-LIMITS.xyz"),
-#        },
-#        {
-#            "xyz_path"    : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000.xyz"),
-#            "limits_path" : os.path.join(BASEDIR, "datasets", "raw", "CH4-N2-EN-NONRIGID-CH4=2000-3000-N2=0-1000-LIMITS.xyz"),
-#        }
-#    ]
-#}
+import pprint
+pp = pprint.PrettyPrinter(indent=4)
 
-class JSONNumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
+def prepare_qmodel_structure(sg):
+    """
+    partial charge model structure:
+        qmodel = {
+            symmetry group [string] -> indices of atoms
+        }
+    """
+    qmodel_s = {}
+    def add_sg(sg, natom):
+        sg = " ".join([c for c in sg])
+        if sg in qmodel_s:
+            qmodel_s[sg].append(natom)
+        else:
+            qmodel_s[sg] = [natom]
 
-        return super(JSONNumpyEncoder, self).default(obj)
+    if " " in sg:
+        sg = sg.replace(" ", "")
 
-def save_json(d, fpath):
-    with open(fpath, mode='w') as fp:
-        json.dump(d, cls=JSONNumpyEncoder, fp=fp)
+    # current atom
+    ca = 0
 
-def save_pk(fpath, dataset_typ, NATOMS, NMON, NPOLY, symmetry, order, energy_limit, variables, purify, X, y, dX, dy, xyz_configs, grm):
-    dict_pk = dict(
-        NATOMS=NATOMS,
-        NMON=NMON,
-        NPOLY=NPOLY,
-        symmetry=symmetry,
-        order=order,
-        energy_limit=energy_limit,
-        variables=variables,
-        purify=purify,
-        X=X,
-        y=y,
-        dX=dX,
-        dy=dy,
-        xyz_configs=xyz_configs,
-        grm=grm,
-    )
+    for ind in range(len(sg)):
+        n = int(sg[ind])
 
-    logging.info("Saving {} dataset to: {}".format(dataset_typ, fpath))
-    torch.save(dict_pk, fpath)
+        if n == 1:
+            add_sg(sg, ca)
+            ca = ca + 1
+        elif n > 1:
+            # sgc -- symmetry group for current atom's partial charge
+            sgc = sg[:ind] + "1" * n + sg[(ind + 1):]
+            for k in range(n):
+                add_sg(sgc, ca)
+                ca = ca + 1
+        else:
+            assert False, "unreachable"
 
-
-def prepare_symmetry_strings(sg):
-    unique_atoms = len(sg.replace(" ", ""))
-
-    sgs = []
-    for ua in range(unique_atoms):
-        sgt = sg.replace(" ", "")
-        if int(sgt[ua]) > 1:
-            sgt = sgt[:ua] + str(int(sgt[ua]) - 1) + sgt[(ua + 1):]
-            sgt = sgt[:(ua + 1)] + '1' + sgt[(ua + 1):]
-
-        sgt = " ".join([s for s in sgt])
-        if sgt not in sgs:
-            sgs.append(sgt)
-
-    return sgs
+    return qmodel_s
 
 def make_dataset_fpaths(cfg_dataset):
     def flatten(d, parent_key='', sep='_'):
@@ -156,9 +101,6 @@ def rot_y(ang):
 def make_dataset(cfg_dataset, dataset_fpaths):
     # default split function [dataset] -> [train, val, test] 
     data_split = sklearn.model_selection.train_test_split
-
-    xyz_configs_train, xyz_configs_val, xyz_configs_test = None, None, None
-    grm_train, grm_val, grm_test = None, None, None
 
     if cfg_dataset['LOAD_FORCES']:
         if len(cfg_dataset['SOURCE']) > 1:
@@ -271,58 +213,68 @@ def make_dataset(cfg_dataset, dataset_fpaths):
                         energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
                         dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["test"])
 
-        return
-
     elif cfg_dataset['TYPE'] == 'DIPOLEQ':
         if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Stratification is not implemented for `typ=dipoleq`")
             assert False
 
-        sgs = prepare_symmetry_strings(cfg_dataset['SYMMETRY'])
-        assert len(sgs) == 1, "!!!"
+        qmodel_structure = prepare_qmodel_structure(cfg_dataset['SYMMETRY'])
+        logging.info("Q-MODEL STRUCTURE:")
+        pp.pprint(qmodel_structure)
 
-        sg = sgs[0]
-        dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=cfg_dataset['SOURCE'][0],
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
-                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+        datasets = [
+            PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=cfg_dataset['SOURCE'][0],
+                        order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
+                        atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+            for sg in qmodel_structure.keys()
+        ]
 
+        dataset = datasets[0]
         nconfigs = len(dataset.xyz_configs)
-        y = np.zeros((nconfigs, 4))
+        assert all(len(dataset.xyz_configs) == nconfigs for dataset in datasets)
 
+        y = torch.zeros((nconfigs, 4))
         for k in range(nconfigs):
             xyz_config = dataset.xyz_configs[k]
-            y[k, :] = np.concatenate((xyz_config.energy, xyz_config.dipole))
+            y[k, :] = torch.cat((
+                torch.from_numpy(xyz_config.energy),
+                torch.from_numpy(xyz_config.dipole)
+            ))
 
-        dataset.y = torch.from_numpy(y)
-        print(dataset.y.size())
-        print(dataset.y)
+        NPOLYs = [dataset.NPOLY for dataset in datasets]
+        NPOLYs_acc = list(itertools.accumulate(NPOLYs))
+
+        NPOLY_TOTAL = sum(NPOLYs)
+        logging.info("NPOLY total: {}".format(NPOLY_TOTAL))
+
+        X = torch.zeros((nconfigs, NPOLY_TOTAL))
+        for dataset, i1, i2 in zip(datasets, [0, *NPOLYs_acc], [*NPOLYs_acc, NPOLY_TOTAL]):
+            X[:, i1:i2] = dataset.X
 
         indices = list(range(nconfigs))
         train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
         val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
 
-        X_train, y_train, c_train = dataset.X[train_ind, :], dataset.y[train_ind], dataset.xyz_ordered[train_ind]
-        X_val, y_val, c_val       = dataset.X[val_ind,   :], dataset.y[val_ind], dataset.xyz_ordered[val_ind]
-        X_test, y_test, c_test    = dataset.X[test_ind,  :], dataset.y[test_ind], dataset.xyz_ordered[test_ind]
+        X_train, y_train, c_train = X[train_ind, :], y[train_ind], dataset.xyz_ordered[train_ind]
+        X_val, y_val, c_val       = X[val_ind, :],   y[val_ind],   dataset.xyz_ordered[val_ind]
+        X_test, y_test, c_test    = X[test_ind, :],  y[test_ind],  dataset.xyz_ordered[test_ind]
 
         logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
-        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=NPOLYs, symmetry=qmodel_structure, order=dataset.order,
                         energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_train, y=y_train,
                         dX=None, dy=None, xyz_ordered=c_train, grm=None), dataset_fpaths["train"])
 
         logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
-        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=NPOLYs, symmetry=qmodel_structure, order=dataset.order,
                         energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_val, y=y_val,
                         dX=None, dy=None, xyz_ordered=c_val, grm=None), dataset_fpaths["val"])
 
         logging.info("Saving test dataset to: {}".format(dataset_fpaths["val"]))
-        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=NPOLYs, symmetry=qmodel_structure, order=dataset.order,
                         energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
                         dX=None, dy=None, xyz_ordered=c_test, grm=None), dataset_fpaths["test"])
 
-        return
-
-    else:
+    elif cfg['TYPE'] == 'ENERGY':
         GLOBAL_SET      = False
         GLOBAL_NATOMS   = None
         GLOBAL_NMON     = None
@@ -391,25 +343,39 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         X_val   = X_val[:, :-1]
         X_test  = X_test[:, :-1]
 
-        dX_train, dX_val, dX_test = None, None, None
-        dy_train, dy_val, dy_test = None, None, None
+        logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
+                        energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], 
+                        X=X_train[:, :-1], y=y_train, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["train"])
 
-    if cfg_dataset['ENERGY_LIMIT'] is not None:
-        # TODO:
-        # Don't know if this whole idea of capping the max energy is worthy 
-        # Need to look more into this
-        assert False
-        logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
+        logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
+                        energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
+                        X=X_val[:, :-1], y=y_val, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["val"])
 
-        indl, indm = (y_train < energy_limit).nonzero()[:, 0], (y_train >= energy_limit).nonzero()[:, 0]
-        y_test = torch.cat((y_test, y_train[indm]))
-        X_test = torch.cat((X_test, X_train[indm]))
-        X_train, y_train = X_train[indl], y_train[indl]
+        logging.info("Saving test dataset to: {}".format(dataset_fpaths["test"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
+                        energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
+                        X=X_test[:, :-1], y=y_test, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["test"])
+    else:
+        assert False, "unreachable"
 
-        indl, indm = (y_val < energy_limit).nonzero()[:, 0], (y_val >= energy_limit).nonzero()[:, 0]
-        y_test = torch.cat((y_test, y_val[indm]))
-        X_test = torch.cat((X_test, X_val[indm]))
-        X_val, y_val  = X_val[indl], y_val[indl]
+    #if cfg_dataset['ENERGY_LIMIT'] is not None:
+    #    # TODO:
+    #    # Don't know if this whole idea of capping the max energy is worthy 
+    #    # Need to look more into this
+    #    assert False
+    #    logging.info("Placing an energy limit train/val sets; moving rejected points to test set")
+
+    #    indl, indm = (y_train < energy_limit).nonzero()[:, 0], (y_train >= energy_limit).nonzero()[:, 0]
+    #    y_test = torch.cat((y_test, y_train[indm]))
+    #    X_test = torch.cat((X_test, X_train[indm]))
+    #    X_train, y_train = X_train[indl], y_train[indl]
+
+    #    indl, indm = (y_val < energy_limit).nonzero()[:, 0], (y_val >= energy_limit).nonzero()[:, 0]
+    #    y_test = torch.cat((y_test, y_val[indm]))
+    #    X_test = torch.cat((X_test, X_val[indm]))
+    #    X_val, y_val  = X_val[indl], y_val[indl]
 
     #print("Size of training dataset: {}".format(X_train.size()))
     #train_index = [torch.where((dataset.X == X_train[k]).all(dim=1))[0].item() for k in range(10)] #range(X_train.size()[0])]
@@ -417,65 +383,3 @@ def make_dataset(cfg_dataset, dataset_fpaths):
     #train_index_fname = os.path.join(DATASETS_INTERIM, BASENAME + "-train-index.json")
     #with open(train_index_fname, 'w') as fp:
     #    json.dump(train_index, fp=fp)
-
-    train_fpath = dataset_fpaths["train"]
-    val_fpath   = dataset_fpaths["val"]
-    test_fpath  = dataset_fpaths["test"]
-
-    dict_pk = dict(
-        NATOMS=dataset.NATOMS,
-        NMON=dataset.NMON,
-        NPOLY=dataset.NPOLY,
-        symmetry=cfg_dataset['SYMMETRY'],
-        order=cfg_dataset['ORDER'],
-        energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        variables=cfg_dataset['VARIABLES'],
-        purify=cfg_dataset['PURIFY'],
-        X=X_train,
-        y=y_train,
-        dX=dX_train,
-        dy=dy_train,
-        xyz_configs=xyz_configs_train,
-        grm=grm_train,
-    )
-
-    logging.info("Saving training dataset to: {}".format(train_fpath))
-    torch.save(dict_pk, train_fpath)
-
-    dict_pk  = dict(
-        NATOMS=dataset.NATOMS,
-        NMON=dataset.NMON,
-        NPOLY=dataset.NPOLY,
-        symmetry=cfg_dataset['SYMMETRY'],
-        order=cfg_dataset['ORDER'],
-        energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        variables=cfg_dataset['VARIABLES'],
-        purify=cfg_dataset['PURIFY'],
-        X=X_val,
-        y=y_val,
-        dX=dX_val,
-        dy=dy_val,
-        xyz_configs=xyz_configs_val,
-        grm=grm_val,
-    )
-    logging.info("Saving validation dataset to: {}".format(val_fpath))
-    torch.save(dict_pk, val_fpath)
-
-    dict_pk  = dict(
-        NATOMS=dataset.NATOMS,
-        NMON=dataset.NMON,
-        NPOLY=dataset.NPOLY,
-        symmetry=cfg_dataset['SYMMETRY'],
-        order=cfg_dataset['ORDER'],
-        energy_limit=cfg_dataset['ENERGY_LIMIT'],
-        variables=cfg_dataset['VARIABLES'],
-        purify=cfg_dataset['PURIFY'],
-        X=X_test,
-        y=y_test,
-        dX=dX_test,
-        dy=dy_test,
-        xyz_configs=xyz_configs_test,
-        grm=grm_test,
-    )
-    logging.info("Saving testing dataset to: {}".format(test_fpath))
-    torch.save(dict_pk, test_fpath)

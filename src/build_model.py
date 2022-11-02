@@ -1,6 +1,6 @@
 import collections
 import logging
-
+import itertools
 import torch
 
 class Builder:
@@ -13,14 +13,15 @@ class Builder:
         except Exception as e:
             raise e.__class__(str(e), name, args, kwargs) from e
 
-def build_network_yaml(architecture, input_features, output_features, builder=Builder(torch.nn.__dict__)):
+
+def build_network(cfg_model, hidden_dims, input_features, output_features, builder=Builder(torch.nn.__dict__)):
     layers = []
 
-    hidden_dims = architecture['HIDDEN_DIMS']
-    activation  = architecture['ACTIVATION']
-    bias        = architecture.get('BIAS', True)
-    BN          = architecture.get('BN', False)
-    dropout     = architecture.get('DROPOUT', 0.0)
+    #hidden_dims = architecture['HIDDEN_DIMS']
+    activation  = cfg_model['ACTIVATION']
+    bias        = cfg_model.get('BIAS', True)
+    BN          = cfg_model.get('BN', False)
+    dropout     = cfg_model.get('DROPOUT', 0.0)
 
     in_features = input_features
     out_features = input_features
@@ -41,6 +42,27 @@ def build_network_yaml(architecture, input_features, output_features, builder=Bu
     model = torch.nn.Sequential(*layers)
     model.double()
 
-    logging.info("Build model: {}".format(model))
-
     return model
+
+class QModel(torch.nn.Module):
+    def __init__(self, cfg_model, input_features, output_features):
+        super(QModel, self).__init__()
+
+        self.input_features = input_features
+        self.input_features_acc = list(itertools.accumulate(self.input_features)) 
+
+        hidden_dims = cfg_model['HIDDEN_DIMS']
+        assert len(input_features) == len(output_features)
+        assert len(hidden_dims) == len(input_features)
+
+        self.blocks = torch.nn.ModuleList([
+            build_network(cfg_model, hd, i, o)
+            for hd, i, o in zip(hidden_dims, input_features, output_features)
+        ])
+
+    def forward(self, X):
+        out = torch.empty(0)
+        for block, i1, i2 in zip(self.blocks, [0, *self.input_features_acc], [*self.input_features_acc, sum(self.input_features_acc)]):
+            out = torch.cat((out, block(X[:, i1:i2])), dim=1)
+
+        return out
