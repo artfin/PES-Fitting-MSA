@@ -101,11 +101,52 @@ class Evaluator:
 
         return self.yscaler.inverse_transform(ytr.detach().numpy())
 
+    def dipolec(self, X):
+        """
+        > model predicts X component
+        > Scaler assumes that a tuple (energy, dipx) is passed
+        """
+        self.model.eval()
+
+        Xtr = self.xscaler.transform(X)
+        Xtr = torch.from_numpy(Xtr)
+
+        with torch.no_grad():
+            y = self.model(Xtr)
+
+        nconfigs = y.shape[0]
+        dip_pred_ = np.c_[np.zeros(nconfigs), y]
+        dip_pred  = self.yscaler.inverse_transform(dip_pred_)
+
+        return dip_pred[:, 1:]
+
+    def dipoleq(self, X, xyz_ordered):
+        """
+        > model predicts partial charges
+        > Scaler assumes that a tuple (energy, dipx, dipy, dipz) is passed
+          hence we add a zero column instead of the energy to scale tuple and then truncate it to dipole components only
+        """
+        self.model.eval()
+
+        Xtr = self.xscaler.transform(X)
+        Xtr = torch.from_numpy(Xtr)
+
+        with torch.no_grad():
+            y = self.model(Xtr)
+
+        dip_pred = torch.einsum('ijk,ij->ik', xyz_ordered.double(), y)
+
+        nconfigs = y.shape[0]
+        dip_pred_ = np.c_[np.zeros(nconfigs), dip_pred]
+        dip_pred  = self.yscaler.inverse_transform(dip_pred_)
+
+        return dip_pred[:, 1:]
+
     def dipole(self, X, g):
         """
-        model predicts three scalar products
-        however Scaler assumes that a tuple (energy, dipx, dipy, dipz) is passed
-        hence we add a zero column instead of the energy to scale the whole thing and then get rid of it
+        > model predicts three scalar products
+        > however Scaler assumes that a tuple (energy, dipx, dipy, dipz) is passed
+          hence we add a zero column instead of the energy to scale the whole thing and then get rid of it
         """
         self.model.eval()
 
@@ -162,6 +203,12 @@ def retrieve_checkpoint(cfg, chk_fpath):
         model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
     elif cfg['TYPE'] == 'DIPOLE':
         model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
+    elif cfg['TYPE'] == 'DIPOLEQ':
+        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=meta_info["NATOMS"])
+    elif cfg['TYPE'] == 'DIPOLEC':
+        model = build_network_yaml(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
+    else:
+        assert False, "unreachable"
 
     model.load_state_dict(checkpoint["model"])
 
@@ -484,22 +531,24 @@ if __name__ == '__main__':
     logging.info("loaded configuration file from {}".format(cfg_path))
 
     assert 'TYPE' in cfg
-    assert cfg['TYPE'] in ('ENERGY', 'DIPOLE')
+    assert cfg['TYPE'] in ('ENERGY', 'DIPOLE', 'DIPOLEQ', 'DIPOLEC')
 
     cfg_dataset = cfg['DATASET']
 
     evaluator = retrieve_checkpoint(cfg, chk_path)
 
     if args.dipole_overview:
-        if args.test_file:
-            assert os.path.isfile(args.test_file), "File with configurations does not exist at {}".format(args.test_file)
+        if not args.test_file:
+            assert False
 
+        assert os.path.isfile(args.test_file), "File with configurations does not exist at {}".format(args.test_file)
+
+        if cfg['TYPE'] == 'DIPOLE':
             cfg_dataset.setdefault("PURIFY", False)
-
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLE', file_path=args.test_file,
-                                  order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
-                                  atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
-                                  anchor_pos=cfg_dataset['ANCHOR_POSITIONS'])
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
+                              anchor_pos=cfg_dataset['ANCHOR_POSITIONS'])
 
             nconfigs = len(dataset.xyz_configs)
 
@@ -512,6 +561,38 @@ if __name__ == '__main__':
                 xyz_config = dataset.xyz_configs[k]
                 dip = dataset.xyz_configs[k].dipole
                 en = dataset.xyz_configs[k].energy
+
+                print(dip_pred[k, :], dip, en)
+
+        elif cfg['TYPE'] == 'DIPOLEQ':
+            cfg_dataset.setdefault("PURIFY", False)
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=args.test_file,
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+            dip_pred = evaluator.dipoleq(dataset.X, dataset.xyz_ordered)
+
+            nconfigs = len(dataset.xyz_configs)
+            for k in range(nconfigs):
+                xyz_config = dataset.xyz_configs[k]
+                dip = dataset.xyz_configs[k].dipole
+                en  = dataset.xyz_configs[k].energy
+
+                print(dip_pred[k, :], dip, en)
+
+        elif cfg['TYPE'] == 'DIPOLEC':
+            cfg_dataset.setdefault("PURIFY", False)
+            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEC', file_path=args.test_file,
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+            dip_pred = evaluator.dipolec(dataset.X)
+
+            nconfigs = len(dataset.xyz_configs)
+            for k in range(nconfigs):
+                xyz_config = dataset.xyz_configs[k]
+                dip = dataset.xyz_configs[k].dipole
+                en  = dataset.xyz_configs[k].energy
 
                 print(dip_pred[k, :], dip, en)
 

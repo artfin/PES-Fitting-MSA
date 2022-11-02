@@ -41,6 +41,7 @@ def seed_torch(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
 
+
 def preprocess_dataset(train, val, test, cfg):
     if cfg['NORMALIZE'] == 'std':
         xscaler = StandardScaler()
@@ -277,13 +278,13 @@ class WRMSELoss_Ratio_dipole(torch.nn.Module):
 
         dd   = dip - dip_pred
         wdd  = torch.einsum('ij,i->ij', dd, w)
-        #wmse = torch.mean(torch.einsum('ij,ij->i', wdd, dd))
+        wmse = torch.mean(torch.einsum('ij,ij->i', wdd, dd))
 
         #for k in range(10):
         #    print("dip: {}; dip_pred: {}".format(dip[k].detach().numpy(), dip_pred[k].detach().numpy()))
 
-        #return torch.sqrt(wmse)
-        return 1000.0 * torch.mean(torch.abs(wdd))
+        return 1000.0 * torch.sqrt(wmse)
+        #return 1000.0 * torch.mean(torch.abs(wdd))
 
 
 class WMSELoss_Ratio_wforces(torch.nn.Module):
@@ -575,6 +576,12 @@ class Training:
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLEQ':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLEC':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
 
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
             Eref = self.cfg_loss.get('EREF', 2000.0)
@@ -797,16 +804,37 @@ class Training:
             if self.cfg_loss['USE_FORCES']:
                 train_y_pred, train_dy_pred = self.compute_forces(self.train)
                 loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+
             elif self.cfg['TYPE'] == 'DIPOLE':
                 # y_pred:    [(d, a1), (d, a2), (d, a3)] -- scalar products with anchor vectors 
                 # dip_pred:  g @ y_pred                  -- Cartesian components of the predicted dipole
+
                 y_pred = self.model(self.train.X)
                 dip_pred = torch.einsum('ijk,ik->ij', self.train.grm, y_pred)
 
-                loss = self.loss_fn(self.train.y, y_pred)
-            else:
+                loss = self.loss_fn(self.train.y, y_pred) # WTF, y_pred?
+
+            elif self.cfg['TYPE'] == 'DIPOLEQ':
+                # y_pred: [q1, ... q7]      -- partial charges on atoms
+                # dip_pred: sum(q_i * r_i)  -- Cartesian components of the predicted dipole [need to descale in the loss function]
+
+                y_pred = self.model(self.train.X)
+                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), y_pred)
+
+                LAMBDA_Q = 10000.0
+                qsum = torch.sum(y_pred, dim=1)
+                loss = self.loss_fn(self.train.y, dip_pred) + LAMBDA_Q * torch.sum(qsum * qsum)
+
+            elif self.cfg['TYPE'] == 'DIPOLEC':
+                dip_pred = self.model(self.train.X)
+                loss = self.loss_fn(self.train.y, dip_pred)
+
+            elif self.cfg['TYPE'] == 'ENERGY':
                 y_pred = self.model(self.train.X)
                 loss = self.loss_fn(self.train.y, y_pred)
+
+            else:
+                assert False, "unreachable"
 
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
@@ -867,7 +895,36 @@ class Training:
             self.writer.add_scalar("loss/train", loss_train_e, epoch)
             self.writer.add_scalar("loss/val", loss_val_e, epoch)
 
-        else:
+        elif self.cfg['TYPE'] == 'DIPOLEQ':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                train_y_pred = self.model(self.train.X)
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_y_pred)
+                loss_train = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_y_pred = self.model(self.val.X)
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_y_pred)
+                loss_val = self.loss_fn(self.val.y, dip_pred_val)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
+            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+
+        elif self.cfg['TYPE'] == 'DIPOLEC':
+            with torch.no_grad():
+                train_dip_pred = self.model(self.train.X)
+                loss_train = self.loss_fn(self.train.y, train_dip_pred)
+
+                val_dip_pred = self.model(self.val.X)
+                loss_val = self.loss_fn(self.val.y, val_dip_pred)
+
+                self.loss_val = loss_val
+
+            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+
+        elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
             with torch.no_grad():
@@ -884,6 +941,9 @@ class Training:
 
             self.writer.add_scalar("loss/train", loss_train, epoch)
             self.writer.add_scalar("loss/val", loss_val, epoch)
+
+        else:
+            assert False, "unreachable"
 
 
     def model_eval(self):
@@ -1110,7 +1170,7 @@ if __name__ == "__main__":
 
     assert 'TYPE' in cfg
     typ = cfg['TYPE']
-    assert typ in ('ENERGY', 'DIPOLE')
+    assert typ in ('ENERGY', 'DIPOLE', 'DIPOLEQ', 'DIPOLEC')
 
     cfg_dataset = cfg['DATASET']
     train, val, test = load_dataset(cfg_dataset, typ)
@@ -1121,6 +1181,12 @@ if __name__ == "__main__":
         model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=1)
     elif typ == 'DIPOLE':
         model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=3)
+    elif typ == 'DIPOLEQ':
+        model = build_network_yaml(cfg_model, input_features=train.NPOLY, output_features=train.NATOMS)
+    elif typ == 'DIPOLEC':
+        model = build_network_yaml(cfg_model, input_features=3 * train.NATOMS, output_features=1)
+    else:
+        assert False, "unreachable"
 
     nparams = count_params(model)
     logging.info("Number of parameters: {}".format(nparams))

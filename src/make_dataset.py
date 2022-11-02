@@ -71,6 +71,44 @@ def save_json(d, fpath):
     with open(fpath, mode='w') as fp:
         json.dump(d, cls=JSONNumpyEncoder, fp=fp)
 
+def save_pk(fpath, dataset_typ, NATOMS, NMON, NPOLY, symmetry, order, energy_limit, variables, purify, X, y, dX, dy, xyz_configs, grm):
+    dict_pk = dict(
+        NATOMS=NATOMS,
+        NMON=NMON,
+        NPOLY=NPOLY,
+        symmetry=symmetry,
+        order=order,
+        energy_limit=energy_limit,
+        variables=variables,
+        purify=purify,
+        X=X,
+        y=y,
+        dX=dX,
+        dy=dy,
+        xyz_configs=xyz_configs,
+        grm=grm,
+    )
+
+    logging.info("Saving {} dataset to: {}".format(dataset_typ, fpath))
+    torch.save(dict_pk, fpath)
+
+
+def prepare_symmetry_strings(sg):
+    unique_atoms = len(sg.replace(" ", ""))
+
+    sgs = []
+    for ua in range(unique_atoms):
+        sgt = sg.replace(" ", "")
+        if int(sgt[ua]) > 1:
+            sgt = sgt[:ua] + str(int(sgt[ua]) - 1) + sgt[(ua + 1):]
+            sgt = sgt[:(ua + 1)] + '1' + sgt[(ua + 1):]
+
+        sgt = " ".join([s for s in sgt])
+        if sgt not in sgs:
+            sgs.append(sgt)
+
+    return sgs
+
 def make_dataset_fpaths(cfg_dataset):
     def flatten(d, parent_key='', sep='_'):
         items = []
@@ -146,6 +184,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         dX_train, dy_train = dataset.dX[train_ind, :, :], dataset.dy[train_ind, :, :]
         dX_val, dy_val     = dataset.dX[val_ind,   :, :], dataset.dy[val_ind,   :, :]
         dX_test, dy_test   = dataset.dX[test_ind,  :, :], dataset.dy[test_ind,  :, :]
+
     elif cfg_dataset['TYPE'] == 'DIPOLE':
         if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Stratification is not implemented for `typ=dipole`")
@@ -166,28 +205,6 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         for k in range(nconfigs):
             xyz_config = dataset.xyz_configs[k]
             y[k, :] = np.concatenate((xyz_config.energy, xyz_config.dipole))
-
-        #    anchors = []
-        #    for anc in anchor_pos:
-        #        if anc.get(0) is not None:
-        #            anchors.append(xyz_config.coords1[anc.get(0)])
-        #        elif anc.get(1) is not None:
-        #            anchors.append(xyz_config.coords2[anc.get(1)])
-        #        else:
-        #            assert False, "unreachable"
-
-        #    a1, a2, a3 = anchors[0], anchors[1], anchors[2]
-
-        #    # gram matrix
-        #    g = np.array([
-        #        [np.dot(a1, a1), np.dot(a1, a2), np.dot(a1, a3)],
-        #        [np.dot(a2, a1), np.dot(a2, a2), np.dot(a2, a3)],
-        #        [np.dot(a3, a1), np.dot(a3, a2), np.dot(a3, a3)],
-        #    ])
-
-        #    d = xyz_config.dipole
-        #    dm = np.array([np.dot(d, a1), np.dot(d, a2), np.dot(d, a3)])
-        #    c = np.linalg.inv(g) @ dm
 
         dataset.y = torch.from_numpy(y)
         print(dataset.y.size())
@@ -211,6 +228,100 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
         dX_train, dX_val, dX_test = None, None, None
         dy_train, dy_val, dy_test = None, None, None
+
+    elif cfg_dataset['TYPE'] == 'DIPOLEC':
+        if len(cfg_dataset['SOURCE']) > 1:
+            logging.info("Stratification is not implemented for `typ=dipolec`")
+            assert False
+
+        dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEC', file_path=cfg_dataset['SOURCE'][0],
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+        nconfigs = len(dataset.xyz_configs)
+        y = np.zeros((nconfigs, 2))
+
+        for k in range(nconfigs):
+            xyz_config = dataset.xyz_configs[k]
+            y[k, :] = np.array([xyz_config.energy[0], xyz_config.dipole[0]])
+            #y[k, :] = np.concatenate((xyz_config.energy[0], xyz_config.dipole[0]))
+
+        dataset.y = torch.from_numpy(y)
+
+        indices = list(range(dataset.NCONFIGS))
+        train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
+        val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
+
+        X_train, y_train = dataset.X[train_ind, :], dataset.y[train_ind]
+        X_val, y_val     = dataset.X[val_ind,   :], dataset.y[val_ind]
+        X_test, y_test   = dataset.X[test_ind,  :], dataset.y[test_ind]
+
+        logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_train, y=y_train,
+                        dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["train"])
+
+        logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_val, y=y_val,
+                        dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["val"])
+
+        logging.info("Saving test dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
+                        dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["test"])
+
+        return
+
+    elif cfg_dataset['TYPE'] == 'DIPOLEQ':
+        if len(cfg_dataset['SOURCE']) > 1:
+            logging.info("Stratification is not implemented for `typ=dipoleq`")
+            assert False
+
+        sgs = prepare_symmetry_strings(cfg_dataset['SYMMETRY'])
+        assert len(sgs) == 1, "!!!"
+
+        sg = sgs[0]
+        dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=cfg_dataset['SOURCE'][0],
+                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
+                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+
+        nconfigs = len(dataset.xyz_configs)
+        y = np.zeros((nconfigs, 4))
+
+        for k in range(nconfigs):
+            xyz_config = dataset.xyz_configs[k]
+            y[k, :] = np.concatenate((xyz_config.energy, xyz_config.dipole))
+
+        dataset.y = torch.from_numpy(y)
+        print(dataset.y.size())
+        print(dataset.y)
+
+        indices = list(range(nconfigs))
+        train_ind, test_ind = data_split(indices, random_state=42, test_size=0.2)
+        val_ind, test_ind   = data_split(test_ind, random_state=42, test_size=0.5)
+
+        X_train, y_train, c_train = dataset.X[train_ind, :], dataset.y[train_ind], dataset.xyz_ordered[train_ind]
+        X_val, y_val, c_val       = dataset.X[val_ind,   :], dataset.y[val_ind], dataset.xyz_ordered[val_ind]
+        X_test, y_test, c_test    = dataset.X[test_ind,  :], dataset.y[test_ind], dataset.xyz_ordered[test_ind]
+
+        logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_train, y=y_train,
+                        dX=None, dy=None, xyz_ordered=c_train, grm=None), dataset_fpaths["train"])
+
+        logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_val, y=y_val,
+                        dX=None, dy=None, xyz_ordered=c_val, grm=None), dataset_fpaths["val"])
+
+        logging.info("Saving test dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=sg, order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
+                        dX=None, dy=None, xyz_ordered=c_test, grm=None), dataset_fpaths["test"])
+
+        return
+
     else:
         GLOBAL_SET      = False
         GLOBAL_NATOMS   = None

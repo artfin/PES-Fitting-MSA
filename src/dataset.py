@@ -78,7 +78,7 @@ class PolyDataset_t:
     dy           : Optional[torch.Tensor]
     energy_limit : float = None
     purify       : bool  = False
-    xyz_configs  : Optional[List[XYZConfigPair]] = None
+    xyz_ordered  : Optional[torch.Tensor] = None
     grm          : Optional[torch.Tensor] = None
 
 def load_npz(fpath, load_forces=False, load_dipole=False):
@@ -300,6 +300,10 @@ class PolyDataset(Dataset):
                 assert anchor_pos is not None
                 NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_dipole=True)
                 self.grm = prepare_grm(self.xyz_configs, anchor_pos)
+            elif self.typ == 'DIPOLEQ':
+                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_dipole=True)
+            elif self.typ == 'DIPOLEC':
+                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_dipole=True)
             else:
                 assert False
             #write_npz("ethanol_dft-50000.npz", self.xyz_configs)
@@ -326,6 +330,17 @@ class PolyDataset(Dataset):
                 self.X, self.y = self.prepare_dataset_with_energies_from_configs()
             elif self.typ == 'DIPOLE':
                 self.X, self.y = self.prepare_dataset_with_dipoles_from_configs()
+            elif self.typ == 'DIPOLEQ':
+                self.X, self.y = self.prepare_dataset_with_dipoles_from_configs()
+            elif self.typ == 'DIPOLEC':
+                yij = self.make_yij(self.xyz_configs, intermolecular_variables=self.intermolecular_variables, intramolecular_variables=self.intramolecular_variables)
+
+                dipoles = np.zeros((NCONFIGS, 3))
+                for ind, xyz_config in enumerate(self.xyz_configs):
+                    dipoles[ind] = xyz_config.dipole
+
+                self.X = torch.reshape(self.xyz_ordered, (NCONFIGS, 3 * self.NATOMS))
+                self.y = torch.from_numpy(dipoles)
             else:
                 assert False
 
@@ -352,7 +367,7 @@ class PolyDataset(Dataset):
             save_polynomials_to_bas(basis_file_masked, poly_masked)
             logging.info("Saving .BAS file for the basis set to: {}".format(basis_file_masked))
 
-        if self.intramolecular_variables == "ZERO":
+        if self.intramolecular_variables == "ZERO" and typ != 'DIPOLEC':
             self.mask = self.X.abs().sum(dim=0).bool().numpy().astype(int)
             logging.info("Applying non-zero mask. Selecting {} polynomials out of {} initially...".format(
                 self.mask.sum(), len(self.mask)
@@ -673,7 +688,6 @@ class PolyDataset(Dataset):
 
         return drdx
 
-
     def make_yij(self, xyz_configs, intermolecular_variables=None, intramolecular_variables=None):
         """
         intermolecular_variables: (ZERO, SWITCH-EXP6)
@@ -751,6 +765,8 @@ class PolyDataset(Dataset):
             # early return!
             return yij
 
+        self.xyz_ordered = torch.zeros((NCONFIGS, self.NATOMS, 3))
+
         # Case of molecule pair
         for n in range(NCONFIGS):
             c = xyz_configs[n]
@@ -773,6 +789,8 @@ class PolyDataset(Dataset):
                     iter2 = iter2 + 1
 
             assert len(coords) == self.NATOMS
+
+            self.xyz_ordered[n] = torch.tensor(np.array(coords))
 
             k = 0
             for i, j in combinations(range(self.NATOMS), 2):
