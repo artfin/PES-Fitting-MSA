@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = False
+USE_WANDB = True
 if USE_WANDB:
     import wandb
 
@@ -830,11 +830,12 @@ class Training:
             elif self.cfg['TYPE'] == 'DIPOLEQ':
                 # y_pred: [q1, ... q7]      -- partial charges on atoms
                 # dip_pred: sum(q_i * r_i)  -- Cartesian components of the predicted dipole [need to descale in the loss function]
+                # additional term to `reqularize` the sum of partial charges
 
                 y_pred = self.model(self.train.X)
                 dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), y_pred)
 
-                LAMBDA_Q = 10000.0
+                LAMBDA_Q = 1.0e3 
                 qsum = torch.sum(y_pred, dim=1)
                 loss = self.loss_fn(self.train.y, dip_pred) + LAMBDA_Q * torch.sum(qsum * qsum)
 

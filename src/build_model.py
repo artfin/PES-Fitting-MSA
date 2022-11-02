@@ -3,6 +3,8 @@ import logging
 import itertools
 import torch
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class Builder:
     def __init__(self, *namespaces):
         self._namespace = collections.ChainMap(*namespaces)
@@ -60,9 +62,10 @@ class QModel(torch.nn.Module):
             for hd, i, o in zip(hidden_dims, input_features, output_features)
         ])
 
+
     def forward(self, X):
-        out = torch.empty(0)
+        out = torch.empty(0).to(DEVICE)
         for block, i1, i2 in zip(self.blocks, [0, *self.input_features_acc], [*self.input_features_acc, sum(self.input_features_acc)]):
             out = torch.cat((out, block(X[:, i1:i2])), dim=1)
 
-        return out
+        return out 
