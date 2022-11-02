@@ -12,6 +12,11 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
+
+USE_WANDB = True
+if USE_WANDB:
+    import wandb
+
 #from pydrive.auth import GoogleAuth
 #from pydrive.drive import GoogleDrive
 
@@ -707,6 +712,15 @@ class Training:
         self.val.y = self.val.y.to(DEVICE)
 
         self.loss_fn = self.loss_fn.to(DEVICE)
+        
+        if self.cfg['TYPE'] == 'DIPOLE':
+            self.train.grm = self.train.grm.to(DEVICE)
+            self.val.grm   = self.val.grm.to(DEVICE)
+
+        if self.cfg['TYPE'] == 'DIPOLEQ':
+            self.train.xyz_ordered = self.train.xyz_ordered.to(DEVICE)
+            self.val.xyz_ordered = self.val.xyz_ordered.to(DEVICE)
+            self.test.xyz_ordered = self.test.xyz_ordered.to(DEVICE)
 
         if self.train.dX is not None:
             self.train.dX = self.train.dX.to(DEVICE)
@@ -909,6 +923,9 @@ class Training:
 
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
+                
+                # log metrics to WANDB to visualize model performance
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val})
 
             logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
@@ -1092,6 +1109,13 @@ def load_dataset(cfg_dataset, typ):
     else:
         logging.info("Dataset found.")
 
+    if USE_WANDB:
+        wandb.config = {
+           "type"   : typ,
+           "name"   : cfg_dataset['NAME'],
+           "source" : cfg_dataset['SOURCE'],
+        }
+
     train = PolyDataset.from_pickle(train_fpath)
     assert train.energy_limit == cfg_dataset['ENERGY_LIMIT']
     assert train.purify       == cfg_dataset['PURIFY']
@@ -1190,6 +1214,10 @@ if __name__ == "__main__":
 
     nparams = count_params(model)
     logging.info("Number of parameters: {}".format(nparams))
+
+    if USE_WANDB:
+        project_name = cfg_dataset['NAME'] + "-" + cfg['TYPE']
+        wandb.init(project=project_name)
 
     t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, model, cfg, train, val, test, xscaler, yscaler)
 

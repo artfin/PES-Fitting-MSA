@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
 from pybind_ch4 import Poten_CH4
 
-plt.style.use('science')
+#plt.style.use('science')
 
 plt.rcParams.update({
     "font.family": "serif",
