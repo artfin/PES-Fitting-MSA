@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = False
+USE_WANDB = True
 if USE_WANDB:
     import wandb
 
@@ -566,16 +566,14 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'LAMBDA_Q')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
         # have all defaults in the same place and set them to configuration if the value is omitted in the YAML file
-        use_forces = self.cfg_loss.get('USE_FORCES', False)
-        self.cfg_loss['USE_FORCES'] = use_forces
-
-        use_forces_after_epoch = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
-        self.cfg_loss['USE_FORCES_AFTER_EPOCH'] = use_forces_after_epoch
+        self.cfg_loss.setdefault('LAMBDA_Q', 1.0e3)
+        self.cfg_loss.setdefault('USE_FORCES_AFTER_EPOCH', None)
+        self.cfg_loss.setdefault('USE_FORCES', False)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -837,9 +835,8 @@ class Training:
 
                 # charge regularization
                 # NOTE: use `mean`
-                LAMBDA_Q = 1.0e3
                 qsum     = torch.sum(y_pred, dim=1)
-                qreg     = LAMBDA_Q * torch.mean(qsum * qsum)
+                qreg     = self.cfg_loss['LAMBDA_Q'] * torch.mean(qsum * qsum)
                 loss     = self.loss_fn(self.train.y, dip_pred)
 
                 loss = loss + qreg
@@ -929,11 +926,18 @@ class Training:
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
+                train_qsum = torch.sum(train_y_pred, dim=1)
+                train_qreg = self.cfg_loss['LAMBDA_Q'] * torch.mean(train_qsum * train_qsum)
+                val_qsum   = torch.sum(val_y_pred, dim=1)
+                val_qreg   = self.cfg_loss['LAMBDA_Q'] * torch.mean(val_qsum * val_qsum)
+
                 # log metrics to WANDB to visualize model performance
                 if USE_WANDB:
-                    wandb.log({"loss_train": loss_train, "loss_val": loss_val})
+                    wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg})
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+            logging.info("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
+                epoch, PRINT_PRECISION, loss_train, train_qreg, loss_val, val_qreg
+            ))
 
         elif self.cfg['TYPE'] == 'DIPOLEC':
             with torch.no_grad():
