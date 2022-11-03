@@ -16,7 +16,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
-from build_model import build_network_yaml
+from build_model import build_network, QModel
 from dataset import PolyDataset
 from genpip import cmdstat, cl
 from train_model import load_dataset, load_cfg
@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
 from pybind_ch4 import Poten_CH4
 
-#plt.style.use('science')
+plt.style.use('science')
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -200,13 +200,14 @@ def retrieve_checkpoint(cfg, chk_fpath):
     meta_info = checkpoint["meta_info"]
 
     if cfg['TYPE'] == 'ENERGY':
-        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+        model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
     elif cfg['TYPE'] == 'DIPOLE':
-        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
+        model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
     elif cfg['TYPE'] == 'DIPOLEQ':
-        model = build_network_yaml(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=meta_info["NATOMS"])
+        symm = cfg['DATASET']['SYMMETRY'].replace(" ", "")
+        model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(symm)])
     elif cfg['TYPE'] == 'DIPOLEC':
-        model = build_network_yaml(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
+        model = build_network(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
     else:
         assert False, "unreachable"
 
@@ -573,12 +574,32 @@ if __name__ == '__main__':
             dip_pred = evaluator.dipoleq(dataset.X, dataset.xyz_ordered)
 
             nconfigs = len(dataset.xyz_configs)
+            en_dm = np.zeros((nconfigs, 3))
+
             for k in range(nconfigs):
                 xyz_config = dataset.xyz_configs[k]
+                en = dataset.xyz_configs[k].energy
                 dip = dataset.xyz_configs[k].dipole
-                en  = dataset.xyz_configs[k].energy
+                en_dm[k, 0] = en
+                en_dm[k, 1] = np.linalg.norm(dip) #(np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
+                en_dm[k, 2] = np.linalg.norm(dip_pred[k, :])
 
-                print(dip_pred[k, :], dip, en)
+            plt.figure(figsize=(10, 10))
+
+            plt.scatter(en_dm[:,0], en_dm[:,1], s=20, marker='o', facecolors='none',
+                        color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True)
+            plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
+                        color='k', lw=0.5, zorder=2, rasterized=True)
+
+            plt.xlim((-200.0, 10000.0))
+            plt.ylim((0.0, 0.3))
+
+            #plt.xscale('log')
+
+            plt.xlabel(r"Energy, cm$^{-1}$")
+            plt.ylabel("|mu| - |mupred| / |mu|")
+
+            plt.show()
 
         elif cfg['TYPE'] == 'DIPOLEC':
             cfg_dataset.setdefault("PURIFY", False)

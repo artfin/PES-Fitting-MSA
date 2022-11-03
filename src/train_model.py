@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -835,9 +835,14 @@ class Training:
                 y_pred = self.model(self.train.X)
                 dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), y_pred)
 
-                LAMBDA_Q = 1.0e3 
-                qsum = torch.sum(y_pred, dim=1)
-                loss = self.loss_fn(self.train.y, dip_pred) + LAMBDA_Q * torch.sum(qsum * qsum)
+                # charge regularization
+                # NOTE: use `mean`
+                LAMBDA_Q = 1.0e3
+                qsum     = torch.sum(y_pred, dim=1)
+                qreg     = LAMBDA_Q * torch.mean(qsum * qsum)
+                loss     = self.loss_fn(self.train.y, dip_pred)
+
+                loss = loss + qreg
 
             elif self.cfg['TYPE'] == 'DIPOLEC':
                 dip_pred = self.model(self.train.X)
