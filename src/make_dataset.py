@@ -168,8 +168,20 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         grm_val = dataset.grm[val_ind]
         grm_test = dataset.grm[test_ind]
 
-        dX_train, dX_val, dX_test = None, None, None
-        dy_train, dy_val, dy_test = None, None, None
+        logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_train, y=y_train,
+                        dX=None, dy=None, xyz_ordered=None, grm=grm_train), dataset_fpaths["train"])
+
+        logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_val, y=y_val,
+                        dX=None, dy=None, xyz_ordered=None, grm=grm_val), dataset_fpaths["val"])
+
+        logging.info("Saving test dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
+                        dX=None, dy=None, xyz_ordered=None, grm=grm_test), dataset_fpaths["test"])
 
     elif cfg_dataset['TYPE'] == 'DIPOLEC':
         if len(cfg_dataset['SOURCE']) > 1:

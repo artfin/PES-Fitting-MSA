@@ -51,11 +51,11 @@ class QModel(torch.nn.Module):
         super(QModel, self).__init__()
 
         self.input_features = input_features
-        self.input_features_acc = list(itertools.accumulate(self.input_features)) 
+        self.input_features_acc = list(itertools.accumulate(self.input_features))
 
         hidden_dims = cfg_model['HIDDEN_DIMS']
-        assert len(input_features) == len(output_features)
-        assert len(hidden_dims) == len(input_features)
+        assert len(input_features) == len(output_features), "input_features: {}; output_features: {}".format(input_features, output_features)
+        assert len(hidden_dims) == len(input_features), "hidden_dims: {}; input_features: {}".format(hidden_dims, input_features)
 
         self.blocks = torch.nn.ModuleList([
             build_network(cfg_model, hd, i, o)

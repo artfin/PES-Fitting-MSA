@@ -1,6 +1,6 @@
 import argparse
 import collections
-from itertools import combinations
+from itertools import accumulate, combinations
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,6 +20,7 @@ from build_model import build_network, QModel
 from dataset import PolyDataset
 from genpip import cmdstat, cl
 from train_model import load_dataset, load_cfg
+from make_dataset import prepare_qmodel_structure
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -199,15 +200,10 @@ def retrieve_checkpoint(cfg, chk_fpath):
     checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    if cfg['TYPE'] == 'ENERGY':
-        model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
-    elif cfg['TYPE'] == 'DIPOLE':
-        model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
-    elif cfg['TYPE'] == 'DIPOLEQ':
-        symm = cfg['DATASET']['SYMMETRY'].replace(" ", "")
-        model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(symm)])
-    elif cfg['TYPE'] == 'DIPOLEC':
-        model = build_network(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
+    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+    elif cfg['TYPE'] == 'DIPOLE':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
+    elif cfg['TYPE'] == 'DIPOLEQ': model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(natoms) for natoms in meta_info["symmetry"].values()])
+    elif cfg['TYPE'] == 'DIPOLEC': model = build_network(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
     else:
         assert False, "unreachable"
 
@@ -567,11 +563,32 @@ if __name__ == '__main__':
 
         elif cfg['TYPE'] == 'DIPOLEQ':
             cfg_dataset.setdefault("PURIFY", False)
-            dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=args.test_file,
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
-                              atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
-            dip_pred = evaluator.dipoleq(dataset.X, dataset.xyz_ordered)
+            qmodel_structure = prepare_qmodel_structure(cfg_dataset['SYMMETRY'])
+            logging.info("Q-MODEL STRUCTURE: {}".format(qmodel_structure))
+
+            datasets = [
+                PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=args.test_file,
+                            order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
+                            atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+                for sg in qmodel_structure.keys()
+            ]
+
+            dataset = datasets[0]
+            nconfigs = len(dataset.xyz_configs)
+            assert all(len(dataset.xyz_configs) == nconfigs for dataset in datasets)
+
+            NPOLYs = [dataset.NPOLY for dataset in datasets]
+            NPOLYs_acc = list(accumulate(NPOLYs))
+
+            NPOLY_TOTAL = sum(NPOLYs)
+            logging.info("NPOLY total: {}".format(NPOLY_TOTAL))
+
+            X = torch.zeros((nconfigs, NPOLY_TOTAL))
+            for dataset, i1, i2 in zip(datasets, [0, *NPOLYs_acc], [*NPOLYs_acc, NPOLY_TOTAL]):
+                X[:, i1:i2] = dataset.X
+
+            dip_pred = evaluator.dipoleq(X, dataset.xyz_ordered)
 
             nconfigs = len(dataset.xyz_configs)
             en_dm = np.zeros((nconfigs, 3))
@@ -586,13 +603,14 @@ if __name__ == '__main__':
 
             plt.figure(figsize=(10, 10))
 
-            plt.scatter(en_dm[:,0], en_dm[:,1], s=20, marker='o', facecolors='none',
+            plt.scatter(en_dm[:,0], en_dm[:,1] - en_dm[:, 2], s=20, marker='o', facecolors='none',
                         color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True)
-            plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
-                        color='k', lw=0.5, zorder=2, rasterized=True)
+            #plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
+            #            color='k', lw=0.5, zorder=2, rasterized=True)
 
             plt.xlim((-200.0, 10000.0))
-            plt.ylim((0.0, 0.3))
+            #plt.ylim((0.0, 0.3))
+            plt.ylim((-0.01, 0.01))
 
             #plt.xscale('log')
 

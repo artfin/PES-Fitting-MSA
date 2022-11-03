@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -709,7 +709,7 @@ class Training:
         self.val.y = self.val.y.to(DEVICE)
 
         self.loss_fn = self.loss_fn.to(DEVICE)
-        
+
         if self.cfg['TYPE'] == 'DIPOLE':
             self.train.grm = self.train.grm.to(DEVICE)
             self.val.grm   = self.val.grm.to(DEVICE)
@@ -823,7 +823,7 @@ class Training:
                 y_pred = self.model(self.train.X)
                 dip_pred = torch.einsum('ijk,ik->ij', self.train.grm, y_pred)
 
-                loss = self.loss_fn(self.train.y, y_pred) # WTF, y_pred?
+                loss = self.loss_fn(self.train.y, dip_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLEQ':
                 # y_pred: [q1, ... q7]      -- partial charges on atoms
@@ -911,6 +911,25 @@ class Training:
             self.writer.add_scalar("loss/train", loss_train_e, epoch)
             self.writer.add_scalar("loss/val", loss_val_e, epoch)
 
+        elif self.cfg['TYPE'] == 'DIPOLE':
+            with torch.no_grad():
+                train_y_pred   = self.model(self.train.X)
+                dip_pred_train = torch.einsum('ijk,ik->ij', self.train.grm, train_y_pred)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_y_pred   = self.model(self.val.X)
+                dip_pred_val = torch.einsum('ijk,ik->ij', self.val.grm, val_y_pred)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
+            # log metrics to WANDB to visualize model performance
+            if USE_WANDB:
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val})
+
+            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+
         elif self.cfg['TYPE'] == 'DIPOLEQ':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
@@ -931,9 +950,9 @@ class Training:
                 val_qsum   = torch.sum(val_y_pred, dim=1)
                 val_qreg   = self.cfg_loss['LAMBDA_Q'] * torch.mean(val_qsum * val_qsum)
 
-                # log metrics to WANDB to visualize model performance
-                if USE_WANDB:
-                    wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg})
+            # log metrics to WANDB to visualize model performance
+            if USE_WANDB:
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg})
 
             logging.info("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
                 epoch, PRINT_PRECISION, loss_train, train_qreg, loss_val, val_qreg
@@ -1210,14 +1229,11 @@ if __name__ == "__main__":
     train, val, test = load_dataset(cfg_dataset, typ)
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
 
-    print("train.NPOLY: {}".format(train.NPOLY))
-    print("train.SYMMETRY: {}".format(train.symmetry))
-
     cfg_model = cfg['MODEL']
     if typ == 'ENERGY':
         model = build_network(cfg_model, input_features=train.NPOLY, output_features=1)
     elif typ == 'DIPOLE':
-        model = build_network(cfg_model, input_features=train.NPOLY, output_features=3)
+        model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
     elif typ == 'DIPOLEQ':
         model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
     elif typ == 'DIPOLEC':
