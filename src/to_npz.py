@@ -1,6 +1,6 @@
 import numpy as np
 
-from dataset import load_xyz_with_energy, load_xyz_with_dipole
+from dataset import load_xyz_with_energy, load_xyz_with_dipole, load_npz, XYZConfig
 
 def write_npz_ch4_n2(npz_path, natoms, nconfigs, xyz_configs):
     energy = np.array([xyz_config.energy for xyz_config in xyz_configs]).reshape((nconfigs, 1))
@@ -35,8 +35,11 @@ def write_npz_ch4_n2_dipole(npz_path, natoms, nconfigs, xyz_configs):
     R1 = np.asarray(R1)
     R2 = np.asarray(R2)
 
-    N = 100
-    np.savez(npz_path, nmol=2, E=energy[:N], D=dipole[:N], z1=z1, z2=z2, R1=R1[:N], R2=R2[:N])
+    import random
+    nconfigs = len(xyz_configs)
+    ind = random.choices(range(nconfigs), k=100)
+    np.savez(npz_path, nmol=2, E=energy[ind], D=dipole[ind], z1=z1, z2=z2, R1=R1[ind], R2=R2[ind])
+    #np.savez(npz_path, nmol=2, E=energy, D=dipole, z1=z1, z2=z2, R1=R1, R2=R2)
 
 def write_npz_n2_ar(npz_path, natoms, nconfigs, xyz_configs):
     energy = np.array([xyz_config.energy for xyz_config in xyz_configs]).reshape((nconfigs, 1))
@@ -55,11 +58,54 @@ def write_npz_n2_ar(npz_path, natoms, nconfigs, xyz_configs):
 
     np.savez(npz_path, nmol=2, E=energy, z1=z1, z2=z2, R1=R1, R2=R2)
 
+
 if __name__ == "__main__":
+    natoms, nconfigs1, xyz_configs_en = load_xyz_with_energy("datasets/raw/n2-ar/N2-AR-EN-TQ5-CBS.xyz")
+    natoms, nconfigs2, xyz_configs_dip = load_xyz_with_dipole("datasets/raw/N2-AR-DIP-VTZ.xyz")
+    assert nconfigs1 == nconfigs2
+    nconfigs = nconfigs1
+
+    def find_config(configs, c):
+        for cc in configs:
+            if np.allclose(cc.coords, c.coords):
+                return cc
+
+        return None
+
+    z1 = np.vstack((xyz_configs_en[0].z[0:2]))
+    z2 = np.asarray(xyz_configs_en[0].z[2])
+
+    R1, R2 = [], []
+    energy, dipole = [], []
+
+    from tqdm import tqdm
+    for ind, c in enumerate(tqdm(xyz_configs_en)):
+        cc = find_config(xyz_configs_dip, c)
+        if cc is None:
+            print(c)
+            assert False
+
+        R1.append(c.coords[:2, :])
+        R2.append([c.coords[2, :]])
+        energy.append(c.energy)
+        dipole.append(cc.dipole)
+
+    energy = np.asarray(energy).reshape((nconfigs, 1))
+    dipole = np.asarray(dipole).reshape((nconfigs, 3))
+
+    npz_path = "N2-AR-EN-DIP-NONRIGID.npz"
+    print("Writing NPZ file to file={}".format(npz_path))
+    np.savez("N2-AR-EN-DIP-NONRIGID.npz", nmol=2, E=energy, D=dipole, z1=z1, z2=z2, R1=R1, R2=R2)
+
+    import os
+    nbytes = os.path.getsize(npz_path)
+    print("Succesfully written {} bytes = {:.3g}K = {:.3g}M".format(nbytes, nbytes/1024, nbytes/1024**2))
+
+if __name__ == "__main5__":
     fname = "datasets/raw/CH4-N2-DIPOLES.xyz"
     natoms, nconfigs, xyz_configs1 = load_xyz_with_dipole(fname)
 
-    fname = "datasets/raw/CH4-N2-EN-RIGID.xyz"
+    fname = "datasets/raw/ch4-n2/CH4-N2-EN-RIGID-CORRECTED.xyz"
     natoms, nconfig, xyz_configs2 = load_xyz_with_energy(fname)
 
     for n in range(nconfigs):
@@ -72,7 +118,7 @@ if __name__ == "__main__":
         xyz_configs1[n].energy = xyz_configs2[n].energy
 
     xyz_configs = xyz_configs1
-    write_npz_ch4_n2_dipole("CH4-N2-DIP-RIGID.npz", natoms, nconfigs, xyz_configs)
+    write_npz_ch4_n2_dipole("CH4-N2-EN-DIP-RIGID.npz", natoms, nconfigs, xyz_configs)
 
 if __name__ == "__main4__":
     from dataset import load_npz

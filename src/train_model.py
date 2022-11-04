@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = False
+USE_WANDB = True
 if USE_WANDB:
     import wandb
 
@@ -1230,14 +1230,10 @@ if __name__ == "__main__":
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
 
     cfg_model = cfg['MODEL']
-    if typ == 'ENERGY':
-        model = build_network(cfg_model, input_features=train.NPOLY, output_features=1)
-    elif typ == 'DIPOLE':
-        model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
-    elif typ == 'DIPOLEQ':
-        model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
-    elif typ == 'DIPOLEC':
-        model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
+    if typ == 'ENERGY':    model = build_network(cfg_model, input_features=train.NPOLY, output_features=1)
+    elif typ == 'DIPOLE':  model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
+    elif typ == 'DIPOLEQ': model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
+    elif typ == 'DIPOLEC': model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
     else:
         assert False, "unreachable"
 
