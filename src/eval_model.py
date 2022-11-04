@@ -201,7 +201,7 @@ def retrieve_checkpoint(cfg, chk_fpath):
     meta_info = checkpoint["meta_info"]
 
     if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
-    elif cfg['TYPE'] == 'DIPOLE':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=3)
+    elif cfg['TYPE'] == 'DIPOLE':  model = build_network(cfg['MODEL'], hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=meta_info["NPOLY"], output_features=3)
     elif cfg['TYPE'] == 'DIPOLEQ': model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(natoms) for natoms in meta_info["symmetry"].values()])
     elif cfg['TYPE'] == 'DIPOLEC': model = build_network(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
     else:
@@ -554,12 +554,43 @@ if __name__ == '__main__':
 
             dip_pred = evaluator.dipole(dataset.X, dataset.grm)
 
+            nconfigs = len(dataset.xyz_configs)
+            en_dm = np.zeros((nconfigs, 3))
+
             for k in range(nconfigs):
                 xyz_config = dataset.xyz_configs[k]
-                dip = dataset.xyz_configs[k].dipole
                 en = dataset.xyz_configs[k].energy
+                dip = dataset.xyz_configs[k].dipole
+                en_dm[k, 0] = en
+                en_dm[k, 1] = np.linalg.norm(dip) #(np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
+                en_dm[k, 2] = np.linalg.norm(dip_pred[k, :])
 
-                print(dip_pred[k, :], dip, en)
+            plt.figure(figsize=(10, 10))
+
+            plt.scatter(en_dm[:,0], en_dm[:,1] - en_dm[:, 2], s=20, marker='o', facecolors='none',
+                        color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, label='DIPOLE-3VEC', rasterized=True)
+            #plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
+            #            color='k', lw=0.5, zorder=2, rasterized=True)
+
+            plt.xlim((-200.0, 10000.0))
+            #plt.ylim((0.0, 0.3))
+            plt.ylim((-0.01, 0.01))
+
+            #plt.xscale('log')
+
+            plt.xlabel(r"Energy, cm$^{-1}$")
+            plt.ylabel("|mu| - |mupred| / |mu|")
+
+            plt.legend(fontsize=14)
+
+            plt.show()
+
+            #for k in range(nconfigs):
+            #    xyz_config = dataset.xyz_configs[k]
+            #    dip = dataset.xyz_configs[k].dipole
+            #    en = dataset.xyz_configs[k].energy
+
+            #    print(dip_pred[k, :], dip, en)
 
         elif cfg['TYPE'] == 'DIPOLEQ':
             cfg_dataset.setdefault("PURIFY", False)
