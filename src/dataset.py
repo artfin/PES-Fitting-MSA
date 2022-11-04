@@ -173,17 +173,32 @@ def load_xyz_with_dipole(fpath):
 
     xyz_configs = []
     with open(fpath, mode='r') as inp:
+        linec = 0
         for i in range(NCONFIGS):
-            line = inp.readline()
+            line = inp.readline() # line with `natoms`
+            assert line.strip(), "ERROR: detected empty line #{}".format(linec)
+            linec = linec + 1
 
-            dipole = np.fromiter(map(float, inp.readline().split()), dtype=np.float32)
+            line = inp.readline()
+            assert line.strip(), "ERROR: detected empty line #{}".format(linec)
+            linec = linec + 1
+            words = line.split()
+            dipole = np.fromiter(map(float, words), dtype=np.float32)
+
             coords = np.zeros((NATOMS, 3))
             z = np.zeros((NATOMS, 1))
 
             for natom in range(NATOMS):
                 words = inp.readline().split()
+                linec = linec + 1
 
-                coords[natom, :] = list(map(float, words[1:]))
+                try:
+                    coords[natom, :] = list(map(float, words[1:]))
+                except ValueError:
+                    print("Error parsing configuration #{}".format(i))
+                    print("Line number: {}".format(linec))
+                    raise
+
                 charge           = SYMBOLS.index(words[0]) + 1
                 z[natom]         = charge
 
