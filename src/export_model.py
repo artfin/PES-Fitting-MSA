@@ -2,11 +2,12 @@ import argparse
 import logging
 import numpy as np
 from pathlib import Path
+import re
 import os
 import torch
 import yaml
 
-from build_model import build_network_yaml
+from build_model import build_network, QModel
 from dataset import PolyDataset
 from genpip import cl
 from train_model import load_dataset, load_cfg
@@ -47,13 +48,15 @@ def retrieve_checkpoint(cfg, chk_path):
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    typ = cfg['TYPE']
-    if typ == 'ENERGY':
-        model = build_network_yaml(cfg["MODEL"], input_features=meta_info["NPOLY"], output_features=1)
-    elif typ == 'DIPOLE':
-        model = build_network_yaml(cfg["MODEL"], input_features=meta_info["NPOLY"], output_features=3)
+    print("input_features: {}".format(meta_info["NPOLY"]))
+    print("output_features: {}".format([len(natoms) for natoms in meta_info["symmetry"].values()]))
+
+    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+    elif cfg['TYPE'] == 'DIPOLE':  assert False
+    elif cfg['TYPE'] == 'DIPOLEQ': model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(natoms) for natoms in meta_info["symmetry"].values()])
+    elif cfg['TYPE'] == 'DIPOLEC': assert False
     else:
-        assert False
+        assert False, "unreachable"
 
     model.load_state_dict(checkpoint["model"])
 
@@ -516,10 +519,10 @@ if __name__ == "__main__":
 
     cfg = load_cfg(cfg_path)
     logging.info("loaded configuration file from {}".format(cfg_path))
-    
+
     assert 'TYPE' in cfg
     typ = cfg['TYPE']
-    assert typ in ('ENERGY', 'DIPOLE')
+    assert typ in ('ENERGY', 'DIPOLE', 'DIPOLEQ')
 
     if args.chk_name is not None:
         chk_path = os.path.join(MODEL_FOLDER, args.chk_name + ".pt")
@@ -555,46 +558,93 @@ if __name__ == "__main__":
 
     if args.export_npz:
         npz_fname = MODEL_NAME + ".npz"
-
         state = evaluator.model.state_dict()
 
-        architecture = []
-        for k, v in state.items():
-            if "weight" in k:
-                architecture.append(v.size()[1])
+        if cfg['TYPE'] == 'DIPOLEQ':
+            curr_subnetwork = 0
+            subnetwork_arch, total_arch = [], []
+            prev_block = None
 
-        architecture.append(v.size()[0])
+            for block_name, block in state.items():
+                if "bias" in block_name:
+                    continue
 
-        model_dict = {}
-        model_dict["architecture"] = tuple(architecture)
+                ind = re.search(r"\d", block_name).start()
+                n_subnetwork = int(block_name[ind])
 
-        model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
-        model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
-        model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()
-        model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()
+                if n_subnetwork == curr_subnetwork:
+                    subnetwork_arch.append(block.size()[1])
+                else:
+                    subnetwork_arch.append(prev_block.size()[0])
+                    total_arch.append(subnetwork_arch)
 
-        for k, v in state.items():
-            model_dict[k] = v.detach().numpy().transpose()
+                    subnetwork_arch = [block.size()[1]]
+                    curr_subnetwork = curr_subnetwork + 1
 
-        import inspect
-        torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
-        for module in evaluator.model.modules():
-            module_str = repr(module).strip("()")
-            if module_str in torch_activations:
-                activation = module_str
-                break
+                prev_block = block
 
-        logging.info("ACTIVATION FUNCTION IS NOT STORED")
-        #model_dict["activation"] = activation
+            subnetwork_arch.append(prev_block.size()[0])
+            total_arch.append(subnetwork_arch)
+            logging.info("Total architecture: {}".format(total_arch))
 
-        #ind = 0
-        #for layer in evaluator.model.children():
-        #    if isinstance(layer, torch.nn.modules.linear.Linear):
-        #        name = "weights-" + str(ind)
-        #        model_dict[name] = layer.weight.detach().numpy()
-        #        ind = ind + 1
+            model_dict = {}
+            #model_dict["architecture"] = np.asarray(total_arch, dtype=object)
+            for i, subnetwork_arch in enumerate(total_arch):
+                model_dict["architecture.{}".format(i)] = subnetwork_arch
 
-        np.savez(npz_fname, **model_dict)
+            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
+            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
+
+            # Scaler assumes the 4-vector (E, dipx, dipy, dipz)
+            # Energy was needed for weighting during training but is not needed for inference 
+            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()[1:]
+            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()[1:]
+
+            for block_name, block in state.items():
+                model_dict[block_name] = block.detach().numpy().transpose()
+
+            np.savez(npz_fname, **model_dict)
+            logging.info("Warning: ACTIVATION FUNCTION IS NOT STORED")
+
+        else:
+            architecture = []
+            for k, v in state.items():
+                if "weight" in k:
+                    architecture.append(v.size()[1])
+
+            architecture.append(v.size()[0])
+
+            model_dict = {}
+            model_dict["architecture"] = tuple(architecture)
+
+            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
+            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
+            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()
+            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()
+
+            for block_name, block in state.items():
+                model_dict[block_name] = block.detach().numpy().transpose()
+
+            np.savez(npz_fname, **model_dict)
+            logging.info("Warning: ACTIVATION FUNCTION IS NOT STORED")
+
+            #import inspect
+            #torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
+            #for module in evaluator.model.modules():
+            #    module_str = repr(module).strip("()")
+            #    if module_str in torch_activations:
+            #        activation = module_str
+            #        break
+
+            #model_dict["activation"] = activation
+
+            #ind = 0
+            #for layer in evaluator.model.children():
+            #    if isinstance(layer, torch.nn.modules.linear.Linear):
+            #        name = "weights-" + str(ind)
+            #        model_dict[name] = layer.weight.detach().numpy()
+            #        ind = ind + 1
+
 
 
     if args.export_torchscript:

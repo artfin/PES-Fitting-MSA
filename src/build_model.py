@@ -68,4 +68,4 @@ class QModel(torch.nn.Module):
         for block, i1, i2 in zip(self.blocks, [0, *self.input_features_acc], [*self.input_features_acc, sum(self.input_features_acc)]):
             out = torch.cat((out, block(X[:, i1:i2])), dim=1)
 
-        return out 
+        return out

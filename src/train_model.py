@@ -45,11 +45,25 @@ def seed_torch(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
 
+class IdentityScaler:
+    def __init__(self):
+        pass
+
+    def fit_transform(self, x):
+        self.mean_  = np.zeros((x.shape[1]))
+        self.scale_ = np.ones((x.shape[1]))
+        return np.asarray(x)
+
+    def transform(self, y):
+        return np.asarray(y)
 
 def preprocess_dataset(train, val, test, cfg):
     if cfg['NORMALIZE'] == 'std':
         xscaler = StandardScaler()
         yscaler = StandardScaler()
+    elif cfg['NORMALIZE'] == 'std-none':
+        xscaler = StandardScaler()
+        yscaler = IdentityScaler()
     else:
         raise ValueError("unreachable")
 

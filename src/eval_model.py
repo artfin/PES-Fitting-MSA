@@ -628,26 +628,31 @@ if __name__ == '__main__':
                 xyz_config = dataset.xyz_configs[k]
                 en = dataset.xyz_configs[k].energy
                 dip = dataset.xyz_configs[k].dipole
+
                 en_dm[k, 0] = en
-                en_dm[k, 1] = np.linalg.norm(dip) #(np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
+                #en_dm[k, 1] = (np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
+                en_dm[k, 1] = np.linalg.norm(dip)
                 en_dm[k, 2] = np.linalg.norm(dip_pred[k, :])
 
             plt.figure(figsize=(10, 10))
 
-            plt.scatter(en_dm[:,0], en_dm[:,1] - en_dm[:, 2], s=20, marker='o', facecolors='none',
-                        color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True)
-            #plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
-            #            color='k', lw=0.5, zorder=2, rasterized=True)
+            SCL = 1e4
+            plt.scatter(en_dm[:,0], en_dm[:,1], s=20, marker='o', facecolors='none',
+                        color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True, label="QC")
+            plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
+                        color='k', lw=0.5, zorder=2, rasterized=True, label="PIP-NN")
 
-            plt.xlim((-200.0, 10000.0))
-            #plt.ylim((0.0, 0.3))
-            plt.ylim((-0.01, 0.01))
+            plt.xlim((-200.0, 1000.0))
+            plt.ylim((0.0, 0.1))
+            #plt.ylim((-2.0, 2.0))
 
             #plt.xscale('log')
 
             plt.xlabel(r"Energy, cm$^{-1}$")
-            plt.ylabel("|mu| - |mupred| / |mu|")
+            plt.ylabel(r"$\vert \mu \vert$, a.u.")
+            #plt.ylabel(r"$\vert \mu \vert$ - $\vert \mu_\text{pred} \vert$, 10$^{-4}$ a.u.")
 
+            plt.legend(fontsize=21)
             plt.show()
 
         elif cfg['TYPE'] == 'DIPOLEC':
