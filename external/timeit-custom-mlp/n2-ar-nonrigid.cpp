@@ -31,7 +31,24 @@ double sw(double x) {
     }
 }
 
-void make_yij_2_1_4_purify(const double * x, double* yij, int natoms)
+double dsw(double x) {
+    double x_i = 6.0;
+    double x_f = 20.0;
+
+    if (x < x_i) {
+        return 0.0;
+    } else if (x < x_f) {
+        double t = (x - x_i) / (x_f - x_i);
+        double t2 = t * t;
+        double t3 = t2 * t;
+        double t4 = t3 * t;
+        return (30.0 * t2 - 60.0 * t3 + 30.0 * t4) / (x_f - x_i); 
+    } else {
+        return 0.0;
+    }
+}
+
+void make_yij_n2_ar_purify(const double * x, double* yij, int natoms)
 {
     double drx, dry, drz;
    
@@ -56,10 +73,39 @@ void make_yij_2_1_4_purify(const double * x, double* yij, int natoms)
     }
 }
 
+void make_dydr_n2_ar_purify(Eigen::Ref<Eigen::MatrixXd> dydr, const double* x, int natoms) 
+{
+    double drx, dry, drz;
+    size_t k = 0;
+
+    for (size_t i = 0; i < natoms; ++i) {
+        for (size_t j = i + 1; j < natoms; ++j) { 
+            drx = x[3*i    ] - x[3*j    ]; 
+            dry = x[3*i + 1] - x[3*j + 1];
+            drz = x[3*i + 2] - x[3*j + 2];
+            
+            double dst = std::sqrt(drx*drx + dry*dry + drz*drz);
+
+            if (i == 0 && j == 1) { dydr(k, k) = -1.0/a0 * exp(-dst/2.0); k = k + 1; continue; } // N1 N2
+                                                                                   
+            double dst6 = dst * dst * dst * dst * dst * dst;
+            double dst7 = dst6 * dst;
+
+            double s  = sw(dst);
+            double ds = dsw(dst);
+            double ee = std::exp(-dst/a0);
+
+            dydr(k, k) = -ds * ee - (1.0 - s)*ee/a0 + ds * 1e4 / dst6 - s * 6e4 / dst7;
+            k++;
+        }
+    }
+}
+
 // probably a terrible hack but seems to be working for now...
 #define EVPOLY     evpoly_2_1_4_purify
 #define EVPOLY_JAC evpoly_jac_2_1_4_purify
-#define MAKE_YIJ   make_yij_2_1_4_purify
+#define MAKE_YIJ   make_yij_n2_ar_purify
+#define MAKE_DYDR  make_dydr_n2_ar_purify
 #include "mlp.hpp"
 
 double internal_pes_n2_ar(MLPModel & model, double R, double TH, double NN_BOND_LENGTH)
@@ -189,21 +235,46 @@ void test_configs()
 {
     auto model = build_model_from_npz("models/n2-ar-nonrigid-18-32-1.npz");
     
-    std::vector<double> cc1 = {
+    std::vector<double> cc = {
         0.6213774562, 0.0000000000,  0.8330670804,
        -0.6213774562, 0.0000000000, -0.8330670804,
-        0.0000000000, 0.0000000000,  5.0000000000,
+        0.0000000000, 1.0000000000,  20.0000000000,
     };
   
+    double en = model.forward(cc);
+    double model_expected = 8147.9896424037; 
+    //assert(abs(en - model_expected) < 1e-9);
+     
+    double qc = 8148.1626;
 
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "Expected:  8148.1626; model: " << model.forward(cc1) << "\n";
+    std::cout << std::fixed << std::setprecision(16);
+    std::cout << "(QC) expected:  " << qc << "; model: " << en << "\n";
+
+    std::vector<double> d(3 * natoms);
+    model.backward(cc, d);
+
+    std::vector<double> cm(cc);
+    std::vector<double> cp(cc);
+    
+    double dx = 1e-4, num_d;
+    std::cout << std::fixed << std::setprecision(15);
+
+    for (int nvar = 0; nvar < 3 * natoms; ++nvar) {
+        cm[nvar] -= dx;
+        cp[nvar] += dx;
+        num_d = (model.forward(cp) - model.forward(cm)) / (2.0 * dx);
+        cm[nvar] = cc[nvar];
+        cp[nvar] = cc[nvar];
+
+        std::cout << "[nvar=" << nvar << "] " << d[nvar] << std::setw(25) << std::right << num_d << "\n"; 
+    }
 }
+
 
 int main()
 {
-    //test_configs();
-    min_crossection();
+    test_configs();
+    //min_crossection();
     //min_crossection_qc_table();
 
     return 0;

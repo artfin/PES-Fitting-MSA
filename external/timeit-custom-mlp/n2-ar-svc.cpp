@@ -61,6 +61,7 @@ void make_yij_2_1_4_purify(const double * x, double* yij, int natoms)
 #define EVPOLY     evpoly_2_1_4_purify
 #define EVPOLY_JAC evpoly_jac_2_1_4_purify
 #define MAKE_YIJ   make_yij_2_1_4_purify
+#define MAKE_DYDR  void();
 #include "mlp.hpp"
 
 double internal_pes_n2_ar(MLPModel & model, double R, double TH, double NN_BOND_LENGTH)

@@ -15,7 +15,7 @@ const int npoly = 1898;
 
 const double a0 = 2.0;
 
-void make_yij_1_1_1_2_3_1(const double * x, double* yij, int natoms)
+void make_yij(const double * x, double* yij, int natoms)
 {
     double dst;
     double drx, dry, drz;
@@ -34,10 +34,29 @@ void make_yij_1_1_1_2_3_1(const double * x, double* yij, int natoms)
     }
 }
 
+void make_dydr(Eigen::Ref<Eigen::MatrixXd> dydr, const double* x, int natoms) 
+{
+    double drx, dry, drz;
+    size_t k = 0;
+
+    for (size_t i = 0; i < natoms; ++i) {
+        for (size_t j = i + 1; j < natoms; ++j) { 
+            drx = x[3*i    ] - x[3*j    ]; 
+            dry = x[3*i + 1] - x[3*j + 1];
+            drz = x[3*i + 2] - x[3*j + 2];
+            
+            double dst = std::sqrt(drx*drx + dry*dry + drz*drz);
+            dydr(k, k) = -1.0/a0 * exp(-dst/a0); 
+            k++;
+        }
+    }
+}
+
 // probably a terrible hack but seems to be working for now...
 #define EVPOLY     evpoly_1_1_1_2_3_1_3
 #define EVPOLY_JAC evpoly_jac_1_1_1_2_3_1_3
-#define MAKE_YIJ   make_yij_1_1_1_2_3_1
+#define MAKE_YIJ   make_yij
+#define MAKE_DYDR  make_dydr 
 #include "mlp.hpp"
 
 void time_ethanol_energy_and_forces_omp() {
@@ -249,9 +268,9 @@ void check_ethanol_model()
 
 int main()
 {
-    time_ethanol_energy_and_forces_omp();
+    //time_ethanol_energy_and_forces_omp();
 
-    //check_ethanol_model();
+    check_ethanol_model();
     //time_ethanol_energy();
     //time_ethanol_forces();
 

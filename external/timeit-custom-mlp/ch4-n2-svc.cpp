@@ -74,6 +74,7 @@ void make_yij_4_2_1_4_purify(const double * x, double* yij, int natoms)
 #define EVPOLY     evpoly_4_2_1_4_purify
 #define EVPOLY_JAC evpoly_jac_4_2_1_4_purify
 #define MAKE_YIJ   make_yij_4_2_1_4_purify
+#define MAKE_DYDR  void();
 #include "mlp.hpp"
 
 const double BohrToAng = 0.529177210903;

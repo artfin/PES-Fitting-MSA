@@ -70,7 +70,7 @@ void make_yij_4_2_1_4_intermolecular(const double * x, double* yij, int natoms)
 #define EVPOLY     evpoly_4_2_1_4_intermolecular
 #define EVPOLY_JAC evpoly_jac_4_2_1_4_intermolecular
 #define MAKE_YIJ   make_yij_4_2_1_4_intermolecular
-
+#define MAKE_DYDR  void();
 #include "mlp.hpp"
 
 template <typename T>
@@ -163,7 +163,7 @@ void long_range_ch4_n2_morse()
 
 void long_range_ch4_n2_to_plot()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-y=exp6.npz");
+    auto model = build_model_from_npz("models/ch4-n2-rigid-78-32-1-y=exp6.npz");
     
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -177,7 +177,7 @@ void long_range_ch4_n2_to_plot()
     const double INFVAL = internal_pes_ch4_n2(model, 1000.0, PH1, TH1, PH2, TH2); 
     std::cout << "INFVAL: " << INFVAL << std::endl;  
     
-    std::vector<double> Rv = linspace(4.5, 30.0, 150);
+    std::vector<double> Rv = linspace(4.5, 30.0, 300);
     
     for (size_t k = 0; k < Rv.size(); ++k) {
         double R = Rv[k];
@@ -185,7 +185,8 @@ void long_range_ch4_n2_to_plot()
         double symmval = symm_pes.pes(R, PH1, TH1, PH2, TH2);
         double nnval   = internal_pes_ch4_n2(model, R, PH1, TH1, PH2, TH2) - INFVAL;
 
-        std::cout << std::fixed << std::setprecision(4) << R << std::setprecision(6) << nnval << " " << symmval << "\n";
+        //std::cout << std::fixed << std::setprecision(4) << R << " " << std::setprecision(6) << nnval << " " << symmval << "\n";
+        std::cout << std::fixed << std::setprecision(4) << R << " " << std::setprecision(6) << nnval << "\n";
     }
 }
 
@@ -264,7 +265,7 @@ void ch4_n2_derivatives_comparison()
 
 void long_range_ch4_n2_qc_table()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-y=exp6.npz");
+    auto model = build_model_from_npz("models/ch4-n2-rigid-78-32-1-y=exp.npz");
    
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -381,11 +382,13 @@ int main()
     // since this model expects 79 polys instead of 78 (additional constant p(0)=1.0 is expected)
     //long_range_ch4_n2_morse();
 
-    long_range_ch4_n2_qc_table();
+    long_range_ch4_n2_to_plot();
 
-    ch4_n2_derivatives_comparison();
+    //long_range_ch4_n2_qc_table();
 
-    timeit();
+    //ch4_n2_derivatives_comparison();
+
+    //timeit();
 
     return 0;
 }

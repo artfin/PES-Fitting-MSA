@@ -65,7 +65,7 @@ void make_yij_4_2_1_4_purify(const double * x, double* yij, int natoms)
 
             double dst6 = dst * dst * dst * dst * dst * dst;
             double s = sw(dst);
-            yij[k] = (1.0 - s) * std::exp(-dst / 2.0) + s * 1e4 / dst6;
+            yij[k] = (1.0 - s) * std::exp(-dst / 2.0); // + s * 1e4 / dst6;
 
             k++;
         }
@@ -76,6 +76,7 @@ void make_yij_4_2_1_4_purify(const double * x, double* yij, int natoms)
 #define EVPOLY     evpoly_4_2_1_4_purify
 #define EVPOLY_JAC evpoly_jac_4_2_1_4_purify
 #define MAKE_YIJ   make_yij_4_2_1_4_purify
+#define MAKE_DYDR  void(); 
 #include "mlp.hpp"
 
 template <typename T>
@@ -226,9 +227,32 @@ double internal_pes_ch4_n2(MLPModel & model, double R, double PH1, double TH1, d
     return model.forward(cart);
 }
 
+void min_crossection_to_plot()
+{
+    //auto model = build_model_from_npz("models/ch4-n2-nonrigid-y=exp.npz");
+    auto model = build_model_from_npz("models/ch4-n2-nonrigid.npz");
+    
+    const double deg = M_PI / 180.0;
+    double PH1 = 47.912 * deg;
+    double TH1 = 56.167 * deg;
+    double PH2 = 0.0    * deg;
+    double TH2 = 135.0  * deg;
+    
+    const double INFVAL = internal_pes_ch4_n2(model, 1000.0, PH1, TH1, PH2, TH2, 2.078); 
+    std::cout << "INFVAL: " << INFVAL << std::endl;  
+    
+    std::vector<double> Rv = linspace(4.5, 30.0, 300);
+    
+    for (size_t k = 0; k < Rv.size(); ++k) {
+        double R = Rv[k];
+        double nnval   = internal_pes_ch4_n2(model, R, PH1, TH1, PH2, TH2, 2.078) - INFVAL;
+        std::cout << std::fixed << std::setprecision(4) << R << " " << std::setprecision(6) << nnval << "\n";
+    }
+}
 
 void min_crossection_qc_table()
 {
+    //auto model = build_model_from_npz("models/ch4-n2-nonrigid-y=exp.npz");
     auto model = build_model_from_npz("models/ch4-n2-nonrigid.npz");
     
     const double deg = M_PI / 180.0;
@@ -432,9 +456,9 @@ int main()
 {
     //forces_qc_comparison();
     //min_crossection_qc_table();
+    min_crossection_to_plot();
 
-    test_configs();
-
+    //test_configs();
     //timeit();
 
     return 0;

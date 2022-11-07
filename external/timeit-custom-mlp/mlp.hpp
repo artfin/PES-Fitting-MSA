@@ -1,6 +1,7 @@
 #ifndef MLP_H
 #define MLP_H 
 
+#include <cassert>
 #include <mutex>
 
 #include "scaler.hpp"
@@ -44,9 +45,7 @@ struct MLPModel
     StandardScaler xscaler;
     StandardScaler yscaler;
     
-    //void make_yij(const double* x, double* yij, int natoms);
     void make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x);
-    void make_dydr(Eigen::Ref<Eigen::MatrixXd> dydr, const double* yij);
 
     double** alloc_2d(int nrows, int ncols);
     void print_2d(double** a, int nrows, int ncols);
@@ -111,18 +110,7 @@ double MLPModel::forward(std::vector<double> const& x)
  */
 {
     MAKE_YIJ(&x[0], &yij[0], natoms);
-
     EVPOLY(&yij[0], p);
-
-    /*
-     * A stub to get working the potential for rigid case CH4-N2 
-     */
-    /*
-    for (int k = 78; k > 0; k--) {
-        p(k) = p(k - 1);
-    }
-    p(0) = 1.0; 
-    */
 
     ptr = xscaler.transform(p);
 
@@ -148,25 +136,18 @@ double MLPModel::forward(std::vector<double> const& x)
     // last linear operation -> out_features [no activation]
     neurons[sz - 1] = neurons[sz - 2] * weights[sz - 2];
     neurons[sz - 1] += biases[sz - 2];
-
+    
     return yscaler.inverse_transform(neurons[sz - 1])(0);
 }
 
 void MLPModel::backward(std::vector<double> const& x, std::vector<double> & dx)
 {
     make_drdx(drdx, &x[0]);
-    make_dydr(dydr, &yij[0]);
-    EVPOLY_JAC(jac, &yij[0]);  // 30-40 mcs
+    MAKE_DYDR(dydr, &x[0], natoms);
+    EVPOLY_JAC(jac, &yij[0]);  
     
-    // 110-120 mcs
-    // (36 x 27) x (27 x 27) x (27 x 1898)
     t3.noalias()   = drdx * dydr;
     dpdx.noalias() = t3 * jac;
-
-    //int ncol = 10; 
-    //for (int k = 0; k < 27; ++k) {
-    //    std::cout << "dpdx(" << k << ", " << ncol << "): " << dpdx(k, ncol) << std::endl;
-    //}
 
     // This general approach is PAINSTAKINGLY slow
     //   (more than 1,000 times slower!)
@@ -198,69 +179,7 @@ void MLPModel::backward(std::vector<double> const& x, std::vector<double> & dx)
     dEdx *= yscaler.scale[0];
 
     Eigen::VectorXd::Map(&dx[0], 3 * natoms) = dEdx; 
-    
-    //std::cout << "dEdp: " << dEdp.rows() << "x" << dEdp.cols() << std::endl;
-    //std::cout << "dpdx: " << dpdx.cols() << "x" << dpdx.rows() << std::endl;
-    //std::cout << "dEdp: " << t2.transpose().array() << std::endl;
-    //std::cout << "dpdx: " << dpdx << std::endl;
 }
-
-/*
-void MLPModel::make_yij(const double * x, double* yij, int natoms)
-{
-    double drx, dry, drz;
-   
-    size_t k = 0;
-    for (size_t i = 0; i < natoms; ++i) {
-        for (size_t j = i + 1; j < natoms; ++j) {
-            if (i == 0 && j == 1) { yij[k] = 0.0; k = k + 1; continue; } // H1 H2
-            if (i == 0 && j == 2) { yij[k] = 0.0; k = k + 1; continue; } // H1 H3
-            if (i == 0 && j == 3) { yij[k] = 0.0; k = k + 1; continue; } // H1 H4
-            if (i == 1 && j == 2) { yij[k] = 0.0; k = k + 1; continue; } // H2 H3
-            if (i == 1 && j == 3) { yij[k] = 0.0; k = k + 1; continue; } // H2 H4
-            if (i == 2 && j == 3) { yij[k] = 0.0; k = k + 1; continue; } // H3 H4
-            if (i == 0 && j == 6) { yij[k] = 0.0; k = k + 1; continue; } // H1 C
-            if (i == 1 && j == 6) { yij[k] = 0.0; k = k + 1; continue; } // H2 C
-            if (i == 2 && j == 6) { yij[k] = 0.0; k = k + 1; continue; } // H3 C
-            if (i == 3 && j == 6) { yij[k] = 0.0; k = k + 1; continue; } // H4 C
-            if (i == 4 && j == 5) { yij[k] = 0.0; k = k + 1; continue; } // N1 N2
-            
-            drx = ATOMX(x, i) - ATOMX(x, j);
-            dry = ATOMY(x, i) - ATOMY(x, j);
-            drz = ATOMZ(x, i) - ATOMZ(x, j);
-            
-            double dst = std::sqrt(drx*drx + dry*dry + drz*drz);
-            //yij[k] = std::exp(-dst/2.0);
-            
-            //if (i == 0 && j == 1) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H1 H2
-            //if (i == 0 && j == 2) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H1 H3
-            //if (i == 0 && j == 3) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H1 H4
-            //if (i == 1 && j == 2) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H2 H3
-            //if (i == 1 && j == 3) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H2 H4
-            //if (i == 2 && j == 3) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H3 H4
-            //if (i == 0 && j == 6) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H1 C
-            //if (i == 1 && j == 6) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H2 C
-            //if (i == 2 && j == 6) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H3 C
-            //if (i == 3 && j == 6) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // H4 C
-            //if (i == 4 && j == 5) { yij[k] = exp(-dst/2.0); k = k + 1; continue; } // N1 N2
-
-     
-            //yij[k] = 1.0 / yij[k]; 
-            //yij[k] = std::exp(-yij[k]/a0);
-            //yij[k] = 1.0/(yij[k]*yij[k]*yij[k]*yij[k]);
-            //yij[k] = 1000.0/(yij[k]*yij[k]*yij[k]*yij[k]*yij[k]*yij[k]); 
-           
-            //double yij6 = yij[k]*yij[k]*yij[k]*yij[k]*yij[k]*yij[k];
-            
-            double dst6 = dst * dst * dst * dst * dst * dst;
-            double s = sw(dst);
-            yij[k] = (1.0 - s) * std::exp(-dst / 2.0) + s * 1e4 / dst6;
-
-            k++;
-        }
-    }
-}
-*/
 
 void MLPModel::make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x) {
     double drx, dry, drz;
@@ -284,13 +203,6 @@ void MLPModel::make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x) {
 
             k++;
         }
-    }
-}
-
-void MLPModel::make_dydr(Eigen::Ref<Eigen::MatrixXd> dydr, const double* yij) {
-    
-    for (int i = 0; i < dydr.rows(); ++i) {
-        dydr(i, i) = -1.0 / a0 * yij[i];
     }
 }
 
