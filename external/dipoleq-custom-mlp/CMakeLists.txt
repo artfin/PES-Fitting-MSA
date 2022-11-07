@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
 #set(CMAKE_C_COMPILER "/share/apps/tools/gcc/9.2.0/bin/gcc")
 #set(CMAKE_CXX_COMPILER "/share/apps/tools/gcc/9.2.0/bin/g++")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -38,6 +38,22 @@ find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
 
 add_executable(
+    2b-ch4-n2-qdipole.exe
+    2b-ch4-n2-qdipole.cpp
+    cnpy.h
+    cnpy.cpp
+    qmodel.hpp
+    scaler.hpp
+    scaler.cpp
+    c_basis_4_1_1_1_4_intermolecular.h
+    c_basis_4_1_1_1_4_intermolecular.cc
+    c_basis_4_2_1_4_intermolecular.h
+    c_basis_4_2_1_4_intermolecular.cc
+    c_basis_1_1_1_1_2_1_4_intermolecular.cc
+    c_basis_1_1_1_1_2_1_4_intermolecular.h
+)
+
+add_executable(
     2b-n2-ar-qdipole.exe
     2b-n2-ar-qdipole.cpp
     cnpy.h
@@ -51,4 +67,5 @@ add_executable(
     c_basis_1_1_1_4_purify.h
 )
 
-target_link_libraries(2b-n2-ar-qdipole.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(2b-n2-ar-qdipole.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(2b-ch4-n2-qdipole.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
