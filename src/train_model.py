@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -765,7 +765,6 @@ class Training:
             self.train_epoch(epoch, self.optimizer)
 
             self.scheduler.step(self.loss_val)
-            current_lr = self.optimizer.param_groups[0]['lr']
 
             if epoch % PRINT_TRAINING_STEPS == 0:
                 end = time.time()
@@ -844,12 +843,16 @@ class Training:
                 # dip_pred: sum(q_i * r_i)  -- Cartesian components of the predicted dipole [need to descale in the loss function]
                 # additional term to `reqularize` the sum of partial charges
 
-                y_pred = self.model(self.train.X)
-                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), y_pred)
+                q_pred   = self.model(self.train.X)
+                X_inf    = torch.zeros_like(self.train.X)               # polynomials at infinite separation
+                X_inf_tr = torch.from_numpy(xscaler.transform(X_inf))
+                q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
+                q_corr   = q_pred - q_inf                               # corrected partial charges
+                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), q_corr)
 
                 # charge regularization
                 # NOTE: use `mean`
-                qsum     = torch.sum(y_pred, dim=1)
+                qsum     = torch.sum(q_corr, dim=1)
                 qreg     = self.cfg_loss['LAMBDA_Q'] * torch.mean(qsum * qsum)
                 loss     = self.loss_fn(self.train.y, dip_pred)
 
@@ -880,6 +883,9 @@ class Training:
         elapsed = timeit.default_timer() - start_time
         logging.info("Optimizer makes step in {:.2f}s".format(elapsed))
         logging.info("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+
+        current_lr = optimizer.param_groups[0]['lr']
+        logging.info("(optimizer) current lr: {}".format(current_lr))
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
@@ -948,25 +954,33 @@ class Training:
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
             with torch.no_grad():
-                train_y_pred = self.model(self.train.X)
-                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_y_pred)
-                loss_train = self.loss_fn(self.train.y, dip_pred_train)
+                train_q_pred   = self.model(self.train.X)
+                train_X_inf    = torch.zeros_like(self.train.X)
+                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf))
+                train_q_inf    = self.model(train_X_inf_tr)
+                train_q_corr   = train_q_pred - train_q_inf
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
-                val_y_pred = self.model(self.val.X)
-                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_y_pred)
-                loss_val = self.loss_fn(self.val.y, dip_pred_val)
+                val_q_pred   = self.model(self.val.X)
+                val_X_inf    = torch.zeros_like(self.val.X)
+                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf))
+                val_q_inf    = self.model(val_X_inf_tr)
+                val_q_corr   = val_q_pred - val_q_inf
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
-                train_qsum = torch.sum(train_y_pred, dim=1)
+                train_qsum = torch.sum(train_q_corr, dim=1)
                 train_qreg = self.cfg_loss['LAMBDA_Q'] * torch.mean(train_qsum * train_qsum)
-                val_qsum   = torch.sum(val_y_pred, dim=1)
+                val_qsum   = torch.sum(val_q_corr, dim=1)
                 val_qreg   = self.cfg_loss['LAMBDA_Q'] * torch.mean(val_qsum * val_qsum)
 
             # log metrics to WANDB to visualize model performance
             if USE_WANDB:
-                wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg})
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg, "lr" : current_lr})
 
             logging.info("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
                 epoch, PRINT_PRECISION, loss_train, train_qreg, loss_val, val_qreg
@@ -1032,7 +1046,8 @@ class Training:
             logging.info("Train      loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_f))
             logging.info("Validation loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_f))
             logging.info("Test       loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_f))
-        else:
+
+        elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
             with torch.no_grad():
@@ -1049,6 +1064,42 @@ class Training:
             logging.info("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
             logging.info("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
             logging.info("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
+
+        elif self.cfg['TYPE'] == 'DIPOLEQ':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                train_q_pred   = self.model(self.train.X)
+                train_X_inf    = torch.zeros_like(self.train.X)
+                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf))
+                train_q_inf    = self.model(train_X_inf_tr)
+                train_q_corr   = train_q_pred - train_q_inf
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_q_pred   = self.model(self.val.X)
+                val_X_inf    = torch.zeros_like(self.val.X)
+                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf))
+                val_q_inf    = self.model(val_X_inf_tr)
+                val_q_corr   = val_q_pred - val_q_inf
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
+
+                test_q_pred   = self.model(self.test.X)
+                test_X_inf    = torch.zeros_like(self.test.X)
+                test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf))
+                test_q_inf    = self.model(test_X_inf_tr)
+                test_q_corr   = test_q_pred - test_q_inf
+                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.double(), test_q_corr)
+                loss_test     = self.loss_fn(self.test.y, dip_pred_test)
+
+            logging.info("Model evluation after training:")
+            logging.info("Train      loss: {1:{0}f}".format(PRINT_PRECISION, loss_train))
+            logging.info("Validation loss: {1:{0}f}".format(PRINT_PRECISION, loss_val))
+            logging.info("Test       loss: {1:{0}f}".format(PRINT_PRECISION, loss_test))
+
+        else:
+            assert False, "unreachable"
 
 def setup_google_folder():
     assert os.path.exists('client_secrets.json')
