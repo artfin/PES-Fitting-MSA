@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = False
+USE_WANDB = True
 if USE_WANDB:
     import wandb
 
@@ -844,8 +844,8 @@ class Training:
                 # additional term to `reqularize` the sum of partial charges
 
                 q_pred   = self.model(self.train.X)
-                X_inf    = torch.zeros_like(self.train.X)               # polynomials at infinite separation
-                X_inf_tr = torch.from_numpy(xscaler.transform(X_inf))
+                X_inf    = torch.zeros_like(self.train.X).cpu()         # polynomials at infinite separation
+                X_inf_tr = torch.from_numpy(xscaler.transform(X_inf)).to(DEVICE)
                 q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
                 q_corr   = q_pred - q_inf                               # corrected partial charges
                 dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), q_corr)
@@ -955,16 +955,16 @@ class Training:
             # or wrap the forward pass into with torch.no_grad().
             with torch.no_grad():
                 train_q_pred   = self.model(self.train.X)
-                train_X_inf    = torch.zeros_like(self.train.X)
-                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf))
+                train_X_inf    = torch.zeros_like(self.train.X).cpu()
+                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
                 dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
-                val_X_inf    = torch.zeros_like(self.val.X)
-                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf))
+                val_X_inf    = torch.zeros_like(self.val.X).cpu()
+                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
                 dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
@@ -1070,24 +1070,24 @@ class Training:
             # or wrap the forward pass into with torch.no_grad().
             with torch.no_grad():
                 train_q_pred   = self.model(self.train.X)
-                train_X_inf    = torch.zeros_like(self.train.X)
-                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf))
+                train_X_inf    = torch.zeros_like(self.train.X).cpu()
+                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
                 dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
-                val_X_inf    = torch.zeros_like(self.val.X)
-                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf))
+                val_X_inf    = torch.zeros_like(self.val.X).cpu()
+                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
                 dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 test_q_pred   = self.model(self.test.X)
-                test_X_inf    = torch.zeros_like(self.test.X)
-                test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf))
+                test_X_inf    = torch.zeros_like(self.test.X).cpu()
+                test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf)).to(DEVICE)
                 test_q_inf    = self.model(test_X_inf_tr)
                 test_q_corr   = test_q_pred - test_q_inf
                 dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.double(), test_q_corr)
