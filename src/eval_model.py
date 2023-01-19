@@ -129,15 +129,24 @@ class Evaluator:
         """
         self.model.eval()
 
-        Xtr = self.xscaler.transform(X)
-        Xtr = torch.from_numpy(Xtr)
+        Xtr      = self.xscaler.transform(X)
+        Xtr      = torch.from_numpy(Xtr)
+        X_inf    = torch.zeros_like(Xtr)
+        X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf))
 
         with torch.no_grad():
-            y = self.model(Xtr)
+            q_pred = self.model(Xtr)
+            q_inf  = self.model(X_inf_tr)
 
-        dip_pred = torch.einsum('ijk,ij->ik', xyz_ordered.double(), y)
+        q_corr   = q_pred - q_inf
+        dip_pred = torch.einsum('ijk,ij->ik', xyz_ordered.double(), q_corr)
 
-        nconfigs = y.shape[0]
+        print(dip_pred[0, :].detach().numpy())
+        print("pc: ", q_pred[0, :].detach().numpy())
+        print("pcinf: ", q_inf[0, :].detach().numpy())
+        print("pccorr: ", q_corr[0, :].detach().numpy())
+
+        nconfigs = q_pred.shape[0]
         dip_pred_ = np.c_[np.zeros(nconfigs), dip_pred]
         dip_pred  = self.yscaler.inverse_transform(dip_pred_)
 
@@ -200,7 +209,7 @@ def retrieve_checkpoint(cfg, chk_fpath):
     checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=meta_info["NPOLY"], output_features=1)
     elif cfg['TYPE'] == 'DIPOLE':  model = build_network(cfg['MODEL'], hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=meta_info["NPOLY"], output_features=3)
     elif cfg['TYPE'] == 'DIPOLEQ': model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(natoms) for natoms in meta_info["symmetry"].values()])
     elif cfg['TYPE'] == 'DIPOLEC': model = build_network(cfg['MODEL'], input_features=3*meta_info["NATOMS"], output_features=1)
@@ -381,11 +390,15 @@ def model_evaluation_forces(evaluator, train, val, test, emax):
             rmse.append(0.0)
             continue
 
-        ind   = (sampling_set.y < emax).nonzero()[:,0]
-
-        fs          = sampling_set.dy[ind]
-        forces_pred = evaluator.forces(sampling_set)
-        preds       = forces_pred[ind].reshape(-1, natoms, 3)
+        if emax is not None:
+            ind         = (sampling_set.y < emax).nonzero()[:,0]
+            fs          = sampling_set.dy[ind]
+            forces_pred = evaluator.forces(sampling_set)
+            preds       = forces_pred[ind].reshape(-1, natoms, 3)
+        else:
+            fs          = sampling_set.dy
+            forces_pred = evaluator.forces(sampling_set)
+            preds       = forces_pred.reshape(-1, natoms, 3)
 
         df = fs - preds
         _mse = torch.mean(torch.einsum('ijk,ijk->i', df, df)) / (3.0 * natoms)
@@ -394,8 +407,13 @@ def model_evaluation_forces(evaluator, train, val, test, emax):
 
     rmse_kcal_mol_A = [ff / KCALTOCM / BOHRTOANG for ff in rmse]
 
-    logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
-    logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
+    if emax is not None:
+        logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
+        logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
+    else:
+        emax = torch.max(train.y)
+        logging.info("[full energy range: < {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
+        logging.info("[full energy range: < {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
 
 
 def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes=False):
@@ -629,22 +647,29 @@ if __name__ == '__main__':
                 en = dataset.xyz_configs[k].energy
                 dip = dataset.xyz_configs[k].dipole
 
+                if k == 100:
+                    np.set_printoptions(precision=16)
+                    print(xyz_config.coords1)
+                    print(xyz_config.coords2)
+                    print(dip, dip_pred[k, :])
+                    assert False
+
                 en_dm[k, 0] = en
-                #en_dm[k, 1] = (np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
-                en_dm[k, 1] = np.linalg.norm(dip)
+                en_dm[k, 1] = (np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))
+                #en_dm[k, 1] = np.linalg.norm(dip)
                 en_dm[k, 2] = np.linalg.norm(dip_pred[k, :])
 
             plt.figure(figsize=(10, 10))
 
-            SCL = 1e4
-            plt.scatter(en_dm[:,0], en_dm[:,1], s=20, marker='o', facecolors='none',
+            SCL = 1.0e4
+            plt.scatter(en_dm[:,0], SCL * en_dm[:,1], s=20, marker='o', facecolors='none',
                         color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True, label="QC")
-            plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
-                        color='k', lw=0.5, zorder=2, rasterized=True, label="PIP-NN")
+            #plt.scatter(en_dm[:,0], SCL * en_dm[:,2], s=20, marker='o', facecolors='none',
+            #            color='k', lw=0.5, zorder=2, rasterized=True, label="PIP-NN")
 
             plt.xlim((-200.0, 1000.0))
-            plt.ylim((0.0, 0.1))
-            #plt.ylim((-2.0, 2.0))
+            #plt.ylim((0.0, 0.1))
+            plt.ylim((-2.0, 2.0))
 
             #plt.xscale('log')
 
