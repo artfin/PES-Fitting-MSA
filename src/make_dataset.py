@@ -127,6 +127,21 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         dX_val, dy_val     = dataset.dX[val_ind,   :, :], dataset.dy[val_ind,   :, :]
         dX_test, dy_test   = dataset.dX[test_ind,  :, :], dataset.dy[test_ind,  :, :]
 
+        logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_train, y=y_train,
+                        dX=dX_train, dy=dy_train, xyz_ordered=None, grm=None), dataset_fpaths["train"])
+
+        logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_val, y=y_val,
+                        dX=dX_val, dy=dy_val, xyz_ordered=None, grm=None), dataset_fpaths["val"])
+
+        logging.info("Saving test dataset to: {}".format(dataset_fpaths["val"]))
+        torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=dataset.order,
+                        energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
+                        dX=dX_test, dy=dy_test, xyz_ordered=None, grm=None), dataset_fpaths["test"])
+
     elif cfg_dataset['TYPE'] == 'DIPOLE':
         if len(cfg_dataset['SOURCE']) > 1:
             logging.info("Stratification is not implemented for `typ=dipole`")

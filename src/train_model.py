@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -599,29 +599,29 @@ class Training:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_FORCES']:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_FORCES']:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WMSELoss_Boltzmann(Eref=Eref)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio(dwt=dwt)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WMSELoss_Ratio(dwt=dwt)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_FORCES']:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not use_forces:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_FORCES']:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WMSELoss_PS(Emax=Emax)
 
 
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and use_forces:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
             loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
@@ -1295,7 +1295,7 @@ if __name__ == "__main__":
     xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
 
     cfg_model = cfg['MODEL']
-    if typ == 'ENERGY':    model = build_network(cfg_model, input_features=train.NPOLY, output_features=1)
+    if typ == 'ENERGY':    model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=train.NPOLY, output_features=1)
     elif typ == 'DIPOLE':  model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
     elif typ == 'DIPOLEQ': model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
     elif typ == 'DIPOLEC': model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
