@@ -931,6 +931,15 @@ class Training:
             self.writer.add_scalar("loss/train", loss_train_e, epoch)
             self.writer.add_scalar("loss/val", loss_val_e, epoch)
 
+            # log metrics to WANDB to visualize model performance
+            if USE_WANDB:
+                wandb.log({
+                    "loss_train_e" : loss_train_e, "loss_train_f" : loss_train_f, "loss_val_e" : loss_val_e, "loss_val_f" : loss_val_f,
+                    "train_e_mae" : train_e_mae, "train_e_rmse" : train_e_rmse, "val_e_mae" : val_e_mae, "val_e_rmse" : val_e_rmse,
+                    "train_f_mae" : train_f_mae, "train_f_rmse" : train_f_rmse, "val_f_mae" : val_f_mae, "val_f_rmse" : val_f_rmse,
+                    "lr" : current_lr})
+
+
         elif self.cfg['TYPE'] == 'DIPOLE':
             with torch.no_grad():
                 train_y_pred   = self.model(self.train.X)
