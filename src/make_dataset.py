@@ -301,7 +301,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
                         energy_limit=None, variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], X=X_test, y=y_test,
                         dX=None, dy=None, xyz_ordered=c_test, grm=None), dataset_fpaths["test"])
 
-    elif cfg['TYPE'] == 'ENERGY':
+    elif cfg_dataset['TYPE'] == 'ENERGY':
         GLOBAL_SET      = False
         GLOBAL_NATOMS   = None
         GLOBAL_NMON     = None
@@ -373,17 +373,17 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         logging.info("Saving train dataset to: {}".format(dataset_fpaths["train"]))
         torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
                         energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'], 
-                        X=X_train[:, :-1], y=y_train, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["train"])
+                        X=X_train, y=y_train, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["train"])
 
         logging.info("Saving val dataset to: {}".format(dataset_fpaths["val"]))
         torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
                         energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
-                        X=X_val[:, :-1], y=y_val, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["val"])
+                        X=X_val, y=y_val, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["val"])
 
         logging.info("Saving test dataset to: {}".format(dataset_fpaths["test"]))
         torch.save(dict(NATOMS=dataset.NATOMS, NMON=dataset.NMON, NPOLY=dataset.NPOLY, symmetry=cfg_dataset['SYMMETRY'], order=cfg_dataset['ORDER'],
                         energy_limit=cfg_dataset['ENERGY_LIMIT'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
-                        X=X_test[:, :-1], y=y_test, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["test"])
+                        X=X_test, y=y_test, dX=None, dy=None, xyz_ordered=None, grm=None), dataset_fpaths["test"])
     else:
         assert False, "unreachable"
 
