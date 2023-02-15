@@ -12,7 +12,7 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = False
+USE_WANDB = True
 if USE_WANDB:
     import wandb
 
@@ -1020,10 +1020,15 @@ class Training:
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1".format(epoch, PRINT_PRECISION, loss_train, loss_val))
-
+            # tensorboard writer
             self.writer.add_scalar("loss/train", loss_train, epoch)
             self.writer.add_scalar("loss/val", loss_val, epoch)
+
+            # log metrics to WANDB to visualize model performance
+            if USE_WANDB:
+                wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr}) 
+
+            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
         else:
             assert False, "unreachable"

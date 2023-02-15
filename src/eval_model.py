@@ -2,7 +2,11 @@ import argparse
 import collections
 from itertools import accumulate, combinations
 import logging
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
 import numpy as np
 import os
 import sklearn
@@ -29,7 +33,7 @@ import sys
 sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
 from pybind_ch4 import Poten_CH4
 
-plt.style.use('science')
+#plt.style.use('science')
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -661,10 +665,10 @@ if __name__ == '__main__':
 
             plt.figure(figsize=(10, 10))
 
-            SCL = 1.0e4
+            SCL = 1e4
             plt.scatter(en_dm[:,0], SCL * en_dm[:,1], s=20, marker='o', facecolors='none',
                         color=lighten_color('#FF6F61', 1.1), lw=1.0, zorder=2, rasterized=True, label="QC")
-            #plt.scatter(en_dm[:,0], SCL * en_dm[:,2], s=20, marker='o', facecolors='none',
+            #plt.scatter(en_dm[:,0], en_dm[:,2], s=20, marker='o', facecolors='none',
             #            color='k', lw=0.5, zorder=2, rasterized=True, label="PIP-NN")
 
             plt.xlim((-200.0, 1000.0))
@@ -673,11 +677,12 @@ if __name__ == '__main__':
 
             #plt.xscale('log')
 
-            plt.xlabel(r"Energy, cm$^{-1}$")
-            plt.ylabel(r"$\vert \mu \vert$, a.u.")
+            #plt.xlabel(r"Energy, cm$^{-1}$")
+            #plt.ylabel(r"$\vert \mu \vert$, a.u.")
             #plt.ylabel(r"$\vert \mu \vert$ - $\vert \mu_\text{pred} \vert$, 10$^{-4}$ a.u.")
 
             plt.legend(fontsize=21)
+            plt.savefig("test.png", format="png", dpi=300)
             plt.show()
 
         elif cfg['TYPE'] == 'DIPOLEC':
