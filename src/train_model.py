@@ -12,12 +12,9 @@ import yaml
 import torch.nn
 from torch.utils.tensorboard import SummaryWriter
 
-USE_WANDB = True
+USE_WANDB = False
 if USE_WANDB:
     import wandb
-
-#from pydrive.auth import GoogleAuth
-#from pydrive.drive import GoogleDrive
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -57,7 +54,27 @@ class IdentityScaler:
     def transform(self, y):
         return np.asarray(y)
 
-def preprocess_dataset(train, val, test, cfg):
+def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
+    try:
+        train.X = torch.from_numpy(xscaler.transform(train.X))
+        val.X   = torch.from_numpy(xscaler.transform(val.X))
+        test.X  = torch.from_numpy(xscaler.transform(test.X))
+    except ValueError:
+        logging.error("[use_scalers_on_dataset] caught ValueError")
+        val.X  = torch.empty((1, 1))
+        test.X = torch.empty((1, 1))
+
+    try:
+        train.y = torch.from_numpy(yscaler.transform(train.y))
+        val.y   = torch.from_numpy(yscaler.transform(val.y))
+        test.y  = torch.from_numpy(yscaler.transform(test.y))
+    except ValueError:
+        logging.error("[use_scalers_on_dataset] caught ValueError")
+        val.y = torch.empty(1)
+        test.y = torch.empty(1)
+
+
+def fit_scalers_to_train_dataset(train, cfg):
     if cfg['NORMALIZE'] == 'std':
         xscaler = StandardScaler()
         yscaler = StandardScaler()
@@ -67,62 +84,55 @@ def preprocess_dataset(train, val, test, cfg):
     else:
         raise ValueError("unreachable")
 
-    train.X = torch.from_numpy(xscaler.fit_transform(train.X))
-
-    try:
-        val.X   = torch.from_numpy(xscaler.transform(val.X))
-        test.X  = torch.from_numpy(xscaler.transform(test.X))
-    except ValueError:
-        logging.error("[preprocess_dataset] caught ValueError")
-        val.X  = torch.empty((1, 1))
-        test.X = torch.empty((1, 1))
-
-    train.y = torch.from_numpy(yscaler.fit_transform(train.y))
-
-    try:
-        val.y   = torch.from_numpy(yscaler.transform(val.y))
-        test.y  = torch.from_numpy(yscaler.transform(test.y))
-    except ValueError:
-        logging.error("[preprocess_dataset] caught ValueError")
-        val.y = torch.empty(1)
-        test.y = torch.empty(1)
+    xscaler.fit(train.X)
+    yscaler.fit(train.y)
 
     return xscaler, yscaler
 
-    #symmetry = train.symmetry
-    #order    = train.order
-    #DATASETS_INTERIM = "datasets/interim"
-    #BASENAME         = "poly_{}_{}".format(symmetry.replace(" ", "_"), order)
-    #interim_train = os.path.join(DATASETS_INTERIM, BASENAME + "-train-norm.json")
-    #with open(interim_train, 'w') as fp:
-    #    json.dump(dict(NATOMS=train.NATOMS, NMON=train.NMON, NPOLY=train.NPOLY, symmetry=train.symmetry, order=train.order,
-    #                       X=train.X.tolist(), y=train.y.tolist()), fp)
 
-    #interim_test = os.path.join(DATASETS_INTERIM, BASENAME  + "-test-norm.json")
-    #with open(interim_test, 'w') as fp:
-    #    json.dump(dict(NATOMS=test.NATOMS, NMON=test.NMON, NPOLY=test.NPOLY, symmetry=test.symmetry, order=test.order,
-    #                       X=test.X.tolist(), y=test.y.tolist()), fp)
+def load_from_checkpoint(chk_path):
+    state = torch.load(chk_path, map_location=torch.device(DEVICE))
+    assert state.get("model", None) is not None, "No 'model' field found in checkpoint loaded from {}".format(chk_path)
+    assert state.get("X_mean", None) is not None, "No 'X_mean' field found in checkpoint loaded from {}".format(chk_path)
+    assert state.get("X_std", None) is not None, "No 'X_std' field found in checkpoint loaded from {}".format(chk_path)
+    assert state.get("y_mean", None) is not None, "No 'y_mean' field found in checkpoint loaded from {}".format(chk_path)
+    assert state.get("y_std", None) is not None, "No 'y_std' field found in checkpoint loaded from {}".format(chk_path)
+    assert state.get("meta_info", None) is not None, "No 'meta_info' field found in checkpoint loaded from {}".format(chk_path)
 
-    #print("xscaler.mean: {}".format(xscaler.mean_))
-    #print("xscaler.std:  {}".format(xscaler.scale_))
+    shapes_of_loaded_weights = []
+    for key, value in state['model'].items():
+        if 'bias' in key: continue
+        shapes_of_loaded_weights.append(value.shape[1])
 
-    #plt.figure(figsize=(10, 10))
-    #plt.scatter(train.X[:,6], np.zeros_like(train.X[:,6]) + 1)
-    #plt.show()
+    assert len(shapes_of_loaded_weights) >= 1
+
+    # TODO: unhardcode activation function
+    cfg_model = {
+        "ACTIVATION": "SiLU",
+    }
+
+    model = build_network(
+        cfg_model=cfg_model,
+        hidden_dims=shapes_of_loaded_weights[1:],
+        input_features=shapes_of_loaded_weights[0],
+        output_features=1)
+
+    model.load_state_dict(state['model'])
+
+    logging.warning("Data scalers (xscaler & yscaler) are taken from the checkpoint")
+    xscaler = StandardScaler()
+    xscaler.mean_ = state["X_mean"]
+    xscaler.scale_ = state["X_std"]
+
+    yscaler = StandardScaler()
+    yscaler.mean_ = state["y_mean"]
+    yscaler.scale_ = state["y_std"]
+
+    return model, xscaler, yscaler
+
 
 def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
     logging.info("Saving the checkpoint.")
-
-    #architecture = [m.out_features for m in next(model.modules()) if isinstance(m, torch.nn.modules.linear.Linear)]
-    #architecture = tuple(architecture[:-1])
-
-    #import inspect
-    #torch_activations = list(zip(*inspect.getmembers(torch.nn.modules.activation, inspect.isclass)))[0]
-    #for module in model.modules():
-    #    module_str = repr(module).strip("()")
-    #    if module_str in torch_activations:
-    #        activation = module_str
-    #        break
 
     checkpoint = {
         "model"        :  model.state_dict(),
@@ -133,6 +143,7 @@ def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
         "meta_info"    :  meta_info,
     }
     torch.save(checkpoint, chk_path)
+
 
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):
@@ -498,8 +509,10 @@ def count_params(model):
 
     return nparams
 
+
+
 class Training:
-    def __init__(self, model_folder, model_name, ckh_path, model, cfg, train, val, test, xscaler, yscaler):
+    def __init__(self, model_folder, model_name, ckh_path, cfg, train, val, test):
         EVENTDIR = "runs"
         if not os.path.isdir(EVENTDIR):
             os.makedirs(EVENTDIR)
@@ -507,16 +520,49 @@ class Training:
         log_dir = os.path.join("runs", model_name)
         self.writer = SummaryWriter(log_dir=log_dir)
 
-        self.model = model
+        self.model_folder = model_folder
+
         self.cfg = cfg
-        self.cfg_solver = cfg['TRAINING']
 
         self.train = train
         self.val   = val
         self.test  = test
 
-        self.xscaler = xscaler
-        self.yscaler = yscaler
+        cfg_model = cfg.get('MODEL', None)
+
+        pretrained_model, pretrained_xscaler, pretrained_yscaler = self.load_pretrained_model_if_configured()
+        if pretrained_model is not None:
+            self.model = pretrained_model
+            self.xscaler = pretrained_xscaler
+            self.yscaler = pretrained_yscaler
+
+            logging.info("Applying xscaler and yscaler loaded from pretrained model on the new dataset") 
+            apply_scalers_on_dataset(self.train, self.val, self.test, self.xscaler, self.yscaler)
+
+            if cfg_model is not None:
+                print("\n")
+                logging.warning("Configuration provided within the MODEL is going to be ignored! The configuration of the pretrained model will be retained.\n")
+        else:
+            if typ == 'ENERGY':
+                self.model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=train.NPOLY, output_features=1)
+            elif typ == 'DIPOLE':
+                self.model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
+            elif typ == 'DIPOLEQ':
+                self.model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
+            elif typ == 'DIPOLEC':
+                self.model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
+            else:
+                assert False, "unreachable"
+
+            logging.info("Fitting scalers to training dataset...\n")
+            self.xscaler, self.yscaler = fit_scalers_to_train_dataset(train, cfg['DATASET'])
+            apply_scalers_on_dataset(self.train, self.val, self.test, self.xscaler, self.yscaler)
+
+        logging.info("Using the NN model structured as {}".format(self.model))
+        nparams = count_params(self.model)
+        logging.info("Number of parameters: {}".format(nparams))
+
+        self.cfg_solver = cfg['TRAINING']
 
         self.cfg_loss = cfg['LOSS']
         self.loss_fn  = self.build_loss()
@@ -524,14 +570,6 @@ class Training:
 
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
-
-        self.pretraining = False
-        if cfg.get('PRETRAINING'):
-            self.pretraining = True
-
-            cfg_pretrain = cfg['PRETRAINING']
-            self.pretraining_epochs = cfg_pretrain['EPOCHS']
-            self.pretraining_optimizer = self.build_optimizer(cfg_pretrain['OPTIMIZER'])
 
         self.chk_path = chk_path
         self.es = self.build_early_stopper()
@@ -542,6 +580,28 @@ class Training:
             "symmetry": self.train.symmetry,
             "order":    self.train.order,
         }
+
+    def reset_weights(self):
+        for layer in self.model.children():
+            if hasattr(layer, 'reset_parameters'):
+                logging.info(f'Reset trainable parameters of layer = {layer}')
+                layer.reset_parameters()
+
+    def load_pretrained_model_if_configured(self):
+        self.cfg_pretrained_model_settings = cfg.get('PRETRAINED_MODEL_SETTINGS', None)
+        if self.cfg_pretrained_model_settings is None: 
+            return None, None, None 
+
+        pretrained_source_path = self.cfg_pretrained_model_settings.get('SOURCE', None)
+        assert pretrained_source_path is not None, "SOURCE path for pretrained model is not provided"
+
+        pretrained_source_path = os.path.join(self.model_folder, pretrained_source_path)
+        print("\n")
+        logging.info("Looking for pretrained model (.pt) in {}".format(pretrained_source_path))
+        model, xscaler, yscaler = load_from_checkpoint(pretrained_source_path)
+
+
+        return model, xscaler, yscaler
 
     def build_regularization(self):
         if self.cfg_regularization is None:
@@ -570,7 +630,6 @@ class Training:
                                                  tolerance_change=tolerance_change, max_iter=max_iter)
         elif cfg_optimizer['NAME'] == 'Adam':
             lr           = cfg_optimizer.get('LR', 1e-3)
-            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 0.0)
             optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             raise ValueError("unreachable")
@@ -669,41 +728,6 @@ class Training:
 
         return EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
 
-    def reset_weights(self):
-        for layer in self.model.children():
-            if hasattr(layer, 'reset_parameters'):
-                logging.info(f'Reset trainable parameters of layer = {layer}')
-                layer.reset_parameters()
-
-    def load_basic_checkpoint(self):
-        self.reset_weights()
-        state = torch.load(self.chk_path, map_location=torch.device(DEVICE))
-        self.model.load_state_dict(state)
-
-    def run_pretraining(self):
-        logging.info("-------------------------------------------------")
-        logging.info("----------- Running pretraining -----------------")
-        logging.info("-------------------------------------------------")
-
-        for epoch in range(self.pretraining_epochs):
-            loss_train = self.train_epoch(epoch, self.pretraining_optimizer)
-
-            with torch.no_grad():
-                self.model.eval()
-
-                pred_val = self.model(self.val.X)
-                loss_val = self.loss_fn(self.val.y, pred_val)
-
-            logging.info("Epoch: {}; loss train: {:.3f} cm-1; loss val: {:.3f} cm-1".format(
-                epoch, loss_train, loss_val
-            ))
-
-        torch.save(model.state_dict(), self.chk_path)
-
-        logging.info("-------------------------------------------------")
-        logging.info("----------- Pretraining finished. ---------------")
-        logging.info("-------------------------------------------------")
-
     def continue_from_checkpoint(self, chkpath):
         assert os.path.exists(chkpath)
 
@@ -740,9 +764,6 @@ class Training:
             self.val.dX = self.val.dX.to(DEVICE)
             self.val.dy = self.val.dy.to(DEVICE)
 
-        if self.pretraining:
-            self.run_pretraining()
-            self.load_basic_checkpoint()
 
         self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
         self.scheduler = self.build_scheduler()
@@ -1140,7 +1161,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
@@ -1243,10 +1264,11 @@ def load_dataset(cfg_dataset, typ):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_folder", required=True, type=str, help="path to folder with YAML configuration file")
-    parser.add_argument("--model_name",   required=True, type=str, help="the name of the YAML configuration file without extension")
-    parser.add_argument("--log_name",     required=False, type=str, default=None, help="name of the logging file without extension")
-    parser.add_argument("--chk_name",     required=False, type=str, default=None, help="name of the general checkpoint without extension")
+    parser.add_argument("--model_folder",  required=True, type=str, help="path to folder with YAML configuration file")
+    parser.add_argument("--model_name",    required=True, type=str, help="the name of the YAML configuration file without extension")
+    parser.add_argument("--log_name",      required=False, type=str, default=None, help="name of the logging file without extension")
+    parser.add_argument("--chk_name",      required=False, type=str, default=None, help="name of the general checkpoint without extension")
+    
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
@@ -1261,7 +1283,7 @@ if __name__ == "__main__":
     logging.info("loaded configuration file from {}".format(cfg_path))
 
     if 'PRINT_PRECISION' in cfg:
-        PRINT_PRECISION = cfg['PRINT_PRECISION'] 
+        PRINT_PRECISION = cfg['PRINT_PRECISION']
 
     if args.log_name is not None:
         log_path = os.path.join(MODEL_FOLDER, args.log_name + ".log")
@@ -1304,27 +1326,13 @@ if __name__ == "__main__":
     typ = cfg['TYPE']
     assert typ in ('ENERGY', 'DIPOLE', 'DIPOLEQ', 'DIPOLEC')
 
-    cfg_dataset = cfg['DATASET']
-    train, val, test = load_dataset(cfg_dataset, typ)
-    xscaler, yscaler = preprocess_dataset(train, val, test, cfg_dataset)
-
-    cfg_model = cfg['MODEL']
-    if typ == 'ENERGY':    model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=train.NPOLY, output_features=1)
-    elif typ == 'DIPOLE':  model = build_network(cfg_model, hidden_dims=cfg['MODEL']['HIDDEN_DIMS'][0], input_features=train.NPOLY, output_features=3)
-    elif typ == 'DIPOLEQ': model = QModel(cfg_model, input_features=train.NPOLY, output_features=[len(natoms) for natoms in train.symmetry.values()])
-    elif typ == 'DIPOLEC': model = build_network(cfg_model, input_features=3 * train.NATOMS, output_features=1)
-    else:
-        assert False, "unreachable"
-
-    logging.info("Build model: {}".format(model))
-    nparams = count_params(model)
-    logging.info("Number of parameters: {}".format(nparams))
+    train, val, test = load_dataset(cfg['DATASET'], typ)
 
     if USE_WANDB:
         project_name = cfg_dataset['NAME'] + "-" + cfg['TYPE']
         wandb.init(project=project_name)
 
-    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, model, cfg, train, val, test, xscaler, yscaler)
+    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test)
 
-    model = t.train_model()
+    t.train_model()
     t.model_eval()

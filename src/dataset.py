@@ -157,8 +157,8 @@ def load_xyz_with_energy(fpath):
                 words = inp.readline().split()
 
                 coords[natom, :] = list(map(float, words[1:]))
-                charge           = SYMBOLS.index(words[0]) + 1
-                z[natom]         = charge
+                charge   = SYMBOLS.index(words[0]) + 1
+                z[natom] = charge
 
             c = XYZConfig(coords=coords, z=z, energy=energy)
             #c.check()
@@ -199,8 +199,12 @@ def load_xyz_with_dipole(fpath):
                     print("Line number: {}".format(linec))
                     raise
 
-                charge           = SYMBOLS.index(words[0]) + 1
-                z[natom]         = charge
+                if words[0] == 'X':
+                    charge = -1
+                else:
+                    charge = SYMBOLS.index(words[0]) + 1
+
+                z[natom] = charge
 
             c = XYZConfig(coords=coords, z=z, dipole=dipole)
             #c.check()
@@ -288,11 +292,23 @@ class PolyDataset(Dataset):
         self.atom_mapping = atom_mapping
         self.purify       = purify
 
-        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'SWITCH-EXP7', 'SWITCH-EXP5', 'EXP', 'None')
+        assert variables['INTERMOLECULAR'] in ('SWITCH-EXP6', 'SWITCH-EXP7', 'SWITCH-EXP5', 'SWITCH-EXP4', 'EXP', 'None')
         self.intermolecular_variables = variables['INTERMOLECULAR']
 
         assert variables['INTRAMOLECULAR'] in ('ZERO', 'EXP')
         self.intramolecular_variables = variables['INTRAMOLECULAR']
+
+        if variables.get('INTERMOLECULAR_RANGE', None) is not None:
+            rng = variables['INTERMOLECULAR_RANGE']
+            assert len(rng.split()) == 2, "lower and upper bound are expected for a range"
+
+            rng = tuple(map(float, rng.split()))
+            assert rng[1] > rng[0]
+
+            self.intermolecular_range = rng
+        else:
+            logging.info("Setting default intermolecular range.")
+            self.intermolecular_range = None
 
         self.exp_lambda = variables['EXP_LAMBDA']
 
@@ -722,21 +738,27 @@ class PolyDataset(Dataset):
             intermolecular variable => y = SWITCH_FUNCTION(exp(-r/a0) -> c/r**6)
         """
 
-        def switch(x):
+        def switch(x, x_i, x_f):
             """
             Adopted from
                 C. Qu, Q. Yu, J. M. Bowman, Permutationally Invariant Potential Energy Surfaces,
                 Annual Review of Physical Chemistry, 2018
             to smoothly stitch together exponential wall and polynomial decay
             """
-            x_i = 6.0
-            x_f = 20.0
             if (x < x_i):
                 return 0.0
             elif (x < x_f):
                 return 10*((x - x_i) / (x_f - x_i))**3 - 15*((x - x_i) / (x_f - x_i))**4 + 6*((x - x_i) / (x_f - x_i))**5
             else:
                 return 1.0
+
+        if self.intermolecular_range is not None:
+            sw_rmin = self.intermolecular_range[0]
+            sw_rmax = self.intermolecular_range[1]
+            logging.info(" SET SWITCH RANGE = {} -> {}".format(sw_rmin, sw_rmax))
+        else:
+            sw_rmin = 6.0
+            sw_rmax = 20.0
 
         logging.info("Constructing an array of interatomic distances with options:")
         logging.info(" INTERMOLECULAR COORDINATES = {}".format(intermolecular_variables))
@@ -748,12 +770,14 @@ class PolyDataset(Dataset):
             Y_INTERMOLECULAR = lambda r: 0.0
         elif intermolecular_variables == "EXP":
             Y_INTERMOLECULAR = lambda r: np.exp(-r / self.exp_lambda)
+        elif intermolecular_variables == "SWITCH-EXP4":
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r, sw_rmin, sw_rmax)) * np.exp(-r / self.exp_lambda) + switch(r, sw_rmin, sw_rmax) * 1e2 / r**4
         elif intermolecular_variables == "SWITCH-EXP5":
-            Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e3 / r**5
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r, sw_rmin, sw_rmax)) * np.exp(-r / self.exp_lambda) + switch(r, sw_rmin, sw_rmax) * 1e3 / r**5
         elif intermolecular_variables == "SWITCH-EXP6":
-            Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e4 / r**6
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r, sw_rmin, sw_rmax)) * np.exp(-r / self.exp_lambda) + switch(r, sw_rmin, sw_rmax) * 1e4 / r**6
         elif intermolecular_variables == "SWITCH-EXP7":
-            Y_INTERMOLECULAR = lambda r: (1 - switch(r)) * np.exp(-r / self.exp_lambda) + switch(r) * 1e5 / r**7
+            Y_INTERMOLECULAR = lambda r: (1 - switch(r, sw_rmin, sw_rmax)) * np.exp(-r / self.exp_lambda) + switch(r, sw_rmin, sw_rmax) * 1e5 / r**7
         else:
             assert False, "Unreachable"
 
@@ -792,19 +816,19 @@ class PolyDataset(Dataset):
             for mapping in self.atom_mapping:
                 (monomer, z), = mapping.items()
                 if monomer == 0:
-                    assert c.z1[iter1] == z
+                    assert c.z1[iter1] == z, "c.z1[iter1]: {}; z: {}".format(c.z1[iter1], z)
                     assert isinstance(c.coords1[iter1], np.ndarray), "c.coords1: {}".format(c.coords1)
 
                     coords.append(c.coords1[iter1])
                     iter1 = iter1 + 1
                 elif monomer == 1:
-                    assert c.z2[iter2] == z
+                    assert c.z2[iter2] == z, "c.z2[iter2]: {}; z: {}".format(c.z2[iter2], z)
                     assert isinstance(c.coords2[iter2], np.ndarray), "c.coords2: {}".format(c.coords2)
 
                     coords.append(c.coords2[iter2])
                     iter2 = iter2 + 1
 
-            assert len(coords) == self.NATOMS
+            assert len(coords) == self.NATOMS, "len(coords): {}; self.NATOMS: {}".format(len(coords), self.NATOMS)
 
             self.xyz_ordered[n] = torch.tensor(np.array(coords))
 

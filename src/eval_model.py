@@ -4,7 +4,7 @@ from itertools import accumulate, combinations
 import logging
 
 import matplotlib
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import numpy as np
@@ -33,7 +33,7 @@ import sys
 sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
 from pybind_ch4 import Poten_CH4
 
-#plt.style.use('science')
+plt.style.use('science')
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -253,13 +253,14 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, figpath=None,
     plt.figure(figsize=(10, 10))
     ax = plt.subplot(1, 1, 1)
 
-    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0, label='PIP-NN', zorder=2, rasterized=True)
-    plt.scatter(val.y,   error_val,   s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0,                 zorder=2, rasterized=True)
-    plt.scatter(test.y,  error_test,  s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0,                 zorder=2, rasterized=True)
 
-    #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
-    #plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
-    #plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
+    #plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0, label='PIP-NN', zorder=2, rasterized=True)
+    #plt.scatter(val.y,   error_val,   s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0,                 zorder=2, rasterized=True)
+    #plt.scatter(test.y,  error_test,  s=20, marker='o', facecolors='none', color=lighten_color('#FF6F61', 1.1), lw=1.0,                 zorder=2, rasterized=True)
+
+    plt.scatter(train.y, error_train, s=20, marker='o', facecolors='none', color='#FF6F61', lw=1.0, label='train')
+    plt.scatter(val.y,   error_val,  s=20, marker='o', facecolors='none', color='#6CD4FF', lw=1.0, label='val')
+    plt.scatter(test.y,  error_test, s=20, marker='o', facecolors='none', color='#88B04B', lw=1.0, label='test')
 
     if add_reference_pes:
         calc, published_fit = load_published()
@@ -268,14 +269,15 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, figpath=None,
         #plt.scatter(calc, published_abs_error, s=20, marker='o', facecolors='none', color=lighten_color('#4B8F8C', 0.8), lw=1.0, label='Symmetry-adapted angular basis', zorder=1)
 
     EMIN = min(train.y)
+    #plt.xlim((-1500.0, 0.0))
     plt.xlim((EMIN, EMAX))
-    plt.ylim((-20.0, 20.0))
+    plt.ylim((-2.0, 2.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute residuals, cm$^{-1}$")
 
-    ax.yaxis.set_major_locator(plt.MultipleLocator(5.0))
-    ax.yaxis.set_minor_locator(plt.MultipleLocator(1.0))
+    #ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
+    #ax.yaxis.set_minor_locator(plt.MultipleLocator(0.05))
 
     pretty_ticks(ax)
     set_pretty_major_formatter(ax.get_xaxis())
@@ -434,12 +436,14 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
         pred = evaluator.energy(sampling_set.X)
         pred = torch.from_numpy(pred)
 
-        ind = (sampling_set.y < emax).nonzero()[:,0]
-        ys = sampling_set.y[ind]
-        preds = pred[ind]
-        logging.info("{} points selected".format(ind.size()[0]))
-
-        diff = torch.abs(ys - preds)
+        if emax is not None:
+            ind   = (sampling_set.y < emax).nonzero()[:,0]
+            ys    = sampling_set.y[ind]
+            preds = pred[ind]
+            logging.info("{} points selected".format(ind.size()[0]))
+            diff = torch.abs(ys - preds)
+        else:
+            diff = torch.abs(sampling_set.y - pred)
 
         mean = torch.mean(diff)
         maxx = torch.max(diff)
@@ -651,12 +655,12 @@ if __name__ == '__main__':
                 en = dataset.xyz_configs[k].energy
                 dip = dataset.xyz_configs[k].dipole
 
-                if k == 100:
-                    np.set_printoptions(precision=16)
-                    print(xyz_config.coords1)
-                    print(xyz_config.coords2)
-                    print(dip, dip_pred[k, :])
-                    assert False
+                #if k == 100:
+                #    np.set_printoptions(precision=16)
+                #    print(xyz_config.coords1)
+                #    print(xyz_config.coords2)
+                #    print(dip, dip_pred[k, :])
+                #    assert False
 
                 en_dm[k, 0] = en
                 en_dm[k, 1] = (np.linalg.norm(dip_pred[k, :]) - np.linalg.norm(dip))

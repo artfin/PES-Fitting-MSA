@@ -48,10 +48,7 @@ def retrieve_checkpoint(cfg, chk_path):
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
-    print("input_features: {}".format(meta_info["NPOLY"]))
-    print("output_features: {}".format([len(natoms) for natoms in meta_info["symmetry"].values()]))
-
-    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=1)
+    if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=meta_info["NPOLY"], output_features=1)
     elif cfg['TYPE'] == 'DIPOLE':  assert False
     elif cfg['TYPE'] == 'DIPOLEQ': model = QModel(cfg['MODEL'], input_features=meta_info["NPOLY"], output_features=[len(natoms) for natoms in meta_info["symmetry"].values()])
     elif cfg['TYPE'] == 'DIPOLEC': assert False

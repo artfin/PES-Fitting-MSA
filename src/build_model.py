@@ -19,7 +19,6 @@ class Builder:
 def build_network(cfg_model, hidden_dims, input_features, output_features, builder=Builder(torch.nn.__dict__)):
     layers = []
 
-    #hidden_dims = architecture['HIDDEN_DIMS']
     activation  = cfg_model['ACTIVATION']
     bias        = cfg_model.get('BIAS', True)
     BN          = cfg_model.get('BN', False)
