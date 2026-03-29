@@ -665,7 +665,7 @@ class PolyDataset(Dataset):
 
     @classmethod
     def from_pickle(cls, path):
-        dict = torch.load(path)
+        dict = torch.load(path, weights_only=False)
         return cls.from_dict(dict)
 
     @classmethod

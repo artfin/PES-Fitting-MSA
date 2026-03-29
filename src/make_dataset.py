@@ -10,6 +10,11 @@ import torch
 
 from dataset import PolyDataset
 
+try:
+    from collections.abc import MutableMapping
+except ImportError:
+    from collections import MutableMapping
+
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
@@ -59,7 +64,7 @@ def make_dataset_fpaths(cfg_dataset):
         items = []
         for k, v in d.items():
             new_key = parent_key + sep + k if parent_key else k
-            if isinstance(v, collections.MutableMapping):
+            if isinstance(v, MutableMapping):
                 items.extend(flatten(v, new_key, sep=sep).items())
             else:
                 items.append((new_key, v))
