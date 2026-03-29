@@ -1,55 +1,59 @@
-#ifndef MLP_H
-#define MLP_H 
+#ifndef MLP_H_
+#define MLP_H_
 
 #include <cassert>
+#include <memory>
 #include <mutex>
 
-#include "scaler.hpp"
+#include <Eigen/Dense>
 
 // https://github.com/rogersce/cnpy
 #include "cnpy.h"
 
-double SiLU(double x) {
-    return x / (1.0 + std::exp(-x)); 
-}
+void EVPOLY(double *y, Eigen::Ref<Eigen::RowVectorXd> p);
+void MAKE_YIJ(const double *x, double *y);
+void EVPOLY_JAC(Eigen::Ref<Eigen::MatrixXd> jac, double *y);
+void MAKE_DYDR(Eigen::Ref<Eigen::MatrixXd> dydr, const double *x); 
 
-double dSiLU(double x) {
-    double x_exp = std::exp(-x);
-    double denominator = 1.0 + x_exp; 
-    return 1.0 / denominator + x * x_exp / denominator / denominator;
-}
+struct StandardScaler {
+    StandardScaler(Eigen::RowVectorXd const& mean, Eigen::RowVectorXd const& scale);
+    
+    Eigen::RowVectorXd transform(Eigen::RowVectorXd const& x);
+    Eigen::RowVectorXd inverse_transform(Eigen::RowVectorXd const& xtr);
 
-template <typename Container>
-void print(std::string const& name, Container c) {
-    std::cout << "[" << name << "]: ";
-    for (auto el : c) {
-        std::cout << el << " ";
-    }
-    std::cout << std::endl;
-}
+    Eigen::RowVectorXd mean;
+    Eigen::RowVectorXd scale;
+};
 
-struct MLPModel 
+struct MLPES
 {
-    MLPModel(std::vector<size_t> const& architecture, std::vector<Eigen::MatrixXd> const& weights, std::vector<Eigen::RowVectorXd> const& biases,
-             StandardScaler xscaler, StandardScaler yscaler);
+    MLPES() = default;
+    ~MLPES();
 
-    double forward(std::vector<double> const& x);
-    void   backward(std::vector<double> const& x, std::vector<double> & dx);
+    void init(std::string const& npz_fname, size_t natoms, bool log);
 
-    std::vector<size_t> architecture;
+    double forward(double* x);
+    void backward(const double *x, double *dx);
+
+    void make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double *x);
+    
+    double** alloc_2d(int nrows, int ncols);
+    void print_2d(double** a, int nrows, int ncols);
+    void delete_2d(double** a, int nrows, int ncols);
+   
+    size_t natoms;
+    size_t ndist; 
+    double *yij; 
+    bool INITIALIZED = false;
+
+    std::unique_ptr<StandardScaler> xscaler;
+    std::unique_ptr<StandardScaler> yscaler;
+    
+    std::vector<size_t> arch;
     std::vector<Eigen::MatrixXd> weights;
     std::vector<Eigen::RowVectorXd> biases;
     std::vector<Eigen::RowVectorXd> neurons;
     std::vector<Eigen::RowVectorXd> cache_neurons;
-
-    StandardScaler xscaler;
-    StandardScaler yscaler;
-    
-    void make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x);
-
-    double** alloc_2d(int nrows, int ncols);
-    void print_2d(double** a, int nrows, int ncols);
-    void delete_2d(double** a, int nrows, int ncols);
     
     Eigen::RowVectorXd p; 
     Eigen::RowVectorXd ptr; 
@@ -66,29 +70,104 @@ struct MLPModel
     Eigen::MatrixXd t1;
     Eigen::VectorXd t2; 
     Eigen::MatrixXd t3;
-
-    std::vector<double> yij; 
 };
 
-MLPModel::MLPModel(std::vector<size_t> const& architecture, std::vector<Eigen::MatrixXd> const& weights, std::vector<Eigen::RowVectorXd> const& biases,
-                   StandardScaler xscaler, StandardScaler yscaler) :
-   architecture(architecture), weights(weights), biases(biases), xscaler(xscaler), yscaler(yscaler)
+#endif // MLP_H_
 
+#ifdef MLP_IMPLEMENTATION
+
+std::unique_ptr<StandardScaler> build_scaler(cnpy::npz_t& npz, std::string const& scaler_type);
+std::vector<size_t> parse_architecture_entry(cnpy::npz_t const& npz, std::string const& entry_name);
+Eigen::RowVectorXd parse_rowvectorxd_entry(cnpy::npz_t const& npz, std::string const& entry_name);
+Eigen::MatrixXd parse_matrixxd_entry(cnpy::npz_t const& npz, std::string const& entry_name);
+
+StandardScaler::StandardScaler(Eigen::RowVectorXd const& mean, Eigen::RowVectorXd const& scale) : mean(mean), scale(scale) { }
+
+Eigen::RowVectorXd StandardScaler::transform(Eigen::RowVectorXd const& x) 
 {
-    size_t sz = architecture.size();
+    // element-wise division
+    return (x - mean).array() / scale.array();
+}
 
+Eigen::RowVectorXd StandardScaler::inverse_transform(Eigen::RowVectorXd const& xtr) {
+    return scale.cwiseProduct(xtr) + mean;
+}
+
+double SiLU(double x) {
+    if (x < -700.0) return 0;
+    double x_exp = std::exp(-x);
+
+    double result = x / (1.0 + x_exp);
+    return result; 
+}
+
+double dSiLU(double x) {
+    if (x < -700.0) return 0;
+    double x_exp = std::exp(-x);
+    
+    double denominator = 1.0 + x_exp;
+
+    double result = 1.0 / denominator + x * x_exp / denominator / denominator;
+    //if (std::isinf(result)) {
+    //    std::cout << "(dSilu) x: " << x << " => " << result << "\n";
+    //    std::cout << "denominator = " << denominator << "\n";
+    //    std::cout << "x_exp: " << x_exp << "\n";
+    //    assert(false);
+    //}
+    return result; 
+}
+
+template <typename Container>
+void print(std::string const& name, Container c) {
+    std::cout << "[" << name << "]: ";
+    for (auto el : c) {
+        std::cout << el << " ";
+    }
+    std::cout << std::endl;
+}
+
+void MLPES::init(std::string const& npz_fname, size_t natoms, bool log=false)
+{
+    this->natoms = natoms;
+    ndist = natoms * (natoms - 1) / 2;
+    yij = new double [ndist];
+
+    /*
+     * use mutex to make it thread-safe
+     */
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    cnpy::npz_t npz = cnpy::npz_load(npz_fname);
+    
+    xscaler = build_scaler(npz, "xscaler");
+    yscaler = build_scaler(npz, "yscaler");
+    
+    arch = parse_architecture_entry(npz, "architecture");
+
+    for (size_t k = 0; k < arch.size() - 1; ++k) {
+        auto w = parse_matrixxd_entry(npz, std::to_string(2 * k) + ".weight");
+        auto b = parse_rowvectorxd_entry(npz, std::to_string(2 * k) + ".bias");
+
+        weights.push_back(w);
+        biases.push_back(b);
+
+        if (log) std::cout << "Parsed layer (" << k << ") of size: " << w.rows() << " x " << w.cols() << "\n";
+    } 
+    
+    size_t sz = arch.size();
     neurons.resize(sz);
     cache_neurons.resize(sz);
 
     for (size_t k = 0; k < sz; ++k) {
-        neurons[k]       = Eigen::RowVectorXd::Zero(architecture[k]);
-        cache_neurons[k] = Eigen::RowVectorXd::Zero(architecture[k]);
+        neurons[k]       = Eigen::RowVectorXd::Zero(arch[k]);
+        cache_neurons[k] = Eigen::RowVectorXd::Zero(arch[k]);
     }
 
+    size_t npoly = arch[0];
     p   = Eigen::RowVectorXd::Zero(npoly);
     ptr = Eigen::RowVectorXd::Zero(npoly);
     
-    yij.resize(ndist); 
     drdx = Eigen::MatrixXd::Zero(3 * natoms, ndist);
     dydr = Eigen::MatrixXd::Zero(ndist, ndist);
     
@@ -98,26 +177,32 @@ MLPModel::MLPModel(std::vector<size_t> const& architecture, std::vector<Eigen::M
     dEdp = Eigen::RowVectorXd::Zero(npoly); 
     dEdx = Eigen::RowVectorXd::Zero(3 * natoms);
 
-    t1.resize(npoly, architecture[1]);
+    t1.resize(npoly, arch[1]);
     t2.resize(npoly);
     t3.resize(3 * natoms, ndist); 
+    
+    INITIALIZED = true;
 }
 
-double MLPModel::forward(std::vector<double> const& x)
+MLPES::~MLPES()
+{
+    delete [] yij;
+}
+
+double MLPES::forward(double *x)
 /*
  * input  : atomic coordinates [a0]
  * output : energy [cm-1] 
  */
 {
-    MAKE_YIJ(&x[0], &yij[0], natoms);
-    EVPOLY(&yij[0], p);
+    assert(INITIALIZED && "ERROR: mlpes model is not initialized");
 
-    ptr = xscaler.transform(p);
+    MAKE_YIJ(x, yij);
+    EVPOLY(yij, p);
 
-    //std::cout << "p: " << p << std::endl;
-    //std::cout << "ptr: " << ptr << std::endl;
+    ptr = xscaler->transform(p);
 
-    size_t sz = architecture.size();
+    size_t sz = arch.size();
     size_t hidden_dims = sz - 2;
    
     // in_features 
@@ -137,14 +222,17 @@ double MLPModel::forward(std::vector<double> const& x)
     neurons[sz - 1] = neurons[sz - 2] * weights[sz - 2];
     neurons[sz - 1] += biases[sz - 2];
     
-    return yscaler.inverse_transform(neurons[sz - 1])(0);
+    return yscaler->inverse_transform(neurons[sz - 1])(0);
 }
 
-void MLPModel::backward(std::vector<double> const& x, std::vector<double> & dx)
+void MLPES::backward(const double *x, double *dx)
 {
-    make_drdx(drdx, &x[0]);
-    MAKE_DYDR(dydr, &x[0], natoms);
-    EVPOLY_JAC(jac, &yij[0]);  
+    make_drdx(drdx, x);
+    MAKE_DYDR(dydr, x);
+
+    // we already rely on `backward` being called RIGHT after corresponding `forward`
+    /* MAKE_YIJ(x, yij); */ 
+    EVPOLY_JAC(jac, yij);  
     
     t3.noalias()   = drdx * dydr;
     dpdx.noalias() = t3 * jac;
@@ -169,19 +257,24 @@ void MLPModel::backward(std::vector<double> const& x, std::vector<double> & dx)
     //     eye = weights[0].array().rowwise() * cache_neurons[1].array();
     //     eye = eye * weights[1]; 
     //  
-    
+
     t1 = weights[0].array().rowwise() * cache_neurons[1].array();
     t2.noalias() = t1 * weights[1]; 
 
-    dEdp = t2.transpose().array() / xscaler.scale.array(); // component-wise division
+    //for (size_t i = 0; i < cache_neurons[1].size(); ++i) {
+    //    double c = cache_neurons[1](i); 
+    //    std::cout << i << " " << c << " " << std::isinf(c) << "\n"; 
+    //} 
+
+    dEdp = t2.transpose().array() / xscaler->scale.array(); // component-wise division
 
     dEdx = dEdp * dpdx.transpose();
-    dEdx *= yscaler.scale[0];
+    dEdx *= yscaler->scale[0];
 
     Eigen::VectorXd::Map(&dx[0], 3 * natoms) = dEdx; 
 }
 
-void MLPModel::make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x) {
+void MLPES::make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x) {
     double drx, dry, drz;
     double dr_norm;
     int k = 0;
@@ -206,106 +299,55 @@ void MLPModel::make_drdx(Eigen::Ref<Eigen::MatrixXd> drdx, const double* x) {
     }
 }
 
-StandardScaler build_scaler(cnpy::npz_t& npz, std::string const& scaler_type) {
+cnpy::NpyArray get_entry(cnpy::npz_t const& npz, std::string const& entry_name) {
+    for (auto it = npz.begin(); it != npz.end(); ++it) {
+        std::string _name = it->first;
+        if (_name == entry_name) return it->second; 
+    }
+
+    throw std::runtime_error("get entry: could not find entry=" + entry_name); 
+}
+
+std::vector<size_t> parse_architecture_entry(cnpy::npz_t const& npz, std::string const& entry_name) {
+    cnpy::NpyArray np_subnetwork_arch = get_entry(npz, entry_name);
+    assert(np_subnetwork_arch.word_size == sizeof(size_t));
+
+    const size_t* p = np_subnetwork_arch.data<size_t>();
+    const size_t sz = np_subnetwork_arch.shape[0];
+
+    return std::vector<size_t>{p, p + sz};
+}
+
+Eigen::MatrixXd parse_matrixxd_entry(cnpy::npz_t const& npz, std::string const& entry_name) {
+    cnpy::NpyArray np_w = get_entry(npz, entry_name);
+    assert(np_w.shape.size() == 2);
+
+    const double* pw = np_w.data<double>();
+    Eigen::MatrixXd w = Eigen::MatrixXd(np_w.shape[0], np_w.shape[1]);
+    w = Eigen::Map<const Eigen::MatrixXd>(pw, np_w.shape[0], np_w.shape[1]);
+
+    return w;
+}
+
+Eigen::RowVectorXd parse_rowvectorxd_entry(cnpy::npz_t const& npz, std::string const& entry_name) {
+    cnpy::NpyArray np_b = get_entry(npz, entry_name);
+    assert(np_b.shape.size() == 1);
+
+    const double* pb = np_b.data<double>();
+    Eigen::RowVectorXd b = Eigen::RowVectorXd(np_b.shape[0]);
+    b = Eigen::Map<const Eigen::RowVectorXd>(pb, np_b.shape[0]);
+
+    return b;
+}
+
+std::unique_ptr<StandardScaler> build_scaler(cnpy::npz_t& npz, std::string const& scaler_type) {
 
     assert(scaler_type == "xscaler" || scaler_type == "yscaler");
 
-    std::map<std::string, cnpy::NpyArray>::iterator it;
-    std::string key;
-   
-    key = scaler_type + ".mean";
-    it = npz.find(key);
-    assert(it != npz.end() && "scaler.mean does not exist");
-     
-    const cnpy::NpyArray np_mean = it->second; 
-    assert(np_mean.shape.size() == 1);
-    
-    const double* pm = np_mean.data<double>();
-    auto mean = Eigen::RowVectorXd(np_mean.shape[0]);
-    mean = Eigen::Map<const Eigen::RowVectorXd>(pm, np_mean.shape[0]);
+    auto mean = parse_rowvectorxd_entry(npz, scaler_type + ".mean");
+    auto scale = parse_rowvectorxd_entry(npz, scaler_type + ".scale");
 
-    key = scaler_type + ".scale";
-    it = npz.find(key);
-    assert(it != npz.end() && "scaler.scale does not exist");
-
-    const cnpy::NpyArray np_scale = it->second;
-    assert(np_scale.shape.size() == 1);
-
-    const double* ps = np_scale.data<double>();
-    auto scale = Eigen::RowVectorXd(np_scale.shape[0]);
-    scale = Eigen::Map<const Eigen::RowVectorXd>(ps, np_scale.shape[0]);
-
-    return StandardScaler(mean, scale);
+    return std::make_unique<StandardScaler>(mean, scale);
 }
 
-MLPModel build_model_from_npz(std::string const& npz_fname)
-/*
- * use mutex to make it thread-safe
- */
-{
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-
-    cnpy::npz_t npz = cnpy::npz_load(npz_fname);
-
-    std::map<std::string, cnpy::NpyArray>::iterator it; 
-    it = npz.find("architecture");
-    assert(it != npz.end() && "architecture does not exist");
-
-    const cnpy::NpyArray np_architecture = it->second;
-    assert(np_architecture.word_size == sizeof(size_t));
-    const size_t* p = np_architecture.data<size_t>();
-    const size_t sz = np_architecture.shape[0];
-    auto architecture = std::vector<size_t>(p, p + sz);
-    print("architecture", architecture);
-
-    //it = npz.find("activation");
-    //assert (it != npz.end() && "activation does not exist");
-    //const cnpy::NpyArray np_activation = it->second;
-    //assert(np_activation.word_size == sizeof(wchar_t));
-    //const wchar_t* txt = np_activation.data<wchar_t>(); 
-    //std::wstring wstr(txt); 
-    //std::wcout << "ACTIVATION: " << wstr << std::endl;
-        
-    std::vector<Eigen::MatrixXd> weights(architecture.size() - 1); 
-    int wc = 0;
-
-    std::vector<Eigen::RowVectorXd> biases(architecture.size() - 1);
-    int bc = 0;
-
-    for (auto it = npz.begin(); it != npz.end(); ++it) {
-        std::string name = it->first;
-       
-        size_t found_weight = name.find("weight");
-        if (found_weight != std::string::npos) {
-            const cnpy::NpyArray w = it->second; 
-            assert(w.shape.size() == 2);
-            
-            const double* pw = w.data<double>();
-            weights[wc] = Eigen::MatrixXd(w.shape[0], w.shape[1]);
-            weights[wc] = Eigen::Map<const Eigen::MatrixXd>(pw, w.shape[0], w.shape[1]);
-            
-            //std::cout << "weights[" << wc << "] = " << weights[wc].rows() << "x" << weights[wc].cols() << std::endl;
-            wc++;
-        }
-
-        size_t found_bias = name.find("bias");
-        if (found_bias != std::string::npos) {
-            const cnpy::NpyArray b = it->second;
-            assert(b.shape.size() == 1);
-
-            const double * pb = b.data<double>();
-            biases[bc] = Eigen::RowVectorXd(b.shape[0]);
-            biases[bc] = Eigen::Map<const Eigen::RowVectorXd>(pb, b.shape[0]);
-
-            bc++;
-        }
-    } 
-
-    auto xscaler = build_scaler(npz, "xscaler");
-    auto yscaler = build_scaler(npz, "yscaler");
-
-    return MLPModel(architecture, weights, biases, xscaler, yscaler);
-}
-
-#endif
+#endif // MLP_IMPLEMENTATION

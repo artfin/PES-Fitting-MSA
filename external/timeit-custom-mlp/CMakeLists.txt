@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
 set(CMAKE_C_COMPILER "/share/apps/tools/gcc/9.2.0/bin/gcc")
 set(CMAKE_CXX_COMPILER "/share/apps/tools/gcc/9.2.0/bin/g++")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -15,10 +15,10 @@ project(mynn LANGUAGES C CXX Fortran)
 # -Ofast produces slightly different values!
 
 #set(CMAKE_Fortran_FLAGS "-Ofast -march=native")
-#set(CMAKE_CXX_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
-#set(CMAKE_C_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
-set(CMAKE_C_FLAGS "-O2 -ggdb")
-set(CMAKE_CXX_FLAGS "-O2 -ggdb")
+set(CMAKE_CXX_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+set(CMAKE_C_FLAGS "-Ofast -march=native -mfpmath=sse -msse2")
+#set(CMAKE_C_FLAGS "-O2 -ggdb")
+#set(CMAKE_CXX_FLAGS "-O2 -ggdb")
 
 find_package(OpenMP REQUIRED COMPONENTS C CXX)
 if (OPENMP_FOUND)
@@ -60,8 +60,6 @@ add_executable(
     cnpy.h
     cnpy.cpp
     mlp.hpp
-    scaler.hpp
-    scaler.cpp
     c_basis_4_2_1_4_intermolecular.cc
     c_basis_4_2_1_4_intermolecular.h
     c_jac_4_2_1_4_intermolecular.cc
@@ -78,22 +76,18 @@ add_executable(
     mlp.hpp
     scaler.hpp
     scaler.cpp
-    c_basis_1_1_1_2_3_1_3.cc
-    c_basis_1_1_1_2_3_1_3.h
-    c_jac_1_1_1_2_3_1_3.cc
-    c_jac_1_1_1_2_3_1_3.h
+    c_basis_1_1_1_2_3_1_4.cc
+    c_basis_1_1_1_2_3_1_4.h
+    c_jac_1_1_1_2_3_1_4.cc
+    c_jac_1_1_1_2_3_1_4.h
 )
 
 add_executable(
-    n2-ar-nonrigid.exe
-    n2-ar-nonrigid.cpp
+    2b-n2-ar.exe
+    2b-n2-ar.cpp
     cnpy.h
     cnpy.cpp
-    mtwist.h
-    mtwist.c
     mlp.hpp
-    scaler.hpp
-    scaler.cpp
     c_basis_2_1_4_purify.cc
     c_basis_2_1_4_purify.h
     c_jac_2_1_4_purify.cc
@@ -129,9 +123,23 @@ add_executable(
     c_jac_4_2_1_4_purify.cc
 )
 
+add_executable(
+    h2o-h2o-rigid.exe
+    h2o-h2o-rigid.cpp
+    cnpy.h
+    cnpy.cpp
+    mlp.hpp
+    c_basis_1_2_1_2_4_intermolecular.h
+    c_basis_1_2_1_2_4_intermolecular.cc
+    c_jac_1_2_1_2_4_intermolecular.h
+    c_jac_1_2_1_2_4_intermolecular.cc
+)
+
+
+target_link_libraries(h2o-h2o-rigid.exe   PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(ch4-n2-nonrigid.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(ch4-n2-rigid.exe    PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${GSL_LIBRARIES})
 target_link_libraries(ethanol.exe         PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${OpenMP_CXX_FLAGS})
-target_link_libraries(n2-ar-nonrigid.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
+target_link_libraries(2b-n2-ar.exe        PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(n2-ar-svc.exe       PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES})
 target_link_libraries(ch4-n2-svc.exe      PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES} ${MPI_CXX_LIBRARIES} -static-libstdc++)

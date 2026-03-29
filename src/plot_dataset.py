@@ -379,7 +379,6 @@ class XYZPlotter:
         plt.figure(figsize=(10, 10))
         ax = plt.subplot(1, 1, 1)
 
-
         #bins = list(500.0 * x for x in range(0, 31, 1)) + [20000.0]
         bins = list(500.0 * x for x in range(0, 21, 1))
         hist, bind_edges = np.histogram(energy, bins)

@@ -66,12 +66,15 @@ void make_yij_4_2_1_4_intermolecular(const double * x, double* yij, int natoms)
     }
 }
 
-// probably a terrible hack but seems to be working for now...
-#define EVPOLY     evpoly_4_2_1_4_intermolecular
-#define EVPOLY_JAC evpoly_jac_4_2_1_4_intermolecular
-#define MAKE_YIJ   make_yij_4_2_1_4_intermolecular
-#define MAKE_DYDR  void();
+void EVPOLY(double *y, Eigen::Ref<Eigen::RowVectorXd> p)          { evpoly_4_2_1_4_intermolecular(y, p); }
+void EVPOLY_JAC(Eigen::Ref<Eigen::MatrixXd> jac, double *y)       { evpoly_jac_4_2_1_4_intermolecular(jac, y); }
+void MAKE_YIJ(const double *x, double *y)                         { make_yij_4_2_1_4_intermolecular(x, y, natoms); }
+void MAKE_DYDR(Eigen::Ref<Eigen::MatrixXd> dydr, const double *x) { assert(false); } 
+
+#define MLP_IMPLEMENTATION
 #include "mlp.hpp"
+
+static MLPES model;
 
 template <typename T>
 std::vector<T> linspace(const T start, const T end, const size_t size) {
@@ -101,10 +104,10 @@ void print_molpro_style(std::vector<double> const& cc) {
     std::cout << "7, C1,, " << cc[18] << ", " << cc[19] << ", " << cc[20] << "\n";
 }
 
-double internal_pes_ch4_n2(MLPModel & model, double R, double PH1, double TH1, double PH2, double TH2)
+double internal_pes_ch4_n2(MLPES & model, double R, double PH1, double TH1, double PH2, double TH2)
 {
     const double NN_BOND_LENGTH = 2.078; // a0
-    static std::vector<double> cart(21);
+    static double cart[21] = {0};
 
     cart[0] =  1.193587416; cart[1]  =  1.193587416; cart[2]  = -1.193587416; // H1
     cart[3] = -1.193587416; cart[4]  = -1.193587416; cart[5]  = -1.193587416; // H2
@@ -130,7 +133,7 @@ double internal_pes_ch4_n2(MLPModel & model, double R, double PH1, double TH1, d
 
 void long_range_ch4_n2_morse()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-79-32-1-silu.npz");
+    model.init("models/ch4-n2-rigid-79-32-1-silu.npz", natoms);
 
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -163,7 +166,7 @@ void long_range_ch4_n2_morse()
 
 void long_range_ch4_n2_to_plot()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-78-32-1-y=exp6.npz");
+    model.init("models/ch4-n2-rigid-78-32-1-y=exp6.npz", natoms);
     
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -192,7 +195,7 @@ void long_range_ch4_n2_to_plot()
 
 void ch4_n2_derivatives_comparison()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-y=exp6.npz");
+    model.init("models/ch4-n2-rigid-y=exp6.npz", natoms);
    
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -265,7 +268,7 @@ void ch4_n2_derivatives_comparison()
 
 void long_range_ch4_n2_qc_table()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-78-32-1-y=exp.npz");
+    model.init("models/ch4-n2-rigid-78-32-1-y=exp6.npz", natoms);
    
     AI_PES_ch4_n2 symm_pes;
     symm_pes.init();
@@ -341,9 +344,9 @@ void long_range_ch4_n2_qc_table()
 
 void timeit()
 {
-    auto model = build_model_from_npz("models/ch4-n2-rigid-y=exp6.npz");
+    model.init("models/ch4-n2-rigid-y=exp6.npz", natoms);
     
-    std::vector<double> cc = {
+    double cc[] = {
  	  1.1935874160,	  1.1935874160, -1.1935874160,
  	 -1.1935874160,	 -1.1935874160, -1.1935874160,
  	 -1.1935874160,	  1.1935874160,  1.1935874160,
@@ -382,9 +385,9 @@ int main()
     // since this model expects 79 polys instead of 78 (additional constant p(0)=1.0 is expected)
     //long_range_ch4_n2_morse();
 
-    long_range_ch4_n2_to_plot();
+    //long_range_ch4_n2_to_plot();
 
-    //long_range_ch4_n2_qc_table();
+    long_range_ch4_n2_qc_table();
 
     //ch4_n2_derivatives_comparison();
 

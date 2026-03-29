@@ -179,36 +179,8 @@ void min_crossection_qc_table()
     // minimal cross-section
     // CCSD(T), aug-cc-pVTZ, N-N 2.078 a0
     std::vector<std::pair<double, Eigen::Vector3d>> qc_cs = {
-        std::make_pair(4.50 , Eigen::Vector3d(0.0026633900,  0.0000000000, -0.1439756800)), 
-        std::make_pair(4.75 , Eigen::Vector3d(0.0024798600,  0.0000000000, -0.1121835000)), 
-        std::make_pair(5.00 , Eigen::Vector3d(0.0022653300,  0.0000000000, -0.0914185500)), 
-        std::make_pair(5.25 , Eigen::Vector3d(0.0020083800,  0.0000000000, -0.0760516300)),
-        std::make_pair(5.50 , Eigen::Vector3d(0.0017391500,  0.0000000000, -0.0638263100)),
-        std::make_pair(5.75 , Eigen::Vector3d(0.0014815600,  0.0000000000, -0.0537495600)),
-        std::make_pair(6.00 , Eigen::Vector3d(0.0012489000,  0.0000000000, -0.0453176300)),
-        std::make_pair(6.25 , Eigen::Vector3d(0.0010464700,  0.0000000000, -0.0382260800)),
-        std::make_pair(6.50 , Eigen::Vector3d(0.0008747200,  0.0000000000, -0.0322597300)),
-        std::make_pair(6.75 , Eigen::Vector3d(0.0007314900,  0.0000000000, -0.0272500300)),  
-        std::make_pair(7.00 , Eigen::Vector3d(0.0006135100,  0.0000000000, -0.0230563900)),
-        std::make_pair(7.25 , Eigen::Vector3d(0.0005171500,  0.0000000000, -0.0195570000)),
-        std::make_pair(7.50 , Eigen::Vector3d(0.0004387500,  0.0000000000, -0.0166439800)),
-        std::make_pair(7.75 , Eigen::Vector3d(0.0003748900,  0.0000000000, -0.0142218900)),
-        std::make_pair(8.00 , Eigen::Vector3d(0.0003225600,  0.0000000000, -0.0122073600)),
-        std::make_pair(8.25 , Eigen::Vector3d(0.0002793300,  0.0000000000, -0.0105291600)),
-        std::make_pair(8.50 , Eigen::Vector3d(0.0002432700,  0.0000000000, -0.0091274700)),
-        std::make_pair(8.75 , Eigen::Vector3d(0.0002129600,  0.0000000000, -0.0079525300)),
-        std::make_pair(9.00 , Eigen::Vector3d(0.0001872900,  0.0000000000, -0.0069633200)),
-        std::make_pair(9.25 , Eigen::Vector3d(0.0001656000,  0.0000000000, -0.0061263000)),
-        std::make_pair(9.50 , Eigen::Vector3d(0.0001468700,  0.0000000000, -0.0054145300)),
-        std::make_pair(10.00, Eigen::Vector3d(0.0001172200,  0.0000000000, -0.0042839100)),
-        std::make_pair(11.00, Eigen::Vector3d(0.0000777600,  0.0000000000, -0.0028093700)),
-        std::make_pair(12.00, Eigen::Vector3d(0.0000538300,  0.0000000000, -0.0019348100)),
-        std::make_pair(14.00, Eigen::Vector3d(0.0000282000,  0.0000000000, -0.0010115100)),
-        std::make_pair(16.00, Eigen::Vector3d(0.0000162100,  0.0000000000, -0.0005820500)),
-        std::make_pair(18.00, Eigen::Vector3d(0.0000099800,  0.0000000000, -0.0003588300)),
-        std::make_pair(20.00, Eigen::Vector3d(0.0000064900,  0.0000000000, -0.0002333700)),
-        std::make_pair(25.00, Eigen::Vector3d(0.0000026200,  0.0000000000, -0.0000943800)),
-        std::make_pair(30.00, Eigen::Vector3d(0.0000012500,  0.0000000000, -0.0000452200)),
+        std::make_pair(4.50 , Eigen::Vector3d(-0.01470502,  -0.01047045, -0.01470500)), 
+        std::make_pair(4.75 , Eigen::Vector3d(-0.01318537,  -0.01086414, -0.01318535)), 
     };
 
     double NN_BOND_LENGTH = 2.078567491;
@@ -229,7 +201,6 @@ void min_crossection_qc_table()
         Eigen::MatrixXd coords = Eigen::Map<Eigen::Matrix<double, natoms, 3, Eigen::RowMajor>>(xyz.data()); 
 
         std::cout << "coords:\n" << coords << "\n";
-        assert(false);
 
         Eigen::RowVectorXd q = qmodel.forward(xyz);
         Eigen::RowVectorXd qcorr = q - infq;

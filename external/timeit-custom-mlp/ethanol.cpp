@@ -7,8 +7,8 @@
 #include <random>
 
 // Ethanol [group: 1 1 1 2 3 1]
-#include "c_jac_1_1_1_2_3_1_3.h"
-#include "c_basis_1_1_1_2_3_1_3.h"
+#include "c_jac_1_1_1_2_3_1_4.h"
+#include "c_basis_1_1_1_2_3_1_4.h"
 const int natoms = 9;
 const int ndist  = natoms * (natoms - 1) / 2;
 const int npoly = 1898;
@@ -53,8 +53,8 @@ void make_dydr(Eigen::Ref<Eigen::MatrixXd> dydr, const double* x, int natoms)
 }
 
 // probably a terrible hack but seems to be working for now...
-#define EVPOLY     evpoly_1_1_1_2_3_1_3
-#define EVPOLY_JAC evpoly_jac_1_1_1_2_3_1_3
+#define EVPOLY     evpoly_1_1_1_2_3_1_4
+#define EVPOLY_JAC evpoly_jac_1_1_1_2_3_1_4
 #define MAKE_YIJ   make_yij
 #define MAKE_DYDR  make_dydr 
 #include "mlp.hpp"
@@ -64,12 +64,13 @@ void time_ethanol_energy_and_forces_omp() {
     const int maxNumThreads = omp_get_max_threads();
     omp_set_num_threads(maxNumThreads);
 
-    int np = 20000;
+    int np = 100000;
     double st = omp_get_wtime();
     
     #pragma omp parallel
     {
-        auto model = build_model_from_npz("models/ethanol-wf-32-ntrain=50000.npz");
+        //auto model = build_model_from_npz("models/ethanol-wf-32-ntrain=50000.npz");
+        auto model = build_model_from_npz("models/ethanol-ord4-wf-32-ntrain=500.npz");
     
         std::random_device rd;
         std::mt19937 mt(rd()); 
@@ -268,9 +269,9 @@ void check_ethanol_model()
 
 int main()
 {
-    //time_ethanol_energy_and_forces_omp();
+    time_ethanol_energy_and_forces_omp();
 
-    check_ethanol_model();
+    //check_ethanol_model();
     //time_ethanol_energy();
     //time_ethanol_forces();
 

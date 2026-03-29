@@ -643,7 +643,7 @@ class PolyDataset(Dataset):
         logging.info("Done.")
 
         NCONFIGS = len(self.xyz_configs)
-        poly = np.zeros((NCONFIGS, self.NPOLY))
+        poly = np.zeros((NCONFIGS, self.NPOLY), dtype=np.float32)
         x = np.zeros((self.NDIS, 1))
 
         logging.info("Computing polynomials...")

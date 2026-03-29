@@ -1,9 +1,20 @@
-DATASET: 
+TYPE: ENERGY
+
+DATASET:
+  NAME: "CH4-N2-EN-RIGID"
+  SOURCE: [
+    "datasets/raw/ch4-n2/CH4-N2-EN-RIGID-CORRECTED.npz"
+  ] 
+  INTERIM_FOLDER: "datasets/interim/ch4-n2"
+  EXTERNAL_FOLDER: "datasets/external/ch4-n2"
   ORDER: 4
   SYMMETRY: 4 2 1
-  TYPE: RIGID
-  INTRAMOLECULAR_TO_ZERO: True
-  NORMALIZE: std 
+  ATOM_MAPPING: [{0 : 1}, {0 : 1}, {0 : 1}, {0 : 1}, {1 : 7}, {1 : 7}, {0 : 6}]
+  NORMALIZE: std
+  VARIABLES:
+    EXP_LAMBDA: 2.0
+    INTERMOLECULAR: EXP 
+    INTRAMOLECULAR: ZERO 
 
 MODEL:
   ACTIVATION: SiLU

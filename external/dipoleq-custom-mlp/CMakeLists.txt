@@ -37,6 +37,7 @@ find_package(ZLIB REQUIRED)
 find_package(GSL REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIRS})
 
+
 add_executable(
     2b-ch4-n2-qdipole.exe
     2b-ch4-n2-qdipole.cpp
@@ -61,11 +62,30 @@ add_executable(
     qmodel.hpp
     scaler.hpp
     scaler.cpp
-    c_basis_2_1_4_purify.cc
-    c_basis_2_1_4_purify.h
-    c_basis_1_1_1_4_purify.cc
-    c_basis_1_1_1_4_purify.h
+    c_basis_2_2_1_3_purify.cc
+    c_basis_2_2_1_3_purify.h
+    c_basis_2_1_1_1_3_purify.cc
+    c_basis_2_1_1_1_3_purify.h
+    c_basis_1_1_2_1_3_purify.cc
+    c_basis_1_1_2_1_3_purify.h
 )
 
+add_executable(
+    2b-h2-ar-qdipole.exe
+    2b-h2-ar-qdipole.cpp
+    cnpy.h
+    cnpy.cpp
+    qmodel.hpp
+    scaler.hpp
+    scaler.cpp
+    c_basis_1_1_2_1_3_intermolecular.h
+    c_basis_1_1_2_1_3_intermolecular.cc
+    c_basis_2_1_1_1_3_intermolecular.h
+    c_basis_2_1_1_1_3_intermolecular.cc
+    c_basis_2_2_1_3_intermolecular.h
+    c_basis_2_2_1_3_intermolecular.cc
+)
+
+target_link_libraries(2b-h2-ar-qdipole.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(2b-n2-ar-qdipole.exe  PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})
 target_link_libraries(2b-ch4-n2-qdipole.exe PRIVATE Eigen3::Eigen ${ZLIB_LIBRARIES})

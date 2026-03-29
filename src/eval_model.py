@@ -8,6 +8,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 import numpy as np
+
 import os
 import sklearn
 import time
@@ -210,6 +211,11 @@ def trim_png(figname):
     cl('convert {0} -trim +repage {0}'.format(figname))
 
 def retrieve_checkpoint(cfg, chk_fpath):
+    if not hasattr(np, '_core'):
+        np._core = np.core
+        sys.modules['numpy._core'] = np.core
+        sys.modules['numpy._core.multiarray'] = np.core.multiarray
+
     checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 
@@ -271,7 +277,7 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, figpath=None,
     EMIN = min(train.y)
     #plt.xlim((-1500.0, 0.0))
     plt.xlim((EMIN, EMAX))
-    plt.ylim((-2.0, 2.0))
+    plt.ylim((-50.0, 50.0))
 
     plt.xlabel(r"Energy, cm$^{-1}$")
     plt.ylabel(r"Absolute residuals, cm$^{-1}$")

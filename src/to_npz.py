@@ -296,18 +296,18 @@ if __name__ == "__main2__":
 
     write_npz_ch4_n2("CH4-N2-EN-RIGID-10000-CORRECTED.npz", natoms, nconfigs, xyz_configs)
 
-if __name__ == "__main12__":
-    fname = "datasets/raw/h2o-h2o/h2o-h2o.xyz"
-    natoms, nconfigs, xyz_configs = load_xyz_with_energy(fname)
 
-    write_npz_h2o_h2o("h2o-h2o.npz", natoms, nconfigs, xyz_configs)
-
-
-if __name__ == "__main__":
+if __name__ == "__main11__":
     filepath = "datasets/raw/co2-ar/CCSD-T.xyz"
     natoms, nconfigs, xyz_configs = load_xyz_with_energy(filepath)
 
     write_npz_co2_ar("CCSD-T.npz", natoms, nconfigs, xyz_configs)
+
+if __name__ == "__main__":
+    fname = "datasets/raw/h2o-h2o/h2o-h2o-extended-3.xyz"
+    natoms, nconfigs, xyz_configs = load_xyz_with_energy(fname)
+
+    write_npz_h2o_h2o("h2o-h2o-extended-3.npz", natoms, nconfigs, xyz_configs)
 
 
 ###################################################################################3

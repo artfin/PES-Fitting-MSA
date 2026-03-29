@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 import re
 import os
+import sys
 import torch
 import yaml
 
@@ -45,6 +46,11 @@ class Evaluator(torch.nn.Module):
 
 
 def retrieve_checkpoint(cfg, chk_path):
+    if not hasattr(np, '_core'):
+        np._core = np.core
+        sys.modules['numpy._core'] = np.core
+        sys.modules['numpy._core.multiarray'] = np.core.multiarray
+
     checkpoint = torch.load(chk_path, map_location=torch.device('cpu'))
     meta_info = checkpoint["meta_info"]
 

@@ -1,5 +1,5 @@
-#ifndef MLP_H
-#define MLP_H 
+#ifndef QMODEL_H_ 
+#define QMODEL_H_
 
 #include <vector>
 #include <Eigen/Dense>
@@ -7,18 +7,8 @@
 // https://github.com/rogersce/cnpy
 #include "cnpy.h"
 
-void eig_flatten_rowvectorxds(std::vector<Eigen::RowVectorXd> const& qtrs, Eigen::Ref<Eigen::RowVectorXd> qtr) {
-
-    size_t offset = 0;
-    for (auto const& qq : qtrs) {
-        qtr.middleCols(offset, qq.size()) = qq;
-        offset += qq.size();
-    }
-}
-
-double SiLU(double x) {
-    return x / (1.0 + std::exp(-x)); 
-}
+void QMODEL_FILL_POLY(std::vector<size_t> const& npolys, std::vector<double> const& x, Eigen::Ref<Eigen::RowVectorXd> p); 
+void QMODEL_FILL_POLY_INF(std::vector<size_t> const& npolys, Eigen::Ref<Eigen::RowVectorXd> p);
 
 struct MLP
 {
@@ -37,6 +27,47 @@ struct MLP
     std::vector<double> yij; 
 };
 
+struct QModel 
+{
+    QModel() = default;
+
+    void init(std::string const& npz_fname, bool log=false);
+    Eigen::RowVectorXd forward(double* x);
+    Eigen::RowVectorXd forward_inf(); 
+
+    std::unique_ptr<StandardScaler> xscaler;
+    std::unique_ptr<StandardScaler> yscaler;
+    std::vector<MLP> modules;
+
+    std::vector<size_t> npolys;
+    size_t total_npoly;
+
+    Eigen::RowVectorXd p;
+    std::vector<Eigen::RowVectorXd> qtrs;
+    Eigen::RowVectorXd qtr;
+
+    bool initialized = false;
+};
+
+#endif // QMODEL_H_ 
+
+////////////////////////////////////////////////////
+#ifdef QMODEL_IMPLEMENTATION 
+
+void eig_flatten_rowvectorxds(std::vector<Eigen::RowVectorXd> const& qtrs, Eigen::Ref<Eigen::RowVectorXd> qtr) {
+
+    size_t offset = 0;
+    for (auto const& qq : qtrs) {
+        qtr.middleCols(offset, qq.size()) = qq;
+        offset += qq.size();
+    }
+}
+
+double SiLU(double x) {
+    return x / (1.0 + std::exp(-x)); 
+}
+
+
 MLP::MLP(std::vector<size_t> const& architecture, std::vector<Eigen::MatrixXd> const& weights, std::vector<Eigen::RowVectorXd> const& biases) :
    architecture(architecture), weights(weights), biases(biases)
 {
@@ -52,7 +83,7 @@ MLP::MLP(std::vector<size_t> const& architecture, std::vector<Eigen::MatrixXd> c
     p   = Eigen::RowVectorXd::Zero(architecture[0]);
     ptr = Eigen::RowVectorXd::Zero(architecture[0]);
 
-    yij.resize(ndist); 
+    yij.resize(NDIST); 
 }
 
 Eigen::RowVectorXd MLP::forward(Eigen::RowVectorXd ptr)
@@ -144,41 +175,24 @@ std::unique_ptr<StandardScaler> build_scaler(cnpy::npz_t& npz, std::string const
     return std::make_unique<StandardScaler>(mean, scale);
 }
 
-struct QModel 
-{
-    QModel() = default;
 
-    void init(std::string const& npz_fname);
-    Eigen::RowVectorXd forward(std::vector<double> const& x);
-
-    std::unique_ptr<StandardScaler> xscaler;
-    std::unique_ptr<StandardScaler> yscaler;
-    std::vector<MLP> modules;
-
-    std::vector<size_t> npolys;
-    size_t total_npoly;
-
-    Eigen::RowVectorXd p;
-    std::vector<Eigen::RowVectorXd> qtrs;
-    Eigen::RowVectorXd qtr;
-};
-
-void QModel::init(std::string const& npz_fname) 
+void QModel::init(std::string const& npz_fname, bool log) 
 {
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
 
+    modules = {};
     cnpy::npz_t npz = cnpy::npz_load(npz_fname);
     
     xscaler = build_scaler(npz, "xscaler");
     yscaler = build_scaler(npz, "yscaler");
 
     size_t n_subnetworks = count_subnets(npz);
-    std::cout << "  Located n_subnetworks=" << n_subnetworks << "\n";
+    if (log) std::cout << "  Located n_subnetworks=" << n_subnetworks << "\n";
 
     for (size_t i = 0; i < n_subnetworks; ++i) {
         auto arch = parse_architecture_entry(npz, "architecture." + std::to_string(i));
-        print("architecture." + std::to_string(i), arch);
+        if (log) print("architecture." + std::to_string(i), arch);
 
         std::vector<Eigen::MatrixXd> weights;
         std::vector<Eigen::RowVectorXd> biases;
@@ -187,7 +201,7 @@ void QModel::init(std::string const& npz_fname)
             auto w = parse_matrixxd_entry(npz, "blocks." + std::to_string(i) + "." + std::to_string(2 * k) + ".weight");
             auto b = parse_rowvectorxd_entry(npz, "blocks." + std::to_string(i) + "." + std::to_string(2 * k) + ".bias");
 
-            std::cout << "Parsed layer (" << k << ") of size: " << w.rows() << " x " << w.cols() << std::endl;
+            if (log) std::cout << "Parsed layer (" << k << ") of size: " << w.rows() << " x " << w.cols() << std::endl;
 
             weights.push_back(w);
             biases.push_back(b);
@@ -213,11 +227,15 @@ void QModel::init(std::string const& npz_fname)
     
     qtrs.resize(n_modules);
     qtr = Eigen::RowVectorXd::Zero(total_qs);
+
+    initialized = true;
 }
 
-Eigen::RowVectorXd QModel::forward(std::vector<double> const& x) {
+Eigen::RowVectorXd QModel::forward(double* x) 
+{
+    assert(initialized && "ERROR: model is not initialized");
 
-    FILL_POLY(npolys, x, p);
+    QMODEL_FILL_POLY(npolys, x, p);
     Eigen::RowVectorXd ptr = xscaler->transform(p);
 
     size_t offset = 0;
@@ -231,44 +249,22 @@ Eigen::RowVectorXd QModel::forward(std::vector<double> const& x) {
     return qtr;
 }
 
+Eigen::RowVectorXd QModel::forward_inf() 
+{
+    assert(initialized && "ERROR: model is not initialized");
 
-//QModel build_qmodel_from_npz(std::string const& npz_fname)
-//{
-//    // use mutex to make it thread-safe
-//    static std::mutex mutex;
-//    std::lock_guard<std::mutex> lock(mutex);
-//
-//    cnpy::npz_t npz = cnpy::npz_load(npz_fname);
-//    
-//    auto xscaler = build_scaler(npz, "xscaler");
-//    auto yscaler = build_scaler(npz, "yscaler");
-//
-//    size_t n_subnetworks = count_subnets(npz);
-//    std::cout << "  Located n_subnetworks=" << n_subnetworks << "\n";
-//
-//    std::vector<MLP> modules;
-//
-//    for (size_t i = 0; i < n_subnetworks; ++i) {
-//        auto arch = parse_architecture_entry(npz, "architecture." + std::to_string(i));
-//        print("architecture." + std::to_string(i), arch);
-//
-//        std::vector<Eigen::MatrixXd> weights;
-//        std::vector<Eigen::RowVectorXd> biases;
-//
-//        for (size_t k = 0; k < arch.size() - 1; ++k) {
-//            auto w = parse_weights_entry(npz, "blocks." + std::to_string(i) + "." + std::to_string(2 * k) + ".weight");
-//            auto b = parse_bias_entry(npz, "blocks." + std::to_string(i) + "." + std::to_string(2 * k) + ".bias");
-//            weights.push_back(w);
-//            biases.push_back(b);
-//
-//            std::cout << "Parsed layer (" << k << ") of size: " << w.rows() << " x " << w.cols() << std::endl;
-//        }
-//
-//        auto m = MLP(arch, weights, biases);
-//        modules.push_back(m);
-//    }
-//
-//    return QModel(xscaler, yscaler, modules); 
-//}
+    QMODEL_FILL_POLY_INF(npolys, p);
 
-#endif
+    Eigen::RowVectorXd ptr = xscaler->transform(p);
+
+    size_t offset = 0;
+    for (size_t k = 0; k < modules.size(); ++k) {
+        qtrs[k] = modules[k].forward(ptr.segment(offset, npolys[k]));
+        offset += npolys[k];
+    }
+    
+    eig_flatten_rowvectorxds(qtrs, qtr); 
+
+    return qtr;
+}
+#endif // QMODEL_IMPLEMENTATION
