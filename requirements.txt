@@ -8,3 +8,4 @@ psutil
 torch
 tqdm
 wandb>=0.13.4
+extxyz==0.1.3

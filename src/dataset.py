@@ -7,6 +7,7 @@ import re
 
 from itertools import combinations
 
+from extxyz import read as extxyz_read
 from genpip import cl
 
 import torch
@@ -33,7 +34,8 @@ class XYZConfig:
     z       : np.array
     energy  : Optional[float]    = None
     dipole  : Optional[np.array] = None
-    forces  : Optional[np.array] = None
+    grad    : Optional[np.array] = None
+    mol_id  : Optional[np.array] = None
 
     def check(self):
         # TODO: check some interatomic distnaces (C-C, C-H and others to be in specific range)
@@ -63,6 +65,8 @@ class XYZConfigPair:
     z2      : np.array
     energy  : Optional[np.array] = None
     dipole  : Optional[np.array] = None
+    forces1 : Optional[np.array] = None
+    forces2 : Optional[np.array] = None
 
 @dataclass
 class PolyDataset_t:
@@ -103,13 +107,13 @@ def load_npz(fpath, load_forces=False, load_dipole=False):
 
         xyz_configs = []
         if load_forces:
-            for coords, energy, forces in zip(fd['R'], fd['E'], fd['F']):
+            for coords, energy, g in zip(fd['R'], fd['E'], fd['F']):
                 xyz_configs.append(
                     XYZConfig(
                         coords=coords,
                         z=z,
                         energy=energy,
-                        forces=forces
+                        grad=g
                     )
                 )
         else:
@@ -119,7 +123,7 @@ def load_npz(fpath, load_forces=False, load_dipole=False):
                         coords=coords,
                         z=z,
                         energy=energy,
-                        forces=None
+                        grad=None
                     )
                 )
     elif fd['nmol'] == 2:
@@ -130,7 +134,11 @@ def load_npz(fpath, load_forces=False, load_dipole=False):
         assert fd['R1'].shape[0] == NCONFIGS
         assert fd['R2'].shape[0] == NCONFIGS
 
-        if load_dipole:
+        if load_forces:
+            assert 'F1' in fd and 'F2' in fd, "Forces requested but F1/F2 not found in NPZ file"
+            xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, forces1=f1, forces2=f2)
+                           for c1, c2, energy, f1, f2 in zip(fd['R1'], fd['R2'], fd['E'], fd['F1'], fd['F2'])]
+        elif load_dipole:
             xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, dipole=dipole)
                            for c1, c2, energy, dipole in zip(fd['R1'], fd['R2'], fd['E'], fd['D'])]
         else:
@@ -213,6 +221,92 @@ def load_xyz_with_dipole(fpath):
 
     return NATOMS, NCONFIGS, xyz_configs
 
+
+def load_extxyz(fpath, atom_mapping=None):
+    """
+    Load extended XYZ file using the extxyz library.
+
+    Supports per-atom properties (forces, mol_id) and per-config properties (energy, dipole).
+
+    If atom_mapping is provided, validates that mol_id in the file matches the expected
+    molecule assignment from the config.
+
+    Args:
+        fpath: Path to extended XYZ file
+        atom_mapping: List of dicts like [{0: 8}, {0: 1}, {0: 1}, {1: 8}, {1: 1}, {1: 1}]
+                      where key is molecule index and value is atomic number
+
+    Returns:
+        NATOMS, NCONFIGS, xyz_configs (list of XYZConfig)
+    """
+    frames = extxyz_read(fpath)
+    if not isinstance(frames, list):
+        frames = [frames]
+
+    NCONFIGS = len(frames)
+    NATOMS = len(frames[0])
+
+    # Build expected mol_id from atom_mapping for validation
+    expected_mol_id = None
+    if atom_mapping is not None:
+        expected_mol_id = np.array([list(m.keys())[0] for m in atom_mapping])
+
+    xyz_configs = []
+    for i, atoms in enumerate(frames):
+        # Atomic numbers
+        z = atoms.get_atomic_numbers().reshape(-1, 1)
+
+        # Coordinates
+        coords = atoms.get_positions()
+
+        # Per-config properties from atoms.info
+        energy = atoms.info.get('energy', None)
+        dipole = atoms.info.get('dipole', None)
+        if dipole is not None:
+            dipole = np.array(dipole)
+
+        # Per-atom properties from atoms.arrays
+        grad = atoms.arrays.get('grad', None)
+        mol_id = atoms.arrays.get('mol_id', None)
+
+        # Validate mol_id against atom_mapping
+        if mol_id is not None and expected_mol_id is not None:
+            if not np.array_equal(mol_id, expected_mol_id):
+                raise ValueError(
+                    f"mol_id mismatch in config {i}:\n"
+                    f"  File mol_id:     {mol_id}\n"
+                    f"  Expected (from ATOM_MAPPING): {expected_mol_id}"
+                )
+
+        # Validate atomic numbers against atom_mapping
+        if atom_mapping is not None:
+            expected_z = np.array([list(m.values())[0] for m in atom_mapping]).reshape(-1, 1)
+            if not np.array_equal(z, expected_z):
+                raise ValueError(
+                    f"Atomic number mismatch in config {i}:\n"
+                    f"  File z:     {z.flatten()}\n"
+                    f"  Expected (from ATOM_MAPPING): {expected_z.flatten()}"
+                )
+
+        config = XYZConfig(
+            coords=coords,
+            z=z,
+            energy=energy,
+            dipole=dipole,
+            grad=grad,
+            mol_id=mol_id
+        )
+        xyz_configs.append(config)
+
+    logging.info(f"Loaded {NCONFIGS} configurations from extended XYZ: {fpath}")
+    logging.info(f"  NATOMS: {NATOMS}")
+    logging.info(f"  Has grad: {xyz_configs[0].grad is not None}")
+    logging.info(f"  Has mol_id: {xyz_configs[0].mol_id is not None}")
+    logging.info(f"  Has dipole: {xyz_configs[0].dipole is not None}")
+
+    return NATOMS, NCONFIGS, xyz_configs
+
+
 def write_xyz(xyz_path, xyz_configs, prop={"energy", "dipole"}):
     natoms = xyz_configs[0].coords.shape[0]
 
@@ -247,9 +341,9 @@ def write_npz(npz_path, xyz_configs):
     energy = np.array([xyz_config.energy for xyz_config in xyz_configs]).reshape((nconfigs, 1))
     z = xyz_configs[0].z
     R = np.asarray([xyz_config.coords for xyz_config in xyz_configs])
-    F = np.asarray([xyz_config.forces for xyz_config in xyz_configs])
+    G = np.asarray([xyz_config.grad for xyz_config in xyz_configs])
 
-    np.savez(npz_path, E=energy, z=z, R=R, F=F)
+    np.savez(npz_path, E=energy, z=z, R=R, G=G)
 
 
 def prepare_grm(xyz_configs, anchor_pos):
@@ -313,7 +407,10 @@ class PolyDataset(Dataset):
         self.exp_lambda = variables['EXP_LAMBDA']
 
         logging.info("Loading configurations from file_path: {}".format(file_path))
-        if file_path.endswith(".xyz"):
+        if file_path.endswith(".xyzext"):
+            # Extended XYZ format with per-atom properties (forces, mol_id)
+            NATOMS, NCONFIGS, self.xyz_configs = load_extxyz(file_path, atom_mapping)
+        elif file_path.endswith(".xyz"):
             if load_forces:
                 logging.error("STORING/LOADING FORCES IN XYZ FILE IS NOT SUPPORTED FOR NOW")
                 assert False
@@ -600,14 +697,33 @@ class PolyDataset(Dataset):
         for ind, xyz_config in enumerate(self.xyz_configs):
             energies[ind] = xyz_config.energy
 
-        forces = np.zeros((NCONFIGS, self.NATOMS, 3))
-        for ind, xyz_config in enumerate(self.xyz_configs):
-            forces[ind, :, :] = xyz_config.forces
+        grad = np.zeros((NCONFIGS, self.NATOMS, 3))
+
+        # Determine data source type
+        first_config = self.xyz_configs[0]
+        is_extxyz = isinstance(first_config, XYZConfig) and first_config.grad is not None
+
+        # Handle XYZConfig case (single molecule or extended XYZ multi-molecule)
+        if isinstance(first_config, XYZConfig):
+            for ind, xyz_config in enumerate(self.xyz_configs):
+                grad[ind, :, :] = xyz_config.grad
+        # Handle molecule pair case from NPZ - assemble gradients using atom_mapping
+        elif isinstance(first_config, XYZConfigPair):
+            for ind, xyz_config in enumerate(self.xyz_configs):
+                iter1, iter2 = 0, 0
+                for atom_idx, mapping in enumerate(self.atom_mapping):
+                    (monomer, _), = mapping.items()
+                    if monomer == 0:
+                        grad[ind, atom_idx, :] = xyz_config.forces1[iter1]
+                        iter1 = iter1 + 1
+                    elif monomer == 1:
+                        grad[ind, atom_idx, :] = xyz_config.forces2[iter2]
+                        iter2 = iter2 + 1
 
         X  = torch.from_numpy(poly)
         dX = torch.from_numpy(poly_derivatives)
         y  = torch.from_numpy(energies)
-        dy = torch.from_numpy(forces)
+        dy = torch.from_numpy(grad)
 
         return X, dX, y, dy
 
@@ -665,7 +781,11 @@ class PolyDataset(Dataset):
 
     @classmethod
     def from_pickle(cls, path):
-        dict = torch.load(path, weights_only=False)
+        try:
+            dict = torch.load(path, weights_only=False)
+        except TypeError:
+            # Older PyTorch versions don't support weights_only parameter
+            dict = torch.load(path)
         return cls.from_dict(dict)
 
     @classmethod
@@ -679,8 +799,14 @@ class PolyDataset(Dataset):
         NCONFIGS = len(xyz_configs)
         drdx = np.zeros((NCONFIGS, self.NATOMS * 3, self.NDIS), order="F")
 
-        # Case of one molecule
-        if isinstance(self.xyz_configs[0], XYZConfig):
+        # Determine if this is a multi-molecule system
+        first_config = self.xyz_configs[0]
+        is_single_molecule = isinstance(first_config, XYZConfig) and first_config.mol_id is None
+        is_extxyz_multimol = isinstance(first_config, XYZConfig) and first_config.mol_id is not None
+        is_npz_multimol = isinstance(first_config, XYZConfigPair)
+
+        # Case of single molecule (XYZConfig without mol_id)
+        if is_single_molecule:
             for n in range(NCONFIGS):
                 c = xyz_configs[n]
 
@@ -696,27 +822,77 @@ class PolyDataset(Dataset):
 
             return drdx
 
-        # 15/08 probably wouldn't be needed for quite some time though
-        assert False, "Implement calculation of `drdx` for the molecule pair"
+        # Case of molecule pair from extended XYZ (XYZConfig with mol_id)
+        if is_extxyz_multimol:
+            for n in range(NCONFIGS):
+                c = xyz_configs[n]
+                coords = c.coords  # Already in correct order
 
-        #for n in range(NCONFIGS):
-        #    c = xyz_configs[n]
+                k = 0
+                for i, j in combinations(range(self.NATOMS), 2):
+                    # Use mol_id to determine if inter- or intra-molecular
+                    mol_i = c.mol_id[i]
+                    mol_j = c.mol_id[j]
 
-        #    k = 0
-        #    for i, j in combinations(range(self.NATOMS), 2):
-        #        if intramz:
-        #            assert False
+                    dr      = coords[i] - coords[j]
+                    dr_norm = np.linalg.norm(dr)
 
-        #        if intermz:
-        #            assert False
+                    is_intermolecular = (mol_i != mol_j)
 
-        #        dr      = c.coords[i] - c.coords[j]
-        #        dr_norm = np.linalg.norm(dr)
+                    # Skip derivatives for zeroed variables
+                    if is_intermolecular and intermolecular_variables == "ZERO":
+                        k = k + 1
+                        continue
+                    if not is_intermolecular and intramolecular_variables == "ZERO":
+                        k = k + 1
+                        continue
 
-        #        drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
-        #        drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
+                    drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
+                    drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
 
-        #        k = k + 1
+                    k = k + 1
+
+            return drdx
+
+        # Case of molecule pair from NPZ (XYZConfigPair with coords1/coords2)
+        for n in range(NCONFIGS):
+            c = xyz_configs[n]
+
+            # Build ordered coordinate array from molecule pair (same logic as make_yij)
+            coords = []
+            iter1, iter2 = 0, 0
+            for mapping in self.atom_mapping:
+                (monomer, z), = mapping.items()
+                if monomer == 0:
+                    coords.append(c.coords1[iter1])
+                    iter1 = iter1 + 1
+                elif monomer == 1:
+                    coords.append(c.coords2[iter2])
+                    iter2 = iter2 + 1
+
+            k = 0
+            for i, j in combinations(range(self.NATOMS), 2):
+                (monomer_i, _), = self.atom_mapping[i].items()
+                (monomer_j, _), = self.atom_mapping[j].items()
+
+                dr      = coords[i] - coords[j]
+                dr_norm = np.linalg.norm(dr)
+
+                # Check if this is inter- or intramolecular distance
+                is_intermolecular = (monomer_i != monomer_j)
+
+                # Skip derivatives for zeroed variables
+                if is_intermolecular and intermolecular_variables == "ZERO":
+                    k = k + 1
+                    continue
+                if not is_intermolecular and intramolecular_variables == "ZERO":
+                    k = k + 1
+                    continue
+
+                drdx[n, 3*i:3*i + 3, k] =  dr / dr_norm
+                drdx[n, 3*j:3*j + 3, k] = -dr / dr_norm
+
+                k = k + 1
 
         return drdx
 
@@ -791,8 +967,14 @@ class PolyDataset(Dataset):
         NCONFIGS = len(xyz_configs)
         yij = np.zeros((NCONFIGS, self.NDIS), order="F")
 
-        # Case of one molecule
-        if isinstance(self.xyz_configs[0], XYZConfig):
+        # Determine if this is a multi-molecule system
+        first_config = self.xyz_configs[0]
+        is_single_molecule = isinstance(first_config, XYZConfig) and first_config.mol_id is None
+        is_extxyz_multimol = isinstance(first_config, XYZConfig) and first_config.mol_id is not None
+        is_npz_multimol = isinstance(first_config, XYZConfigPair)
+
+        # Case of single molecule (XYZConfig without mol_id)
+        if is_single_molecule:
             for n in range(NCONFIGS):
                 c = xyz_configs[n]
 
@@ -807,7 +989,31 @@ class PolyDataset(Dataset):
 
         self.xyz_ordered = torch.zeros((NCONFIGS, self.NATOMS, 3))
 
-        # Case of molecule pair
+        # Case of molecule pair from extended XYZ (XYZConfig with mol_id)
+        if is_extxyz_multimol:
+            for n in range(NCONFIGS):
+                c = xyz_configs[n]
+                coords = c.coords  # Already in correct order
+
+                self.xyz_ordered[n] = torch.tensor(coords)
+
+                k = 0
+                for i, j in combinations(range(self.NATOMS), 2):
+                    # Use mol_id to determine if inter- or intra-molecular
+                    mol_i = c.mol_id[i]
+                    mol_j = c.mol_id[j]
+
+                    r = np.linalg.norm(coords[i] - coords[j])
+                    if mol_i == mol_j:
+                        yij[n, k] = Y_INTRAMOLECULAR(r)
+                    else:
+                        yij[n, k] = Y_INTERMOLECULAR(r)
+
+                    k = k + 1
+
+            return yij
+
+        # Case of molecule pair from NPZ (XYZConfigPair with coords1/coords2)
         for n in range(NCONFIGS):
             c = xyz_configs[n]
 
