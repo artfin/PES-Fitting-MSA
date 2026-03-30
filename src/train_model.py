@@ -56,23 +56,24 @@ class IdentityScaler:
         return np.asarray(y)
 
 def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
+    # Note: sklearn StandardScaler returns float64, so we convert to TORCH_FLOAT
     try:
-        train.X = torch.from_numpy(xscaler.transform(train.X))
-        val.X   = torch.from_numpy(xscaler.transform(val.X))
-        test.X  = torch.from_numpy(xscaler.transform(test.X))
+        train.X = torch.from_numpy(xscaler.transform(train.X)).to(TORCH_FLOAT)
+        val.X   = torch.from_numpy(xscaler.transform(val.X)).to(TORCH_FLOAT)
+        test.X  = torch.from_numpy(xscaler.transform(test.X)).to(TORCH_FLOAT)
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.X  = torch.empty((1, 1))
-        test.X = torch.empty((1, 1))
+        val.X  = torch.empty((1, 1), dtype=TORCH_FLOAT)
+        test.X = torch.empty((1, 1), dtype=TORCH_FLOAT)
 
     try:
-        train.y = torch.from_numpy(yscaler.transform(train.y))
-        val.y   = torch.from_numpy(yscaler.transform(val.y))
-        test.y  = torch.from_numpy(yscaler.transform(test.y))
+        train.y = torch.from_numpy(yscaler.transform(train.y)).to(TORCH_FLOAT)
+        val.y   = torch.from_numpy(yscaler.transform(val.y)).to(TORCH_FLOAT)
+        test.y  = torch.from_numpy(yscaler.transform(test.y)).to(TORCH_FLOAT)
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.y = torch.empty(1)
-        test.y = torch.empty(1)
+        val.y = torch.empty(1, dtype=TORCH_FLOAT)
+        test.y = torch.empty(1, dtype=TORCH_FLOAT)
 
 
 def fit_scalers_to_train_dataset(train, cfg):
@@ -170,7 +171,7 @@ class L2Regularization(torch.nn.Module):
         return "L2Regularization(lambda={})".format(self.lambda_)
 
     def forward(self, model):
-        l2_norm = torch.tensor(0.).to(DEVICE)
+        l2_norm = torch.tensor(0., dtype=TORCH_FLOAT, device=DEVICE)
         for p in model.parameters():
             l2_norm += (p**2).sum()
         return self.lambda_ * l2_norm
@@ -178,7 +179,7 @@ class L2Regularization(torch.nn.Module):
 class WMSELoss_Boltzmann(torch.nn.Module):
     def __init__(self, Eref):
         super().__init__()
-        self.Eref = torch.tensor(Eref).to(DEVICE)
+        self.Eref = torch.tensor(Eref, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -207,7 +208,7 @@ class WMSELoss_Boltzmann(torch.nn.Module):
 class WRMSELoss_Boltzmann(torch.nn.Module):
     def __init__(self, Eref):
         super().__init__()
-        self.Eref = torch.tensor(Eref).to(DEVICE)
+        self.Eref = torch.tensor(Eref, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -236,7 +237,7 @@ class WRMSELoss_Boltzmann(torch.nn.Module):
 class WMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -277,7 +278,7 @@ class WMSELoss_Ratio(torch.nn.Module):
 class WRMSELoss_Ratio_dipole(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -321,8 +322,8 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0):
         super().__init__()
         self.natoms = natoms
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
-        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
+        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
+        self.f_lambda = torch.tensor(f_lambda, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.en_mean = None
         self.en_std  = None
@@ -369,7 +370,7 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 class WRMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -761,11 +762,11 @@ class Training:
             self.test.xyz_ordered = self.test.xyz_ordered.to(DEVICE)
 
         if self.train.dX is not None:
-            self.train.dX = self.train.dX.to(DEVICE)
-            self.train.dy = self.train.dy.to(DEVICE)
+            self.train.dX = self.train.dX.to(TORCH_FLOAT).to(DEVICE)
+            self.train.dy = self.train.dy.to(TORCH_FLOAT).to(DEVICE)
 
-            self.val.dX = self.val.dX.to(DEVICE)
-            self.val.dy = self.val.dy.to(DEVICE)
+            self.val.dX = self.val.dX.to(TORCH_FLOAT).to(DEVICE)
+            self.val.dy = self.val.dy.to(TORCH_FLOAT).to(DEVICE)
 
 
         self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
@@ -1069,8 +1070,8 @@ class Training:
         self.test.y = self.test.y.to(DEVICE)
 
         if self.test.dX is not None:
-            self.test.dX = self.test.dX.to(DEVICE)
-            self.test.dy = self.test.dy.to(DEVICE)
+            self.test.dX = self.test.dX.to(TORCH_FLOAT).to(DEVICE)
+            self.test.dy = self.test.dy.to(TORCH_FLOAT).to(DEVICE)
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
