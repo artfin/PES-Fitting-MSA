@@ -480,7 +480,9 @@ class PolyDataset(Dataset):
                 raise RuntimeError("Inconsistent set of options: PURIFY + INTERMOLECULAR_VARIABLES=ZERO")
 
             purify_mask = self.make_purify_mask(self.xyz_configs)
-            self.X      = self.X[:, purify_mask.astype(np.bool)]
+            self.X = self.X[:, purify_mask.astype(np.bool)]
+            if self.dX is not None:
+                self.dX = self.dX[:, purify_mask.astype(np.bool), :]
 
             self.NPOLY = purify_mask.sum()
 
@@ -519,6 +521,8 @@ class PolyDataset(Dataset):
 
             self.NPOLY = self.mask.sum()
             self.X = self.X[:, self.mask.astype(np.bool)]
+            if self.dX is not None:
+                self.dX = self.dX[:, self.mask.astype(np.bool), :]
             logging.info("Final size of the X-array: {}".format(self.X.size()))
 
 
