@@ -580,7 +580,7 @@ class PolyDataset(Dataset):
             with open(C_LIB, mode='r') as fp:
                 lines = "".join(fp.readlines())
 
-            pattern    = "p\[(\d+)\]"
+            pattern    = r"p\[(\d+)\]"
             found      = re.findall(pattern, lines)
             assert found
 
