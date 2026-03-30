@@ -10,10 +10,9 @@ from sympy.codegen.ast import Assignment
 
 from tqdm import tqdm
 
-from config import C_FLOAT_TYPE
-
-# Eigen type suffix: 'd' for double, 'f' for float
-EIGEN_SUFFIX = "f" if C_FLOAT_TYPE == "float" else "d"
+# Always generate float64 C code for C++ compatibility
+C_FLOAT_TYPE = "double"
+EIGEN_SUFFIX = "d"
 
 @dataclasses.dataclass
 class Monomial:

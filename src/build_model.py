@@ -3,6 +3,8 @@ import logging
 import itertools
 import torch
 
+from config import TORCH_FLOAT
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Builder:
@@ -41,7 +43,7 @@ def build_network(cfg_model, hidden_dims, input_features, output_features, build
     layers.append(torch.nn.Linear(out_features, output_features, bias=bias))
 
     model = torch.nn.Sequential(*layers)
-    model.double()
+    model.to(TORCH_FLOAT)
 
     return model
 

@@ -22,7 +22,7 @@ KCALTOCM  = 349.757
 #POLYNOMIAL_LIB = "MSA"
 POLYNOMIAL_LIB = "CUSTOM"
 
-from config import NP_FLOAT, TORCH_FLOAT
+from config import NP_FLOAT, TORCH_FLOAT, C_FLOAT_TYPE
 
 SYMBOLS = ('H', 'He',\
            'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',\
@@ -593,9 +593,9 @@ class PolyDataset(Dataset):
         logging.info(" [NUMBER OF POLYNOMIALS] NPOLY = {}".format(self.NPOLY))
 
     def eval_poly(self, x):
-        p = np.zeros((self.NPOLY, ))
+        p = np.zeros((self.NPOLY, ), dtype=NP_FLOAT)
         if POLYNOMIAL_LIB == "MSA":
-            m = np.zeros((self.NMON, ))
+            m = np.zeros((self.NMON, ), dtype=NP_FLOAT)
 
             self.evmono(x, m)
             self.evpoly(m, p)
@@ -652,8 +652,14 @@ class PolyDataset(Dataset):
         logging.info("Done.")
 
         NCONFIGS = len(self.xyz_configs)
-        poly             = np.zeros((NCONFIGS, self.NPOLY), dtype=NP_FLOAT)
-        poly_derivatives = np.zeros((NCONFIGS, self.NPOLY, 3 * self.NATOMS), dtype=NP_FLOAT)
+        poly_shape = (NCONFIGS, self.NPOLY)
+        poly_deriv_shape = (NCONFIGS, self.NPOLY, 3 * self.NATOMS)
+        poly_size_mb = np.prod(poly_shape) * np.dtype(NP_FLOAT).itemsize / (1024 * 1024)
+        poly_deriv_size_mb = np.prod(poly_deriv_shape) * np.dtype(NP_FLOAT).itemsize / (1024 * 1024)
+        logging.info(f"Allocating poly array: shape={poly_shape}, dtype={NP_FLOAT}, size={poly_size_mb:.1f} MB")
+        logging.info(f"Allocating poly_derivatives array: shape={poly_deriv_shape}, dtype={NP_FLOAT}, size={poly_deriv_size_mb:.1f} MB")
+        poly             = np.zeros(poly_shape, dtype=NP_FLOAT)
+        poly_derivatives = np.zeros(poly_deriv_shape, dtype=NP_FLOAT)
 
         if POLYNOMIAL_LIB == "MSA":
             # omit second number for the arrays to be considered one-dimensional
@@ -678,17 +684,29 @@ class PolyDataset(Dataset):
                     poly_derivatives[n, :, nd] = dp
 
         elif POLYNOMIAL_LIB == "CUSTOM":
-            dpdy    = np.zeros((self.NDIS, self.NPOLY), dtype=NP_FLOAT)
+            dpdy_shape = (self.NDIS, self.NPOLY)
+            dpdy_size_mb = np.prod(dpdy_shape) * np.dtype(NP_FLOAT).itemsize / (1024 * 1024)
+            logging.info(f"Allocating dpdy array: shape={dpdy_shape}, dtype={NP_FLOAT}, size={dpdy_size_mb:.1f} MB")
+            dpdy    = np.zeros(dpdy_shape, dtype=NP_FLOAT)
             dpdy_pp = (dpdy.__array_interface__['data'][0] + np.arange(dpdy.shape[0]) * dpdy.strides[0]).astype(np.uintp)
 
             p = np.zeros((self.NPOLY, ), dtype=NP_FLOAT)
+            logging.info(f"C library call arrays: yij.dtype={yij.dtype}, p.dtype={p.dtype}, dpdy.dtype={dpdy.dtype}")
+            logging.info(f"C library expects: NP_FLOAT={NP_FLOAT}, C_FLOAT_TYPE={C_FLOAT_TYPE}")
 
+            logging.info(f"Starting polynomial evaluation loop for {NCONFIGS} configurations...")
             for n in range(0, NCONFIGS):
+                if n == 0:
+                    logging.info(f"First iteration: _yij.shape={yij[n, :].shape}, _yij.dtype={yij[n, :].dtype}")
                 _yij  = yij[n, :].copy()
-                _dydr = -1.0 / self.exp_lambda * np.diag(_yij)
+                _dydr = NP_FLOAT(-1.0) / self.exp_lambda * np.diag(_yij)
                 _drdx = drdx[n, :, :].copy()
 
+                if n == 0:
+                    logging.info(f"Calling evpoly with _yij.dtype={_yij.dtype}, p.dtype={p.dtype}")
                 self.evpoly(_yij, p)
+                if n == 0:
+                    logging.info(f"Calling c_jac_dpdy...")
                 self.c_jac_dpdy(dpdy_pp, _yij)
 
                 dpdx = _drdx @ _dydr @ dpdy
@@ -803,7 +821,10 @@ class PolyDataset(Dataset):
 
     def make_drdx(self, xyz_configs, intermolecular_variables=None, intramolecular_variables=None):
         NCONFIGS = len(xyz_configs)
-        drdx = np.zeros((NCONFIGS, self.NATOMS * 3, self.NDIS), order="F", dtype=NP_FLOAT)
+        drdx_shape = (NCONFIGS, self.NATOMS * 3, self.NDIS)
+        drdx_size_mb = np.prod(drdx_shape) * np.dtype(NP_FLOAT).itemsize / (1024 * 1024)
+        logging.info(f"Allocating drdx array: shape={drdx_shape}, dtype={NP_FLOAT}, size={drdx_size_mb:.1f} MB")
+        drdx = np.zeros(drdx_shape, order="F", dtype=NP_FLOAT)
 
         # Determine if this is a multi-molecule system
         first_config = self.xyz_configs[0]
@@ -971,7 +992,10 @@ class PolyDataset(Dataset):
             assert False, "Unreachable"
 
         NCONFIGS = len(xyz_configs)
-        yij = np.zeros((NCONFIGS, self.NDIS), order="F", dtype=NP_FLOAT)
+        yij_shape = (NCONFIGS, self.NDIS)
+        yij_size_mb = np.prod(yij_shape) * np.dtype(NP_FLOAT).itemsize / (1024 * 1024)
+        logging.info(f"Allocating yij array: shape={yij_shape}, dtype={NP_FLOAT}, size={yij_size_mb:.1f} MB")
+        yij = np.zeros(yij_shape, order="F", dtype=NP_FLOAT)
 
         # Determine if this is a multi-molecule system
         first_config = self.xyz_configs[0]

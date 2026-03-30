@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
 from build_model import build_network, QModel
+from config import TORCH_FLOAT
 from dataset import PolyDataset
 from genpip import cmdstat, cl
 from train_model import load_dataset, load_cfg
@@ -103,7 +104,7 @@ class Evaluator:
         Xtr = self.xscaler.transform(X)
 
         with torch.no_grad():
-            ytr = self.model(torch.from_numpy(Xtr))
+            ytr = self.model(torch.from_numpy(Xtr).to(TORCH_FLOAT))
 
         return self.yscaler.inverse_transform(ytr.detach().numpy())
 
@@ -115,7 +116,7 @@ class Evaluator:
         self.model.eval()
 
         Xtr = self.xscaler.transform(X)
-        Xtr = torch.from_numpy(Xtr)
+        Xtr = torch.from_numpy(Xtr).to(TORCH_FLOAT)
 
         with torch.no_grad():
             y = self.model(Xtr)
@@ -135,16 +136,16 @@ class Evaluator:
         self.model.eval()
 
         Xtr      = self.xscaler.transform(X)
-        Xtr      = torch.from_numpy(Xtr)
+        Xtr      = torch.from_numpy(Xtr).to(TORCH_FLOAT)
         X_inf    = torch.zeros_like(Xtr)
-        X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf))
+        X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf)).to(TORCH_FLOAT)
 
         with torch.no_grad():
             q_pred = self.model(Xtr)
             q_inf  = self.model(X_inf_tr)
 
         q_corr   = q_pred - q_inf
-        dip_pred = torch.einsum('ijk,ij->ik', xyz_ordered.double(), q_corr)
+        dip_pred = torch.einsum('ijk,ij->ik', xyz_ordered.to(TORCH_FLOAT), q_corr)
 
         print(dip_pred[0, :].detach().numpy())
         print("pc: ", q_pred[0, :].detach().numpy())
@@ -166,7 +167,7 @@ class Evaluator:
         self.model.eval()
 
         Xtr = self.xscaler.transform(X)
-        Xtr = torch.from_numpy(Xtr)
+        Xtr = torch.from_numpy(Xtr).to(TORCH_FLOAT)
 
         with torch.no_grad():
             # scalar products
@@ -182,7 +183,7 @@ class Evaluator:
 
     def forces(self, dataset):
         Xtr = self.xscaler.transform(dataset.X)
-        Xtr = torch.from_numpy(Xtr)
+        Xtr = torch.from_numpy(Xtr).to(TORCH_FLOAT)
 
         Xtr.requires_grad = True
 
@@ -193,15 +194,14 @@ class Evaluator:
 
         # take into account normalization of polynomials
         # now we have derivatives of energy w.r.t. to polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_)
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(TORCH_FLOAT)
         dEdp = torch.div(dEdp, x_scale)
 
         # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
-        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
-        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp, dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_)
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(TORCH_FLOAT)
         dEdx = -torch.mul(dEdx, y_scale)
 
         return dEdx
@@ -444,7 +444,7 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
             continue
 
         pred = evaluator.energy(sampling_set.X)
-        pred = torch.from_numpy(pred)
+        pred = torch.from_numpy(pred).to(TORCH_FLOAT)
 
         if emax is not None:
             ind   = (sampling_set.y < emax).nonzero()[:,0]
@@ -481,8 +481,8 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
 
     if add_reference_pes:
         calc, published_fit = load_published()
-        calc = torch.from_numpy(calc)
-        published_fit = torch.from_numpy(published_fit)
+        calc = torch.from_numpy(calc).to(TORCH_FLOAT)
+        published_fit = torch.from_numpy(published_fit).to(TORCH_FLOAT)
 
         ind = (calc < emax).nonzero()[:,0]
         calc          = calc[ind]
@@ -728,6 +728,9 @@ if __name__ == '__main__':
 
             model_evaluation_energy(evaluator, dataset, None, None, args.EMAX, args.add_reference_pes)
         else:
+            if not args.forces_overview:
+                cfg_dataset['LOAD_FORCES'] = False
+
             train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
 
             model_evaluation_energy(evaluator, train, val, test, args.EMAX, args.add_reference_pes)

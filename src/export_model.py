@@ -595,16 +595,16 @@ if __name__ == "__main__":
             for i, subnetwork_arch in enumerate(total_arch):
                 model_dict["architecture.{}".format(i)] = subnetwork_arch
 
-            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
-            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
+            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy().astype(np.float64)
+            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy().astype(np.float64)
 
             # Scaler assumes the 4-vector (E, dipx, dipy, dipz)
             # Energy was needed for weighting during training but is not needed for inference 
-            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()[1:]
-            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()[1:]
+            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()[1:].astype(np.float64)
+            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()[1:].astype(np.float64)
 
             for block_name, block in state.items():
-                model_dict[block_name] = block.detach().numpy().transpose()
+                model_dict[block_name] = block.detach().numpy().transpose().astype(np.float64)
 
             np.savez(npz_fname, **model_dict)
             logging.info("Warning: ACTIVATION FUNCTION IS NOT STORED")
@@ -620,13 +620,13 @@ if __name__ == "__main__":
             model_dict = {}
             model_dict["architecture"] = tuple(architecture)
 
-            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy()
-            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy()
-            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy()
-            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy()
+            model_dict["xscaler.mean"]  = evaluator.xscaler.mean_.detach().numpy().astype(np.float64)
+            model_dict["xscaler.scale"] = evaluator.xscaler.scale_.detach().numpy().astype(np.float64)
+            model_dict["yscaler.mean"]  = evaluator.yscaler.mean_.detach().numpy().astype(np.float64)
+            model_dict["yscaler.scale"] = evaluator.yscaler.scale_.detach().numpy().astype(np.float64)
 
             for block_name, block in state.items():
-                model_dict[block_name] = block.detach().numpy().transpose()
+                model_dict[block_name] = block.detach().numpy().transpose().astype(np.float64)
 
             np.savez(npz_fname, **model_dict)
             logging.info("Warning: ACTIVATION FUNCTION IS NOT STORED")
