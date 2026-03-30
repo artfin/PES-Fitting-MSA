@@ -22,6 +22,8 @@ KCALTOCM  = 349.757
 #POLYNOMIAL_LIB = "MSA"
 POLYNOMIAL_LIB = "CUSTOM"
 
+from config import NP_FLOAT, TORCH_FLOAT
+
 SYMBOLS = ('H', 'He',\
            'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',\
            'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar')
@@ -650,8 +652,8 @@ class PolyDataset(Dataset):
         logging.info("Done.")
 
         NCONFIGS = len(self.xyz_configs)
-        poly             = np.zeros((NCONFIGS, self.NPOLY))
-        poly_derivatives = np.zeros((NCONFIGS, self.NPOLY, 3 * self.NATOMS))
+        poly             = np.zeros((NCONFIGS, self.NPOLY), dtype=NP_FLOAT)
+        poly_derivatives = np.zeros((NCONFIGS, self.NPOLY, 3 * self.NATOMS), dtype=NP_FLOAT)
 
         if POLYNOMIAL_LIB == "MSA":
             # omit second number for the arrays to be considered one-dimensional
@@ -676,10 +678,10 @@ class PolyDataset(Dataset):
                     poly_derivatives[n, :, nd] = dp
 
         elif POLYNOMIAL_LIB == "CUSTOM":
-            dpdy    = np.zeros((self.NDIS, self.NPOLY))
+            dpdy    = np.zeros((self.NDIS, self.NPOLY), dtype=NP_FLOAT)
             dpdy_pp = (dpdy.__array_interface__['data'][0] + np.arange(dpdy.shape[0]) * dpdy.strides[0]).astype(np.uintp)
 
-            p = np.zeros((self.NPOLY, ))
+            p = np.zeros((self.NPOLY, ), dtype=NP_FLOAT)
 
             for n in range(0, NCONFIGS):
                 _yij  = yij[n, :].copy()
@@ -697,11 +699,11 @@ class PolyDataset(Dataset):
         else:
             assert False
 
-        energies = np.zeros((NCONFIGS, 1))
+        energies = np.zeros((NCONFIGS, 1), dtype=NP_FLOAT)
         for ind, xyz_config in enumerate(self.xyz_configs):
             energies[ind] = xyz_config.energy
 
-        grad = np.zeros((NCONFIGS, self.NATOMS, 3))
+        grad = np.zeros((NCONFIGS, self.NATOMS, 3), dtype=NP_FLOAT)
 
         # Determine data source type
         first_config = self.xyz_configs[0]
@@ -801,7 +803,7 @@ class PolyDataset(Dataset):
 
     def make_drdx(self, xyz_configs, intermolecular_variables=None, intramolecular_variables=None):
         NCONFIGS = len(xyz_configs)
-        drdx = np.zeros((NCONFIGS, self.NATOMS * 3, self.NDIS), order="F")
+        drdx = np.zeros((NCONFIGS, self.NATOMS * 3, self.NDIS), order="F", dtype=NP_FLOAT)
 
         # Determine if this is a multi-molecule system
         first_config = self.xyz_configs[0]
@@ -969,7 +971,7 @@ class PolyDataset(Dataset):
             assert False, "Unreachable"
 
         NCONFIGS = len(xyz_configs)
-        yij = np.zeros((NCONFIGS, self.NDIS), order="F")
+        yij = np.zeros((NCONFIGS, self.NDIS), order="F", dtype=NP_FLOAT)
 
         # Determine if this is a multi-molecule system
         first_config = self.xyz_configs[0]
@@ -991,7 +993,7 @@ class PolyDataset(Dataset):
             # early return!
             return yij
 
-        self.xyz_ordered = torch.zeros((NCONFIGS, self.NATOMS, 3))
+        self.xyz_ordered = torch.zeros((NCONFIGS, self.NATOMS, 3), dtype=TORCH_FLOAT)
 
         # Case of molecule pair from extended XYZ (XYZConfig with mol_id)
         if is_extxyz_multimol:
@@ -1088,7 +1090,7 @@ class PolyDataset(Dataset):
         self.evpoly = getattr(basislib, proc_name)
 
         from numpy.ctypeslib import ndpointer
-        self.evpoly.argtypes = [ndpointer(ct.c_double, flags="C"), ndpointer(ct.c_double, flags="C")]
+        self.evpoly.argtypes = [ndpointer(NP_FLOAT, flags="C"), ndpointer(NP_FLOAT, flags="C")]
 
         if self.load_forces:
             logging.info("Loading and setting up C procedures for derivatives evaluation from LIBNAME: {}".format(self.C_DER_LIBNAME))
@@ -1096,10 +1098,10 @@ class PolyDataset(Dataset):
             proc_name = 'evpoly_jac_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)
             self.c_jac_dpdy = getattr(derlib, proc_name)
 
-            # double** should be passed as an array of type np.uintp
+            # NP_FLOAT** should be passed as an array of type np.uintp
             # see https://stackoverflow.com/questions/22425921/pass-a-2d-numpy-array-to-c-using-ctypes
-            pp = ndpointer(dtype=np.uintp, ndim=1, flags="C") # double**
-            self.c_jac_dpdy.argtypes = [pp, ndpointer(ct.c_double, ndim=1, flags="C")]
+            pp = ndpointer(dtype=np.uintp, ndim=1, flags="C")
+            self.c_jac_dpdy.argtypes = [pp, ndpointer(NP_FLOAT, ndim=1, flags="C")]
             self.c_jac_dpdy.restype  = None
 
 

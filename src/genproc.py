@@ -10,6 +10,11 @@ from sympy.codegen.ast import Assignment
 
 from tqdm import tqdm
 
+from config import C_FLOAT_TYPE
+
+# Eigen type suffix: 'd' for double, 'f' for float
+EIGEN_SUFFIX = "f" if C_FLOAT_TYPE == "float" else "d"
+
 @dataclasses.dataclass
 class Monomial:
     coeffs  : list
@@ -240,7 +245,7 @@ def generate_jac_proc_dpdx_full_cse(poly):
         expr.groups()[0], expr.groups()[1]
     ), c_code)
 
-    decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
+    decl = f"void evpoly_jac(Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> dpdx, Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> dydx, {C_FLOAT_TYPE}* y, {C_FLOAT_TYPE}* cse) {{\n"
     return decl + c_code + "\n}\n"
 
 def generate_jac_proc_dpdx_partial_cse(poly):
@@ -320,7 +325,7 @@ def generate_jac_proc_dpdx_partial_cse(poly):
 
         c_code += c_code_iter + "\n"
 
-    decl = "void evpoly_jac(Eigen::Ref<Eigen::MatrixXd> dpdx, Eigen::Ref<Eigen::MatrixXd> dydx, double* y, double* cse) {\n"
+    decl = f"void evpoly_jac(Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> dpdx, Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> dydx, {C_FLOAT_TYPE}* y, {C_FLOAT_TYPE}* cse) {{\n"
     return decl + c_code + "\n}\n"
 
 def generate_jac_proc_dpdr(poly, jac_func_name, use_eigen_interface, skip_zeros=True):
@@ -332,9 +337,9 @@ def generate_jac_proc_dpdr(poly, jac_func_name, use_eigen_interface, skip_zeros=
     nvars = len(poly[0].monomials[0].degrees)
 
     if use_eigen_interface:
-        decl = "extern \"C\" void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* y) {{\n".format(jac_func_name)
+        decl = f"extern \"C\" void {jac_func_name}(Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> jac, {C_FLOAT_TYPE}* y) {{\n"
     else:
-        decl = "extern \"C\" void {}(double** jac, double* y) {{\n".format(jac_func_name)
+        decl = f"extern \"C\" void {jac_func_name}({C_FLOAT_TYPE}** jac, {C_FLOAT_TYPE}* y) {{\n"
 
     body = ""
     for indp, p in enumerate(poly):
@@ -359,9 +364,9 @@ def generate_jac_proc_dpdr(poly, jac_func_name, use_eigen_interface, skip_zeros=
 
 def generate_poly_proc(poly, poly_func_name, use_eigen_interface):
     if use_eigen_interface:
-        decl = "extern \"C\" void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p) {{\n".format(poly_func_name)
+        decl = f"extern \"C\" void {poly_func_name}({C_FLOAT_TYPE}* y, Eigen::Ref<Eigen::RowVectorX{EIGEN_SUFFIX}> p) {{\n"
     else:
-        decl = "extern \"C\" void {}(double* y, double* p) {{\n".format(poly_func_name)
+        decl = f"extern \"C\" void {poly_func_name}({C_FLOAT_TYPE}* y, {C_FLOAT_TYPE}* p) {{\n"
 
     body = ""
     for ind, p in enumerate(poly):
@@ -425,9 +430,9 @@ if __name__ == "__main__":
 
             if args.use_eigen_interface:
                 out.write("#include <Eigen/Dense>\n")
-                out.write("extern \"C\" void {}(double* y, Eigen::Ref<Eigen::RowVectorXd> p);\n".format(poly_func_name))
+                out.write(f"extern \"C\" void {poly_func_name}({C_FLOAT_TYPE}* y, Eigen::Ref<Eigen::RowVectorX{EIGEN_SUFFIX}> p);\n")
             else:
-                out.write("extern \"C\" void {}(double* y, double* p);\n".format(poly_func_name))
+                out.write(f"extern \"C\" void {poly_func_name}({C_FLOAT_TYPE}* y, {C_FLOAT_TYPE}* p);\n")
 
             out.write("\n")
             out.write("#endif")
@@ -458,9 +463,9 @@ if __name__ == "__main__":
 
             if args.use_eigen_interface:
                 out.write("#include <Eigen/Dense>\n")
-                out.write("extern \"C\" void {}(Eigen::Ref<Eigen::MatrixXd> jac, double* y);\n".format(jac_func_name))
+                out.write(f"extern \"C\" void {jac_func_name}(Eigen::Ref<Eigen::MatrixX{EIGEN_SUFFIX}> jac, {C_FLOAT_TYPE}* y);\n")
             else:
-                out.write("extern \"C\" void {}(double** jac, double* y);\n".format(jac_func_name))
+                out.write(f"extern \"C\" void {jac_func_name}({C_FLOAT_TYPE}** jac, {C_FLOAT_TYPE}* y);\n")
 
             out.write("\n")
             out.write("#endif")
