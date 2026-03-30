@@ -150,7 +150,7 @@ def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = lambda_
+        self.lambda_ = float(lambda_)
 
     def __repr__(self):
         return "L1Regularization(lambda={})".format(self.lambda_)
@@ -165,7 +165,7 @@ class L1Regularization(torch.nn.Module):
 class L2Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = lambda_
+        self.lambda_ = float(lambda_)
 
     def __repr__(self):
         return "L2Regularization(lambda={})".format(self.lambda_)
