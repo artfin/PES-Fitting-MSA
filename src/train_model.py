@@ -812,7 +812,14 @@ class Training:
 
         return self.model
 
-    def compute_forces(self, dataset):
+    def compute_gradients(self, dataset):
+        """
+        Compute energy gradients dE/dx for all configurations in dataset.
+
+        Returns:
+            y_pred: predicted energies (normalized)
+            dEdx: energy gradients dE/d(cartesian coordinates) in cm^-1/Bohr
+        """
         Xtr = dataset.X
 
         Xtr.requires_grad = True
@@ -827,13 +834,13 @@ class Training:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
-        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
-        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
+        # gradient dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dEdx = -torch.mul(dEdx, y_scale)
+        dEdx = torch.mul(dEdx, y_scale)
 
         return y_pred, dEdx
 
@@ -847,7 +854,7 @@ class Training:
             optimizer.zero_grad()
 
             if self.cfg_loss['USE_FORCES']:
-                train_y_pred, train_dy_pred = self.compute_forces(self.train)
+                train_y_pred, train_dy_pred = self.compute_gradients(self.train)
                 loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLE':
@@ -913,10 +920,10 @@ class Training:
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_forces(self.train)
+            train_y_pred, train_dy_pred = self.compute_gradients(self.train)
             loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
-            val_y_pred, val_dy_pred = self.compute_forces(self.val)
+            val_y_pred, val_dy_pred = self.compute_gradients(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
             train_e_d    = self.loss_fn.descale_energies(self.train.y)
@@ -1068,13 +1075,13 @@ class Training:
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_forces(self.train)
+            train_y_pred, train_dy_pred = self.compute_gradients(self.train)
             loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
-            val_y_pred, val_dy_pred = self.compute_forces(self.val)
+            val_y_pred, val_dy_pred = self.compute_gradients(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
-            test_y_pred, test_dy_pred = self.compute_forces(self.test)
+            test_y_pred, test_dy_pred = self.compute_gradients(self.test)
             loss_test_e, loss_test_f = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
             logging.info("Model evaluation after training:")
