@@ -362,10 +362,91 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
 
         df = forces - forces_pred
-        wdf = torch.einsum('ijk,il->ijk', df, w)
-        wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->i', wdf, df).sum() / (3.0 * self.natoms) / nconfigs
+        # FIXED: Correct einsum notation ('ijk,i->ijk' instead of 'ijk,il->ijk')
+        wdf = torch.einsum('ijk,i->ijk', df, w)
+        wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
 
         return wmse_en, wmse_forces
+
+
+class WMSELoss_TrustRegion_wforces(torch.nn.Module):
+    """
+    Weighted MSE loss with trust region for force training.
+    
+    Forces are only fitted for configurations where energy prediction error
+    is below a threshold. This prevents forces from interfering with energy
+    fitting in regions where the PES shape is not yet established.
+    
+    Args:
+        natoms: Number of atoms in the system
+        dwt: Energy weight threshold for ratio weighting (cm^-1)
+        f_lambda: Force loss weight
+        trust_threshold: Energy error threshold for trust region (cm^-1).
+                         Forces are only trained for configs with |E_pred - E_true| < threshold.
+    """
+    def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0):
+        super().__init__()
+        self.natoms = natoms
+        self.dwt = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
+        self.f_lambda = torch.tensor(f_lambda, dtype=TORCH_FLOAT, device=DEVICE)
+        self.trust_threshold = trust_threshold
+
+        self.en_mean = None
+        self.en_std = None
+
+    def set_scale(self, en_mean, en_std):
+        self.en_mean = torch.from_numpy(en_mean).to(DEVICE)
+        self.en_std = torch.from_numpy(en_std).to(DEVICE)
+
+    def __repr__(self):
+        return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={})".format(
+            self.natoms, self.dwt, self.f_lambda, self.trust_threshold)
+
+    def forward(self, en, en_pred, forces, forces_pred):
+        wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces, forces_pred)
+        return wmse_en + wmse_forces
+
+    def descale_energies(self, en):
+        return en * self.en_std + self.en_mean
+
+    def forward_separate(self, en, en_pred, forces, forces_pred):
+        assert self.en_mean is not None
+        assert self.en_std is not None
+
+        en_pred = en_pred.to(DEVICE)
+
+        # descale energies
+        _en = self.descale_energies(en)
+        _en_pred = self.descale_energies(en_pred)
+
+        # compute energy errors for trust region
+        en_errors = torch.abs(_en - _en_pred)
+        trust_mask = en_errors < self.trust_threshold
+        n_in_trust = trust_mask.sum().item()
+        nconfigs = forces.size()[0]
+
+        enmin = _en.min()
+        w = self.dwt / (self.dwt + _en - enmin)
+        wmse_en = (w * (_en - _en_pred)**2).mean()
+
+        forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
+        forces = forces.reshape(nconfigs, self.natoms, 3)
+
+        df = forces - forces_pred
+        
+        # Apply energy weights to force errors (fixed einsum notation)
+        wdf = torch.einsum('ijk,i->ijk', df, w)
+        
+        # Compute force loss ONLY for trust region configs
+        if n_in_trust > 0:
+            wdf_trusted = wdf[trust_mask]
+            df_trusted = df[trust_mask]
+            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
+        else:
+            wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT)
+
+        return wmse_en, wmse_forces
+
 
 class WRMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
@@ -643,7 +724,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'LAMBDA_Q')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'LAMBDA_Q', 'TRUST_THRESHOLD')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -687,7 +768,13 @@ class Training:
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
-            loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            if trust_threshold is not None:
+                # Use trust region loss - only fit forces where energy is accurate
+                loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda, trust_threshold=trust_threshold)
+            else:
+                # Standard loss - fit forces for all configs
+                loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
 
         else:
             print(self.cfg_loss)
