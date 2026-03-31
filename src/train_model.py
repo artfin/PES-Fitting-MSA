@@ -24,6 +24,7 @@ from config import TORCH_FLOAT
 from dataset import PolyDataset
 from make_dataset import make_dataset, make_dataset_fpaths
 from build_model import build_network, QModel
+from memory_debug import log_memory_usage, log_tensor_sizes, reset_peak_memory_stats, memory_summary
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -428,19 +429,18 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         df = forces - forces_pred
 
         # Compute force loss ONLY for trust region configs
-        # Use torch.where() to zero out non-trusted configs (NO memory copying!)
+        # Use multiplication by mask instead of torch.where to avoid large intermediate tensors
         if n_in_trust > 0:
-            # Expand trust_mask to match df shape: [nconfigs] -> [nconfigs, 1, 1]
-            trust_mask_expanded = trust_mask.view(-1, 1, 1)
-            # Zero out force errors for configs outside trust region
-            df_masked = torch.where(trust_mask_expanded, df, torch.zeros_like(df))
-            # Apply energy weights (also masked)
-            w_masked = torch.where(trust_mask, w, torch.zeros_like(w))
-            wdf = torch.einsum('ijk,i->ijk', df_masked, w_masked)
+            # Convert bool mask to float and apply directly: [nconfigs] -> [nconfigs, 1, 1]
+            trust_mask_float = trust_mask.to(TORCH_FLOAT).view(-1, 1, 1)
+            # Mask force errors and weights in one step
+            w_masked = w * trust_mask.to(TORCH_FLOAT)
+            # Apply masking via einsum weight - avoids creating df_masked tensor
+            wdf = torch.einsum('ijk,i->ijk', df, w_masked)
             # Divide by n_in_trust, not nconfigs
-            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df_masked) / (3.0 * self.natoms * n_in_trust)
+            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df * trust_mask_float) / (3.0 * self.natoms * n_in_trust)
         else:
-            wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT)
+            wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT, requires_grad=False)
 
         return wmse_en, wmse_forces
 
@@ -882,6 +882,17 @@ class Training:
             self.val.dX = self.val.dX.to(TORCH_FLOAT).to(DEVICE)
             self.val.dy = self.val.dy.to(TORCH_FLOAT).to(DEVICE)
 
+        # Log memory after moving data to GPU
+        log_memory_usage("After moving data to GPU")
+        log_tensor_sizes("Dataset",
+                         train_X=self.train.X,
+                         train_y=self.train.y,
+                         train_dX=self.train.dX,
+                         train_dy=self.train.dy,
+                         val_X=self.val.X,
+                         val_y=self.val.y,
+                         val_dX=self.val.dX,
+                         val_dy=self.val.dy)
 
         self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
         self.scheduler = self.build_scheduler()
@@ -890,7 +901,15 @@ class Training:
 
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
+        # Reset peak memory stats before training starts
+        reset_peak_memory_stats()
+        log_memory_usage("Training start")
+
         for epoch in range(MAX_EPOCHS):
+            # Log memory at start of epoch
+            if epoch % 10 == 0:
+                log_memory_usage(f"Epoch {epoch} start")
+            
             # switch into mixed loss function: E + F
             if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
                 self.cfg_loss['USE_FORCES'] = True
@@ -966,6 +985,10 @@ class Training:
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
 
+            # Log memory at start of closure (before forward pass)
+            if CLOSURE_CALL_COUNT == 1 and epoch % 10 == 0:
+                log_memory_usage(f"Epoch {epoch} closure start")
+
             optimizer.zero_grad()
 
             if self.cfg_loss['USE_FORCES']:
@@ -1016,6 +1039,11 @@ class Training:
                 loss = loss + self.regularization(self.model)
 
             loss.backward(retain_graph=True)
+            
+            # Log memory after backward (for first closure call only, to avoid spam)
+            if CLOSURE_CALL_COUNT == 1 and epoch % 10 == 0:
+                log_memory_usage(f"Epoch {epoch} after backward")
+            
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
