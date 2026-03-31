@@ -771,6 +771,35 @@ class Training:
             raise ValueError("unreachable")
 
         logging.info("Build loss function: {}".format(loss_fn))
+        logging.info("Loss configuration:")
+        logging.info(" NAME:                  {}".format(self.cfg_loss['NAME']))
+        logging.info(" WEIGHT_TYPE:           {}".format(self.cfg_loss.get('WEIGHT_TYPE', 'N/A')))
+        
+        # Print weight-specific parameters
+        weight_type = self.cfg_loss.get('WEIGHT_TYPE', '')
+        if weight_type == 'Ratio':
+            logging.info(" dwt:                   {} cm-1".format(self.cfg_loss.get('dwt', 'N/A')))
+        elif weight_type == 'Boltzmann':
+            logging.info(" EREF:                  {} cm-1".format(self.cfg_loss.get('EREF', 'N/A')))
+        elif weight_type == 'PS':
+            logging.info(" EMAX:                  {} cm-1".format(self.cfg_loss.get('EMAX', 'N/A')))
+        
+        # Print force-related options
+        logging.info(" USE_FORCES:            {}".format(self.cfg_loss['USE_FORCES']))
+        if self.cfg_loss['USE_FORCES']:
+            logging.info(" F_LAMBDA:              {}".format(self.cfg_loss.get('F_LAMBDA', 'N/A')))
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            if trust_threshold is not None:
+                logging.info(" TRUST_THRESHOLD:       {} cm-1".format(trust_threshold))
+        use_forces_after = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
+        if use_forces_after is not None:
+            logging.info(" USE_FORCES_AFTER_EPOCH: {}".format(use_forces_after))
+        
+        # Print dipole-specific options
+        lambda_q = self.cfg_loss.get('LAMBDA_Q', None)
+        if lambda_q is not None:
+            logging.info(" LAMBDA_Q:              {}".format(lambda_q))
+        logging.info("")
 
         return loss_fn
 

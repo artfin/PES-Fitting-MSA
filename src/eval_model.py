@@ -219,8 +219,8 @@ def retrieve_checkpoint(cfg, chk_fpath):
     try:
         checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'), weights_only=False)
     except TypeError:
-        # Older PyTorch versions don't support weights_only parameter
         checkpoint = torch.load(chk_fpath, map_location=torch.device('cpu'))
+
     meta_info = checkpoint["meta_info"]
 
     if  cfg['TYPE']  == 'ENERGY':  model = build_network(cfg['MODEL'], hidden_dims=cfg['MODEL']['HIDDEN_DIMS'], input_features=meta_info["NPOLY"], output_features=1)
