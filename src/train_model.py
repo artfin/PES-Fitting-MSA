@@ -20,6 +20,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
+from config import TORCH_FLOAT
 from dataset import PolyDataset
 from make_dataset import make_dataset, make_dataset_fpaths
 from build_model import build_network, QModel
@@ -56,22 +57,22 @@ class IdentityScaler:
 
 def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
     try:
-        train.X = torch.from_numpy(xscaler.transform(train.X)).float()
-        val.X   = torch.from_numpy(xscaler.transform(val.X)).float()
-        test.X  = torch.from_numpy(xscaler.transform(test.X)).float()
+        train.X = torch.from_numpy(xscaler.transform(train.X)).to(TORCH_FLOAT)
+        val.X   = torch.from_numpy(xscaler.transform(val.X)).to(TORCH_FLOAT)
+        test.X  = torch.from_numpy(xscaler.transform(test.X)).to(TORCH_FLOAT)
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.X  = torch.empty((1, 1))
-        test.X = torch.empty((1, 1))
+        val.X  = torch.empty((1, 1), dtype=TORCH_FLOAT)
+        test.X = torch.empty((1, 1), dtype=TORCH_FLOAT)
 
     try:
-        train.y = torch.from_numpy(yscaler.transform(train.y)).float()
-        val.y   = torch.from_numpy(yscaler.transform(val.y)).float()
-        test.y  = torch.from_numpy(yscaler.transform(test.y)).float()
+        train.y = torch.from_numpy(yscaler.transform(train.y)).to(TORCH_FLOAT)
+        val.y   = torch.from_numpy(yscaler.transform(val.y)).to(TORCH_FLOAT)
+        test.y  = torch.from_numpy(yscaler.transform(test.y)).to(TORCH_FLOAT)
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.y = torch.empty(1)
-        test.y = torch.empty(1)
+        val.y = torch.empty(1, dtype=TORCH_FLOAT)
+        test.y = torch.empty(1, dtype=TORCH_FLOAT)
 
 
 def fit_scalers_to_train_dataset(train, cfg):
