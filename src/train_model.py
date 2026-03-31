@@ -56,18 +56,18 @@ class IdentityScaler:
 
 def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
     try:
-        train.X = torch.from_numpy(xscaler.transform(train.X))
-        val.X   = torch.from_numpy(xscaler.transform(val.X))
-        test.X  = torch.from_numpy(xscaler.transform(test.X))
+        train.X = torch.from_numpy(xscaler.transform(train.X)).float()
+        val.X   = torch.from_numpy(xscaler.transform(val.X)).float()
+        test.X  = torch.from_numpy(xscaler.transform(test.X)).float()
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
         val.X  = torch.empty((1, 1))
         test.X = torch.empty((1, 1))
 
     try:
-        train.y = torch.from_numpy(yscaler.transform(train.y))
-        val.y   = torch.from_numpy(yscaler.transform(val.y))
-        test.y  = torch.from_numpy(yscaler.transform(test.y))
+        train.y = torch.from_numpy(yscaler.transform(train.y)).float()
+        val.y   = torch.from_numpy(yscaler.transform(val.y)).float()
+        test.y  = torch.from_numpy(yscaler.transform(test.y)).float()
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
         val.y = torch.empty(1)
