@@ -416,7 +416,6 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         en_errors = torch.abs(_en - _en_pred).view(-1)
         trust_mask = en_errors < self.trust_threshold
         n_in_trust = trust_mask.sum().item()
-        nconfigs = forces.size()[0]
 
         enmin = _en.min()
         w = self.dwt / (self.dwt + _en - enmin)
@@ -429,13 +428,17 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         df = forces - forces_pred
 
         # Compute force loss ONLY for trust region configs
+        # Use torch.where() to zero out non-trusted configs (NO memory copying!)
         if n_in_trust > 0:
-            # Apply mask BEFORE computing weighted tensor to save memory
-            df_trusted = df[trust_mask]
-            w_trusted = w[trust_mask]
-            # Apply energy weights to trusted force errors only
-            wdf_trusted = torch.einsum('ijk,i->ijk', df_trusted, w_trusted)
-            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
+            # Expand trust_mask to match df shape: [nconfigs] -> [nconfigs, 1, 1]
+            trust_mask_expanded = trust_mask.view(-1, 1, 1)
+            # Zero out force errors for configs outside trust region
+            df_masked = torch.where(trust_mask_expanded, df, torch.zeros_like(df))
+            # Apply energy weights (also masked)
+            w_masked = torch.where(trust_mask, w, torch.zeros_like(w))
+            wdf = torch.einsum('ijk,i->ijk', df_masked, w_masked)
+            # Divide by n_in_trust, not nconfigs
+            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df_masked) / (3.0 * self.natoms * n_in_trust)
         else:
             wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT)
 
