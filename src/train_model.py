@@ -355,11 +355,13 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
         enmin   = _en.min()
         w       = self.dwt / (self.dwt + _en - enmin)
+        w       = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
         nconfigs = forces.size()[0]
 
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
+        forces    = forces.reshape(nconfigs, self.natoms, 3)
 
         df = forces - forces_pred
         # FIXED: Correct einsum notation ('ijk,i->ijk' instead of 'ijk,il->ijk')
@@ -418,16 +420,17 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         enmin = _en.min()
         w = self.dwt / (self.dwt + _en - enmin)
+        w = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
         forces = forces.reshape(nconfigs, self.natoms, 3)
 
         df = forces - forces_pred
-        
+
         # Apply energy weights to force errors (fixed einsum notation)
         wdf = torch.einsum('ijk,i->ijk', df, w)
-        
+
         # Compute force loss ONLY for trust region configs
         if n_in_trust > 0:
             wdf_trusted = wdf[trust_mask]
