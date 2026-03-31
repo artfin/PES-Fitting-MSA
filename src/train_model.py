@@ -413,7 +413,7 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         _en_pred = self.descale_energies(en_pred)
 
         # compute energy errors for trust region
-        en_errors = torch.abs(_en - _en_pred)
+        en_errors = torch.abs(_en - _en_pred).view(-1)
         trust_mask = en_errors < self.trust_threshold
         n_in_trust = trust_mask.sum().item()
         nconfigs = forces.size()[0]
