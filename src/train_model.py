@@ -20,11 +20,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
-from config import TORCH_FLOAT
 from dataset import PolyDataset
 from make_dataset import make_dataset, make_dataset_fpaths
 from build_model import build_network, QModel
-from memory_debug import log_memory_usage, log_tensor_sizes, reset_peak_memory_stats, memory_summary
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -57,24 +55,23 @@ class IdentityScaler:
         return np.asarray(y)
 
 def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
-    # Note: sklearn StandardScaler returns float64, so we convert to TORCH_FLOAT
     try:
-        train.X = torch.from_numpy(xscaler.transform(train.X)).to(TORCH_FLOAT)
-        val.X   = torch.from_numpy(xscaler.transform(val.X)).to(TORCH_FLOAT)
-        test.X  = torch.from_numpy(xscaler.transform(test.X)).to(TORCH_FLOAT)
+        train.X = torch.from_numpy(xscaler.transform(train.X))
+        val.X   = torch.from_numpy(xscaler.transform(val.X))
+        test.X  = torch.from_numpy(xscaler.transform(test.X))
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.X  = torch.empty((1, 1), dtype=TORCH_FLOAT)
-        test.X = torch.empty((1, 1), dtype=TORCH_FLOAT)
+        val.X  = torch.empty((1, 1))
+        test.X = torch.empty((1, 1))
 
     try:
-        train.y = torch.from_numpy(yscaler.transform(train.y)).to(TORCH_FLOAT)
-        val.y   = torch.from_numpy(yscaler.transform(val.y)).to(TORCH_FLOAT)
-        test.y  = torch.from_numpy(yscaler.transform(test.y)).to(TORCH_FLOAT)
+        train.y = torch.from_numpy(yscaler.transform(train.y))
+        val.y   = torch.from_numpy(yscaler.transform(val.y))
+        test.y  = torch.from_numpy(yscaler.transform(test.y))
     except ValueError:
         logging.error("[use_scalers_on_dataset] caught ValueError")
-        val.y = torch.empty(1, dtype=TORCH_FLOAT)
-        test.y = torch.empty(1, dtype=TORCH_FLOAT)
+        val.y = torch.empty(1)
+        test.y = torch.empty(1)
 
 
 def fit_scalers_to_train_dataset(train, cfg):
@@ -151,13 +148,13 @@ def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = float(lambda_)
+        self.lambda_ = lambda_
 
     def __repr__(self):
         return "L1Regularization(lambda={})".format(self.lambda_)
 
     def forward(self, model):
-        l1_norm = torch.tensor(0.).to(dtype=TORCH_FLOAT, device=DEVICE)
+        l1_norm = torch.tensor(0.).to(dtype=torch.float64, device=DEVICE)
         for p in model.parameters():
             l1_norm += p.abs().sum()
 
@@ -166,13 +163,13 @@ class L1Regularization(torch.nn.Module):
 class L2Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = float(lambda_)
+        self.lambda_ = lambda_
 
     def __repr__(self):
         return "L2Regularization(lambda={})".format(self.lambda_)
 
     def forward(self, model):
-        l2_norm = torch.tensor(0., dtype=TORCH_FLOAT, device=DEVICE)
+        l2_norm = torch.tensor(0.).to(DEVICE)
         for p in model.parameters():
             l2_norm += (p**2).sum()
         return self.lambda_ * l2_norm
@@ -180,7 +177,7 @@ class L2Regularization(torch.nn.Module):
 class WMSELoss_Boltzmann(torch.nn.Module):
     def __init__(self, Eref):
         super().__init__()
-        self.Eref = torch.tensor(Eref, dtype=TORCH_FLOAT, device=DEVICE)
+        self.Eref = torch.tensor(Eref).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -209,7 +206,7 @@ class WMSELoss_Boltzmann(torch.nn.Module):
 class WRMSELoss_Boltzmann(torch.nn.Module):
     def __init__(self, Eref):
         super().__init__()
-        self.Eref = torch.tensor(Eref, dtype=TORCH_FLOAT, device=DEVICE)
+        self.Eref = torch.tensor(Eref).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -238,7 +235,7 @@ class WRMSELoss_Boltzmann(torch.nn.Module):
 class WMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -279,7 +276,7 @@ class WMSELoss_Ratio(torch.nn.Module):
 class WRMSELoss_Ratio_dipole(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -323,8 +320,8 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0):
         super().__init__()
         self.natoms = natoms
-        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
-        self.f_lambda = torch.tensor(f_lambda, dtype=TORCH_FLOAT, device=DEVICE)
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
 
         self.en_mean = None
         self.en_std  = None
@@ -365,7 +362,6 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         forces    = forces.reshape(nconfigs, self.natoms, 3)
 
         df = forces - forces_pred
-        # FIXED: Correct einsum notation ('ijk,i->ijk' instead of 'ijk,il->ijk')
         wdf = torch.einsum('ijk,i->ijk', df, w)
         wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
 
@@ -374,6 +370,7 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
 class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
+    Weighted MSE loss with trust region for force training.
     Forces are only fitted for configurations where energy prediction error
     is below a threshold. This prevents forces from interfering with energy
     fitting in regions where the PES shape is not yet established.
@@ -381,8 +378,8 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0):
         super().__init__()
         self.natoms = natoms
-        self.dwt = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
-        self.f_lambda = torch.tensor(f_lambda, dtype=TORCH_FLOAT, device=DEVICE)
+        self.dwt = torch.tensor(dwt).to(DEVICE)
+        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
         self.trust_threshold = trust_threshold
 
         self.en_mean = None
@@ -417,6 +414,7 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         en_errors = torch.abs(_en - _en_pred).view(-1)
         trust_mask = en_errors < self.trust_threshold
         n_in_trust = trust_mask.sum().item()
+        nconfigs = forces.size()[0]
 
         enmin = _en.min()
         w = self.dwt / (self.dwt + _en - enmin)
@@ -426,26 +424,24 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
         forces = forces.reshape(nconfigs, self.natoms, 3)
 
+        df = forces - forces_pred
+
         # Compute force loss ONLY for trust region configs
-        # CRITICAL: Index BEFORE building computation graph to save memory!
         if n_in_trust > 0:
-            # Get indices of trusted configs (no gradients needed here)
+            # Apply mask via indexing (select only trusted configs)
             trusted_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
             
-            # Index/select ONLY trusted configs - this creates NEW tensors
-            # The computation graph will only track these, not the full tensors
+            # Select only trusted configs - computation graph is smaller
             forces_trusted = forces[trusted_indices]
             forces_pred_trusted = forces_pred[trusted_indices]
             w_trusted = w[trusted_indices]
             
-            # Compute force error only on trusted subset
+            # Compute force error on trusted subset only
             df_trusted = forces_trusted - forces_pred_trusted
-            
-            # Apply energy weights and compute loss
             wdf_trusted = torch.einsum('ijk,i->ijk', df_trusted, w_trusted)
             wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
         else:
-            wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT, requires_grad=False)
+            wmse_forces = torch.tensor(0.0, device=DEVICE)
 
         return wmse_en, wmse_forces
 
@@ -453,7 +449,7 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 class WRMSELoss_Ratio(torch.nn.Module):
     def __init__(self, dwt=1.0):
         super().__init__()
-        self.dwt    = torch.tensor(dwt, dtype=TORCH_FLOAT, device=DEVICE)
+        self.dwt    = torch.tensor(dwt).to(DEVICE)
 
         self.y_mean = None
         self.y_std  = None
@@ -690,7 +686,6 @@ class Training:
 
     def build_regularization(self):
         if self.cfg_regularization is None:
-            logging.info("No regularization configured")
             return None
 
         if self.cfg_regularization['NAME'] == 'L1':
@@ -702,7 +697,6 @@ class Training:
         else:
             raise ValueError("unreachable")
 
-        logging.info("Build regularization: {}".format(reg))
 
         return reg
 
@@ -717,7 +711,6 @@ class Training:
                                                  tolerance_change=tolerance_change, max_iter=max_iter)
         elif cfg_optimizer['NAME'] == 'Adam':
             lr           = cfg_optimizer.get('LR', 1e-3)
-            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 1.0)
             optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             raise ValueError("unreachable")
@@ -782,37 +775,6 @@ class Training:
             raise ValueError("unreachable")
 
         logging.info("Build loss function: {}".format(loss_fn))
-        logging.info("Loss configuration:")
-        logging.info(" NAME:                  {}".format(self.cfg_loss['NAME']))
-        logging.info(" WEIGHT_TYPE:           {}".format(self.cfg_loss.get('WEIGHT_TYPE', 'N/A')))
-        
-        # Print weight-specific parameters
-        weight_type = self.cfg_loss.get('WEIGHT_TYPE', '')
-        if weight_type == 'Ratio':
-            logging.info(" dwt:                   {} cm-1".format(self.cfg_loss.get('dwt', 'N/A')))
-        elif weight_type == 'Boltzmann':
-            logging.info(" EREF:                  {} cm-1".format(self.cfg_loss.get('EREF', 'N/A')))
-        elif weight_type == 'PS':
-            logging.info(" EMAX:                  {} cm-1".format(self.cfg_loss.get('EMAX', 'N/A')))
-        
-        # Print force-related options
-        # Check if forces will be used (either now or after some epoch)
-        use_forces = self.cfg_loss['USE_FORCES'] or (self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None) is not None)
-        logging.info(" USE_FORCES:            {}".format(self.cfg_loss['USE_FORCES']))
-        if use_forces:
-            logging.info(" F_LAMBDA:              {}".format(self.cfg_loss.get('F_LAMBDA', 'N/A')))
-            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
-            if trust_threshold is not None:
-                logging.info(" TRUST_THRESHOLD:       {} cm-1".format(trust_threshold))
-        use_forces_after = self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None)
-        if use_forces_after is not None:
-            logging.info(" USE_FORCES_AFTER_EPOCH: {}".format(use_forces_after))
-        
-        # Print dipole-specific options
-        lambda_q = self.cfg_loss.get('LAMBDA_Q', None)
-        if lambda_q is not None:
-            logging.info(" LAMBDA_Q:              {}".format(lambda_q))
-        logging.info("")
 
         return loss_fn
 
@@ -881,23 +843,12 @@ class Training:
             self.test.xyz_ordered = self.test.xyz_ordered.to(DEVICE)
 
         if self.train.dX is not None:
-            self.train.dX = self.train.dX.to(TORCH_FLOAT).to(DEVICE)
-            self.train.dy = self.train.dy.to(TORCH_FLOAT).to(DEVICE)
+            self.train.dX = self.train.dX.to(DEVICE)
+            self.train.dy = self.train.dy.to(DEVICE)
 
-            self.val.dX = self.val.dX.to(TORCH_FLOAT).to(DEVICE)
-            self.val.dy = self.val.dy.to(TORCH_FLOAT).to(DEVICE)
+            self.val.dX = self.val.dX.to(DEVICE)
+            self.val.dy = self.val.dy.to(DEVICE)
 
-        # Log memory after moving data to GPU
-        log_memory_usage("After moving data to GPU")
-        log_tensor_sizes("Dataset",
-                         train_X=self.train.X,
-                         train_y=self.train.y,
-                         train_dX=self.train.dX,
-                         train_dy=self.train.dy,
-                         val_X=self.val.X,
-                         val_y=self.val.y,
-                         val_dX=self.val.dX,
-                         val_dy=self.val.dy)
 
         self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
         self.scheduler = self.build_scheduler()
@@ -906,15 +857,7 @@ class Training:
 
         MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
-        # Reset peak memory stats before training starts
-        reset_peak_memory_stats()
-        log_memory_usage("Training start")
-
         for epoch in range(MAX_EPOCHS):
-            # Log memory at start of epoch
-            if epoch % 10 == 0:
-                log_memory_usage(f"Epoch {epoch} start")
-            
             # switch into mixed loss function: E + F
             if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
                 self.cfg_loss['USE_FORCES'] = True
@@ -922,6 +865,8 @@ class Training:
                 self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
                 self.es.reset()
+
+            print("loss function: {}".format(self.loss_fn))
 
             self.train_epoch(epoch, self.optimizer)
 
@@ -952,14 +897,7 @@ class Training:
 
         return self.model
 
-    def compute_gradients(self, dataset):
-        """
-        Compute energy gradients dE/dx for all configurations in dataset.
-
-        Returns:
-            y_pred: predicted energies (normalized)
-            dEdx: energy gradients dE/d(cartesian coordinates) in cm^-1/Bohr
-        """
+    def compute_forces(self, dataset):
         Xtr = dataset.X
 
         Xtr.requires_grad = True
@@ -974,12 +912,13 @@ class Training:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
-        # gradient dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
-        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
+        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dEdx = torch.mul(dEdx, y_scale)
+        dEdx = -torch.mul(dEdx, y_scale)
 
         return y_pred, dEdx
 
@@ -990,14 +929,10 @@ class Training:
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
 
-            # Log memory at start of closure (before forward pass)
-            if CLOSURE_CALL_COUNT == 1 and epoch % 10 == 0:
-                log_memory_usage(f"Epoch {epoch} closure start")
-
             optimizer.zero_grad()
 
             if self.cfg_loss['USE_FORCES']:
-                train_y_pred, train_dy_pred = self.compute_gradients(self.train)
+                train_y_pred, train_dy_pred = self.compute_forces(self.train)
                 loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLE':
@@ -1019,7 +954,7 @@ class Training:
                 X_inf_tr = torch.from_numpy(xscaler.transform(X_inf)).to(DEVICE)
                 q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
                 q_corr   = q_pred - q_inf                               # corrected partial charges
-                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), q_corr)
+                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), q_corr)
 
                 # charge regularization
                 # NOTE: use `mean`
@@ -1044,11 +979,6 @@ class Training:
                 loss = loss + self.regularization(self.model)
 
             loss.backward(retain_graph=True)
-            
-            # Log memory after backward (for first closure call only, to avoid spam)
-            if CLOSURE_CALL_COUNT == 1 and epoch % 10 == 0:
-                log_memory_usage(f"Epoch {epoch} after backward")
-            
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
@@ -1068,10 +998,10 @@ class Training:
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_gradients(self.train)
+            train_y_pred, train_dy_pred = self.compute_forces(self.train)
             loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
-            val_y_pred, val_dy_pred = self.compute_gradients(self.val)
+            val_y_pred, val_dy_pred = self.compute_forces(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
             train_e_d    = self.loss_fn.descale_energies(self.train.y)
@@ -1144,7 +1074,7 @@ class Training:
                 train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
-                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
@@ -1152,7 +1082,7 @@ class Training:
                 val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
-                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
@@ -1215,21 +1145,21 @@ class Training:
         self.test.y = self.test.y.to(DEVICE)
 
         if self.test.dX is not None:
-            self.test.dX = self.test.dX.to(TORCH_FLOAT).to(DEVICE)
-            self.test.dy = self.test.dy.to(TORCH_FLOAT).to(DEVICE)
+            self.test.dX = self.test.dX.to(DEVICE)
+            self.test.dy = self.test.dy.to(DEVICE)
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_gradients(self.train)
+            train_y_pred, train_dy_pred = self.compute_forces(self.train)
             loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
-            val_y_pred, val_dy_pred = self.compute_gradients(self.val)
+            val_y_pred, val_dy_pred = self.compute_forces(self.val)
             loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
 
-            test_y_pred, test_dy_pred = self.compute_gradients(self.test)
+            test_y_pred, test_dy_pred = self.compute_forces(self.test)
             loss_test_e, loss_test_f = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
             logging.info("Model evaluation after training:")
@@ -1264,7 +1194,7 @@ class Training:
                 train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
-                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
@@ -1272,7 +1202,7 @@ class Training:
                 val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
-                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 test_q_pred   = self.model(self.test.X)
@@ -1280,7 +1210,7 @@ class Training:
                 test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf)).to(DEVICE)
                 test_q_inf    = self.model(test_X_inf_tr)
                 test_q_corr   = test_q_pred - test_q_inf
-                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.to(TORCH_FLOAT), test_q_corr)
+                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.double(), test_q_corr)
                 loss_test     = self.loss_fn(self.test.y, dip_pred_test)
 
             logging.info("Model evluation after training:")
@@ -1316,7 +1246,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
