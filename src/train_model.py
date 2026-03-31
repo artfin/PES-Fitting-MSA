@@ -785,8 +785,10 @@ class Training:
             logging.info(" EMAX:                  {} cm-1".format(self.cfg_loss.get('EMAX', 'N/A')))
         
         # Print force-related options
+        # Check if forces will be used (either now or after some epoch)
+        use_forces = self.cfg_loss['USE_FORCES'] or (self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', None) is not None)
         logging.info(" USE_FORCES:            {}".format(self.cfg_loss['USE_FORCES']))
-        if self.cfg_loss['USE_FORCES']:
+        if use_forces:
             logging.info(" F_LAMBDA:              {}".format(self.cfg_loss.get('F_LAMBDA', 'N/A')))
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             if trust_threshold is not None:
