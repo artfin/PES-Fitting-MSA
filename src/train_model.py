@@ -371,18 +371,9 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
 class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
-    Weighted MSE loss with trust region for force training.
-    
     Forces are only fitted for configurations where energy prediction error
     is below a threshold. This prevents forces from interfering with energy
     fitting in regions where the PES shape is not yet established.
-    
-    Args:
-        natoms: Number of atoms in the system
-        dwt: Energy weight threshold for ratio weighting (cm^-1)
-        f_lambda: Force loss weight
-        trust_threshold: Energy error threshold for trust region (cm^-1).
-                         Forces are only trained for configs with |E_pred - E_true| < threshold.
     """
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0):
         super().__init__()
@@ -715,6 +706,7 @@ class Training:
                                                  tolerance_change=tolerance_change, max_iter=max_iter)
         elif cfg_optimizer['NAME'] == 'Adam':
             lr           = cfg_optimizer.get('LR', 1e-3)
+            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 1.0)
             optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             raise ValueError("unreachable")
@@ -770,10 +762,8 @@ class Training:
             f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             if trust_threshold is not None:
-                # Use trust region loss - only fit forces where energy is accurate
                 loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda, trust_threshold=trust_threshold)
             else:
-                # Standard loss - fit forces for all configs
                 loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
 
         else:
