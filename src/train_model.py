@@ -428,13 +428,13 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         df = forces - forces_pred
 
-        # Apply energy weights to force errors (fixed einsum notation)
-        wdf = torch.einsum('ijk,i->ijk', df, w)
-
         # Compute force loss ONLY for trust region configs
         if n_in_trust > 0:
-            wdf_trusted = wdf[trust_mask]
+            # Apply mask BEFORE computing weighted tensor to save memory
             df_trusted = df[trust_mask]
+            w_trusted = w[trust_mask]
+            # Apply energy weights to trusted force errors only
+            wdf_trusted = torch.einsum('ijk,i->ijk', df_trusted, w_trusted)
             wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
         else:
             wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT)
