@@ -915,6 +915,10 @@ class Training:
             if self.es.status:
                 logging.info("Invoking early stop.")
                 break
+            
+            # Clear CUDA cache to reduce memory fragmentation
+            if DEVICE.type == 'cuda':
+                torch.cuda.empty_cache()
 
         if self.loss_val < self.es.best_score:
             save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
