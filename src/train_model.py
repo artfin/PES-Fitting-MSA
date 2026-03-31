@@ -426,19 +426,24 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
         forces = forces.reshape(nconfigs, self.natoms, 3)
 
-        df = forces - forces_pred
-
         # Compute force loss ONLY for trust region configs
-        # Use multiplication by mask instead of torch.where to avoid large intermediate tensors
+        # CRITICAL: Index BEFORE building computation graph to save memory!
         if n_in_trust > 0:
-            # Convert bool mask to float and apply directly: [nconfigs] -> [nconfigs, 1, 1]
-            trust_mask_float = trust_mask.to(TORCH_FLOAT).view(-1, 1, 1)
-            # Mask force errors and weights in one step
-            w_masked = w * trust_mask.to(TORCH_FLOAT)
-            # Apply masking via einsum weight - avoids creating df_masked tensor
-            wdf = torch.einsum('ijk,i->ijk', df, w_masked)
-            # Divide by n_in_trust, not nconfigs
-            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df * trust_mask_float) / (3.0 * self.natoms * n_in_trust)
+            # Get indices of trusted configs (no gradients needed here)
+            trusted_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+            
+            # Index/select ONLY trusted configs - this creates NEW tensors
+            # The computation graph will only track these, not the full tensors
+            forces_trusted = forces[trusted_indices]
+            forces_pred_trusted = forces_pred[trusted_indices]
+            w_trusted = w[trusted_indices]
+            
+            # Compute force error only on trusted subset
+            df_trusted = forces_trusted - forces_pred_trusted
+            
+            # Apply energy weights and compute loss
+            wdf_trusted = torch.einsum('ijk,i->ijk', df_trusted, w_trusted)
+            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
         else:
             wmse_forces = torch.tensor(0.0, device=DEVICE, dtype=TORCH_FLOAT, requires_grad=False)
 
