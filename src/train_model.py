@@ -371,10 +371,17 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
 class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
-    Weighted MSE loss with trust region for force training.
-    Forces are only fitted for configurations where energy prediction error
-    is below a threshold. This prevents forces from interfering with energy
-    fitting in regions where the PES shape is not yet established.
+    Memory-efficient trust region loss for force training.
+
+    Forces are pre-filtered before being passed to this loss (computed only for
+    trusted configs where energy error < threshold). This avoids OOM by never
+    computing forces for configs outside the trust region.
+
+    Expected inputs:
+    - en, en_pred: Full energy tensors (all configs)
+    - forces_subset: Reference forces for ONLY trusted configs
+    - forces_pred_subset: Predicted forces for ONLY trusted configs
+    - trust_indices: Indices of trusted configs (for weight computation)
     """
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0):
         super().__init__()
@@ -394,57 +401,68 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={})".format(
             self.natoms, self.dwt, self.f_lambda, self.trust_threshold)
 
-    def forward(self, en, en_pred, forces, forces_pred):
-        wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces, forces_pred)
-        return wmse_en + wmse_forces
-
     def descale_energies(self, en):
         return en * self.en_std + self.en_mean
 
-    def forward_separate(self, en, en_pred, forces, forces_pred):
+    def forward(self, en, en_pred, forces_subset, forces_pred_subset, trust_indices):
+        """
+        Compute combined energy + force loss.
+        Energy loss is computed on ALL configs, force loss only on trusted subset.
+        """
+        wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces_subset, forces_pred_subset, trust_indices)
+        return wmse_en + wmse_forces
+
+    def forward_separate(self, en, en_pred, forces_subset, forces_pred_subset, trust_indices):
         assert self.en_mean is not None
         assert self.en_std is not None
 
         en_pred = en_pred.to(DEVICE)
 
-        # descale energies
+        # Descale energies for weight computation
         _en = self.descale_energies(en)
         _en_pred = self.descale_energies(en_pred)
 
-        # compute energy errors for trust region
-        en_errors = torch.abs(_en - _en_pred).view(-1)
-        trust_mask = en_errors < self.trust_threshold
-        n_in_trust = trust_mask.sum().item()
-        nconfigs = forces.size()[0]
+        # Energy loss on ALL configs
+        enmin = _en.min()
+        w = self.dwt / (self.dwt + _en - enmin)
+        w = w.view(-1)
+        wmse_en = (w * (_en - _en_pred)**2).mean()
+
+        # Force loss on trusted subset only
+        n_in_trust = len(trust_indices)
+        if n_in_trust > 0:
+            # Get weights for trusted configs
+            w_trusted = w[trust_indices]
+
+            # Reshape forces
+            forces_subset = forces_subset.reshape(n_in_trust, self.natoms, 3)
+            forces_pred_subset = forces_pred_subset.reshape(n_in_trust, self.natoms, 3)
+
+            # Compute weighted force MSE
+            df = forces_subset - forces_pred_subset
+            wdf = torch.einsum('ijk,i->ijk', df, w_trusted)
+            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms * n_in_trust)
+        else:
+            wmse_forces = torch.tensor(0.0, device=DEVICE)
+
+        return wmse_en, wmse_forces
+
+    def forward_energy_only(self, en, en_pred):
+        """Fallback for when no configs are in trust region."""
+        assert self.en_mean is not None
+        assert self.en_std is not None
+
+        en_pred = en_pred.to(DEVICE)
+
+        _en = self.descale_energies(en)
+        _en_pred = self.descale_energies(en_pred)
 
         enmin = _en.min()
         w = self.dwt / (self.dwt + _en - enmin)
         w = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
-        forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
-        forces = forces.reshape(nconfigs, self.natoms, 3)
-
-        df = forces - forces_pred
-
-        # Compute force loss ONLY for trust region configs
-        if n_in_trust > 0:
-            # Apply mask via indexing (select only trusted configs)
-            trusted_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
-            
-            # Select only trusted configs - computation graph is smaller
-            forces_trusted = forces[trusted_indices]
-            forces_pred_trusted = forces_pred[trusted_indices]
-            w_trusted = w[trusted_indices]
-            
-            # Compute force error on trusted subset only
-            df_trusted = forces_trusted - forces_pred_trusted
-            wdf_trusted = torch.einsum('ijk,i->ijk', df_trusted, w_trusted)
-            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf_trusted, df_trusted) / (3.0 * self.natoms * n_in_trust)
-        else:
-            wmse_forces = torch.tensor(0.0, device=DEVICE)
-
-        return wmse_en, wmse_forces
+        return wmse_en
 
 
 class WRMSELoss_Ratio(torch.nn.Module):
@@ -767,6 +785,7 @@ class Training:
             f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             if trust_threshold is not None:
+                # Use memory-efficient trust region loss that expects pre-filtered forces
                 loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda, trust_threshold=trust_threshold)
             else:
                 loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
@@ -923,6 +942,98 @@ class Training:
 
         return y_pred, dEdx
 
+    def compute_forces_subset(self, dataset, indices):
+        """
+        Compute forces only for a subset of configurations specified by indices.
+        This is memory-efficient for trust region training where we only need
+        forces for configurations with low energy error.
+        """
+        X_subset = dataset.X[indices]
+        dX_subset = dataset.dX[indices]
+
+        X_subset.requires_grad = True
+
+        y_pred_subset = self.model(X_subset)
+        dEdp = torch.autograd.grad(
+            outputs=y_pred_subset,
+            inputs=X_subset,
+            grad_outputs=torch.ones_like(y_pred_subset),
+            retain_graph=True,
+            create_graph=True
+        )[0]
+
+        X_subset.requires_grad = False
+
+        # take into account normalization of polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dX_subset.double())
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        dEdx = -torch.mul(dEdx, y_scale)
+
+        return y_pred_subset, dEdx
+
+    def compute_trust_mask(self, dataset):
+        """
+        Compute trust region mask based on energy prediction errors.
+        Returns indices of configurations where energy error is below threshold.
+        Uses no_grad to avoid building computation graph for this step.
+        """
+        trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+
+        with torch.no_grad():
+            y_pred = self.model(dataset.X)
+
+            # Descale energies
+            en_mean = torch.from_numpy(self.yscaler.mean_).to(DEVICE)
+            en_std = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+
+            en_pred_descaled = y_pred * en_std + en_mean
+            en_true_descaled = dataset.y * en_std + en_mean
+
+            energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
+            trust_mask = energy_errors < trust_threshold
+            trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+
+        return trust_indices, trust_mask
+
+    def compute_forces_eval(self, dataset):
+        """
+        Compute forces for evaluation (no create_graph needed).
+        Much more memory efficient than compute_forces() since we don't need
+        to backpropagate through the force computation.
+        """
+        Xtr = dataset.X.clone().detach()
+        Xtr.requires_grad = True
+
+        y_pred = self.model(Xtr)
+        dEdp = torch.autograd.grad(
+            outputs=y_pred,
+            inputs=Xtr,
+            grad_outputs=torch.ones_like(y_pred),
+            retain_graph=False,
+            create_graph=False
+        )[0]
+
+        Xtr.requires_grad = False
+
+        # take into account normalization of polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # force = -dE/dx
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        dEdx = -torch.mul(dEdx, y_scale)
+
+        return y_pred.detach(), dEdx.detach()
+
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
 
@@ -933,8 +1044,44 @@ class Training:
             optimizer.zero_grad()
 
             if self.cfg_loss['USE_FORCES']:
-                train_y_pred, train_dy_pred = self.compute_forces(self.train)
-                loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+                trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+
+                if trust_threshold is not None:
+                    # EFFICIENT TRUST REGION APPROACH:
+                    # 1. Compute trust mask BEFORE forces (cheap, no grad)
+                    # 2. Compute forces ONLY on trusted subset (expensive, with grad)
+                    # 3. Compute loss with full energy + subset forces
+
+                    trust_indices, trust_mask = self.compute_trust_mask(self.train)
+                    n_in_trust = len(trust_indices)
+
+                    if n_in_trust > 0:
+                        # Compute forces only for trusted configs
+                        _, train_dy_pred_subset = self.compute_forces_subset(self.train, trust_indices)
+
+                        # Full forward pass for energy (need gradients for backprop)
+                        train_y_pred = self.model(self.train.X)
+
+                        # Get reference forces for trusted configs only
+                        train_dy_subset = self.train.dy[trust_indices]
+
+                        loss = self.loss_fn(
+                            self.train.y, train_y_pred,
+                            train_dy_subset, train_dy_pred_subset,
+                            trust_indices
+                        )
+                    else:
+                        # No configs in trust region yet - energy only
+                        train_y_pred = self.model(self.train.X)
+                        loss = self.loss_fn.forward_energy_only(self.train.y, train_y_pred)
+
+                    if CLOSURE_CALL_COUNT == 1:
+                        logging.info("Trust region: {}/{} configs ({:.1f}%)".format(
+                            n_in_trust, len(self.train.X), 100.0 * n_in_trust / len(self.train.X)))
+                else:
+                    # Original approach: compute forces for ALL configs
+                    train_y_pred, train_dy_pred = self.compute_forces(self.train)
+                    loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLE':
                 # y_pred:    [(d, a1), (d, a2), (d, a3)] -- scalar products with anchor vectors 
@@ -999,12 +1146,11 @@ class Training:
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_forces(self.train)
-            loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+            # Use memory-efficient force evaluation (no create_graph)
+            train_y_pred, train_dy_pred = self.compute_forces_eval(self.train)
+            val_y_pred, val_dy_pred = self.compute_forces_eval(self.val)
 
-            val_y_pred, val_dy_pred = self.compute_forces(self.val)
-            loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
-
+            # Compute energy metrics directly (works with any loss function)
             train_e_d    = self.loss_fn.descale_energies(self.train.y)
             train_e_pred = self.loss_fn.descale_energies(train_y_pred)
             train_e_mae  = torch.mean(torch.abs(train_e_d - train_e_pred))
@@ -1012,24 +1158,33 @@ class Training:
 
             val_e_d    = self.loss_fn.descale_energies(self.val.y)
             val_e_pred = self.loss_fn.descale_energies(val_y_pred)
-            val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred)) 
+            val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred))
             val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred) * (val_e_d - val_e_pred)))
 
+            # Compute force metrics directly
             natoms   = self.train.NATOMS
-            train_dy = train.dy.reshape(-1, 3 * natoms)
-            val_dy   = val.dy.reshape(-1, 3 * natoms)
+            train_dy = self.train.dy.reshape(-1, 3 * natoms)
+            val_dy   = self.val.dy.reshape(-1, 3 * natoms)
             train_f_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
             val_f_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
             train_f_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
-            val_f_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))	
+            val_f_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))
 
-            logging.info("Epoch: {}; (energy) loss train: {:.3f}; (force) loss train: {:.3f}\n \
-                                           (energy) loss val:   {:.3f}; (force) loss val:   {:.3f}\n \
+            # Compute weighted loss values for logging (energy component only for scheduler)
+            enmin_train = train_e_d.min()
+            w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
+            loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
+
+            enmin_val = val_e_d.min()
+            w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
+            loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
+
+            logging.info("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
                                            (energy) MAE train:  {:.3f} cm-1; (force) MAE train:  {:.3f} cm-1/bohr\n \
                                            (energy) MAE val:    {:.3f} cm-1; (force) MAE val:    {:.3f} cm-1/bohr\n \
                                            (energy) RMSE train: {:.3f} cm-1; (force) RMSE train: {:.3f} cm-1/bohr\n \
                                            (energy) RMSE val:   {:.3f} cm-1; (force) RMSE val:   {:.3f} cm-1/bohr".format(
-                epoch, loss_train_e, loss_train_f, loss_val_e, loss_val_f, train_e_mae, train_f_mae, val_e_mae, val_f_mae, train_e_rmse, val_e_rmse, train_f_rmse, val_f_rmse
+                epoch, loss_train_e, loss_val_e, train_e_mae, train_f_mae, val_e_mae, val_f_mae, train_e_rmse, train_f_rmse, val_e_rmse, val_f_rmse
             ))
 
             # value to be passed to EarlyStopping/ReduceLR mechanisms
@@ -1041,7 +1196,7 @@ class Training:
             # log metrics to WANDB to visualize model performance
             if USE_WANDB:
                 wandb.log({
-                    "loss_train_e" : loss_train_e, "loss_train_f" : loss_train_f, "loss_val_e" : loss_val_e, "loss_val_f" : loss_val_f,
+                    "loss_train_e" : loss_train_e, "loss_val_e" : loss_val_e,
                     "train_e_mae" : train_e_mae, "train_e_rmse" : train_e_rmse, "val_e_mae" : val_e_mae, "val_e_rmse" : val_e_rmse,
                     "train_f_mae" : train_f_mae, "train_f_rmse" : train_f_rmse, "val_f_mae" : val_f_mae, "val_f_rmse" : val_f_rmse,
                     "lr" : current_lr})
