@@ -234,19 +234,38 @@ class WRMSELoss_Boltzmann(torch.nn.Module):
         return torch.sqrt(wmse)
 
 class WMSELoss_Ratio(torch.nn.Module):
-    def __init__(self, dwt=1.0):
+    """
+    Weighted MSE loss with energy-based ratio weighting and optional focal weighting.
+
+    Energy weighting: w_energy = dwt / (dwt + E - E_min)
+        - Low-energy configs get higher weight
+
+    Focal weighting (when focal_gamma > 0): w_focal = (|error| / error_scale)^gamma
+        - Well-predicted configs get down-weighted
+        - Hard examples retain full weight
+        - error_scale is tracked via exponential moving average (EMA)
+
+    Combined: w_total = w_energy * w_focal
+    """
+    def __init__(self, dwt=1.0, focal_gamma=0.0, focal_ema_decay=0.95):
         super().__init__()
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.dwt = torch.tensor(dwt).to(DEVICE)
+        self.focal_gamma = focal_gamma
+        self.focal_ema_decay = focal_ema_decay
 
         self.y_mean = None
         self.y_std  = None
+
+        # EMA tracker for error scale (used in focal weighting)
+        self.error_scale = None
 
     def set_scale(self, y_mean, y_std):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
         self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_Ratio(dwt={})".format(self.dwt)
+        return "WMSELoss_Ratio(dwt={}, focal_gamma={}, focal_ema_decay={})".format(
+            self.dwt, self.focal_gamma, self.focal_ema_decay)
 
     def forward(self, y, y_pred):
         assert self.y_mean is not None
@@ -256,21 +275,34 @@ class WMSELoss_Ratio(torch.nn.Module):
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
 
-        #ydnp = yd.detach().numpy()
-        #yd_prednp = yd_pred.detach().numpy()
-        #tt = np.hstack((ydnp, yd_prednp))
-        #np.savetxt("tmp.txt", tt)
-        #assert False
-
         ymin = yd.min()
 
-        w  = self.dwt / (self.dwt + yd - ymin)
-        wmse = (w * (yd - yd_pred)**2).mean()
+        # Energy-based weight
+        w_energy = self.dwt / (self.dwt + yd - ymin)
 
-        #wnp = w.detach().numpy()
-        #ydnp = yd.detach().numpy()
-        #tt = np.hstack((ydnp, wnp))
-        #np.savetxt("ethanol_w.txt", tt)
+        # Focal weighting (if enabled)
+        if self.focal_gamma > 0:
+            errors = (yd - yd_pred).abs()
+
+            # Update error scale via EMA (detached to avoid gradient flow)
+            current_max_error = errors.max().detach()
+            if self.error_scale is None:
+                self.error_scale = current_max_error
+            else:
+                self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                    (1 - self.focal_ema_decay) * current_max_error)
+
+            # Compute normalized errors and focal weight
+            error_normalized = errors / (self.error_scale + 1e-8)
+            error_normalized = error_normalized.clamp(0, 1)
+            w_focal = error_normalized ** self.focal_gamma
+
+            # Combined weight
+            w = w_energy * w_focal
+        else:
+            w = w_energy
+
+        wmse = (w * (yd - yd_pred)**2).mean()
 
         return wmse
 
@@ -371,11 +403,14 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
 class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
-    Memory-efficient trust region loss for force training.
+    Memory-efficient trust region loss for force training with optional focal weighting.
 
     Forces are pre-filtered before being passed to this loss (computed only for
     trusted configs where energy error < threshold). This avoids OOM by never
     computing forces for configs outside the trust region.
+
+    Focal weighting (when focal_gamma > 0) down-weights well-predicted configs,
+    focusing the loss on hard examples.
 
     Expected inputs:
     - en, en_pred: Full energy tensors (all configs)
@@ -383,26 +418,62 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     - forces_pred_subset: Predicted forces for ONLY trusted configs
     - trust_indices: Indices of trusted configs (for weight computation)
     """
-    def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0):
+    def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0,
+                 focal_gamma=0.0, focal_ema_decay=0.95):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
         self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
         self.trust_threshold = trust_threshold
+        self.focal_gamma = focal_gamma
+        self.focal_ema_decay = focal_ema_decay
 
         self.en_mean = None
         self.en_std = None
+
+        # EMA tracker for error scale (used in focal weighting)
+        self.error_scale = None
 
     def set_scale(self, en_mean, en_std):
         self.en_mean = torch.from_numpy(en_mean).to(DEVICE)
         self.en_std = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={})".format(
-            self.natoms, self.dwt, self.f_lambda, self.trust_threshold)
+        return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={}, focal_gamma={}, focal_ema_decay={})".format(
+            self.natoms, self.dwt, self.f_lambda, self.trust_threshold, self.focal_gamma, self.focal_ema_decay)
 
     def descale_energies(self, en):
         return en * self.en_std + self.en_mean
+
+    def _compute_weights(self, _en, _en_pred):
+        """Compute combined energy-based and focal weights."""
+        enmin = _en.min()
+        w_energy = self.dwt / (self.dwt + _en - enmin)
+        w_energy = w_energy.view(-1)
+
+        # Focal weighting (if enabled)
+        if self.focal_gamma > 0:
+            errors = (_en - _en_pred).abs().view(-1)
+
+            # Update error scale via EMA (detached to avoid gradient flow)
+            current_max_error = errors.max().detach()
+            if self.error_scale is None:
+                self.error_scale = current_max_error
+            else:
+                self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                    (1 - self.focal_ema_decay) * current_max_error)
+
+            # Compute normalized errors and focal weight
+            error_normalized = errors / (self.error_scale + 1e-8)
+            error_normalized = error_normalized.clamp(0, 1)
+            w_focal = error_normalized ** self.focal_gamma
+
+            # Combined weight
+            w = w_energy * w_focal
+        else:
+            w = w_energy
+
+        return w
 
     def forward(self, en, en_pred, forces_subset, forces_pred_subset, trust_indices):
         """
@@ -422,10 +493,10 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         _en = self.descale_energies(en)
         _en_pred = self.descale_energies(en_pred)
 
+        # Compute weights (energy-based + optional focal)
+        w = self._compute_weights(_en, _en_pred)
+
         # Energy loss on ALL configs
-        enmin = _en.min()
-        w = self.dwt / (self.dwt + _en - enmin)
-        w = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
         # Force loss on trusted subset only
@@ -457,28 +528,38 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         _en = self.descale_energies(en)
         _en_pred = self.descale_energies(en_pred)
 
-        enmin = _en.min()
-        w = self.dwt / (self.dwt + _en - enmin)
-        w = w.view(-1)
+        # Compute weights (energy-based + optional focal)
+        w = self._compute_weights(_en, _en_pred)
+
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
         return wmse_en
 
 
 class WRMSELoss_Ratio(torch.nn.Module):
-    def __init__(self, dwt=1.0):
+    """
+    Weighted RMSE loss with energy-based ratio weighting and optional focal weighting.
+    Same as WMSELoss_Ratio but returns sqrt(WMSE).
+    """
+    def __init__(self, dwt=1.0, focal_gamma=0.0, focal_ema_decay=0.95):
         super().__init__()
-        self.dwt    = torch.tensor(dwt).to(DEVICE)
+        self.dwt = torch.tensor(dwt).to(DEVICE)
+        self.focal_gamma = focal_gamma
+        self.focal_ema_decay = focal_ema_decay
 
         self.y_mean = None
         self.y_std  = None
+
+        # EMA tracker for error scale (used in focal weighting)
+        self.error_scale = None
 
     def set_scale(self, y_mean, y_std):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
         self.y_std  = torch.FloatTensor(y_std.tolist()).to(DEVICE)
 
     def __repr__(self):
-        return "WRMSELoss_Ratio(dwt={})".format(self.dwt)
+        return "WRMSELoss_Ratio(dwt={}, focal_gamma={}, focal_ema_decay={})".format(
+            self.dwt, self.focal_gamma, self.focal_ema_decay)
 
     def forward(self, y, y_pred):
         assert self.y_mean is not None
@@ -490,7 +571,31 @@ class WRMSELoss_Ratio(torch.nn.Module):
 
         ymin = yd.min()
 
-        w  = self.dwt / (self.dwt + yd - ymin)
+        # Energy-based weight
+        w_energy = self.dwt / (self.dwt + yd - ymin)
+
+        # Focal weighting (if enabled)
+        if self.focal_gamma > 0:
+            errors = (yd - yd_pred).abs()
+
+            # Update error scale via EMA (detached to avoid gradient flow)
+            current_max_error = errors.max().detach()
+            if self.error_scale is None:
+                self.error_scale = current_max_error
+            else:
+                self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                    (1 - self.focal_ema_decay) * current_max_error)
+
+            # Compute normalized errors and focal weight
+            error_normalized = errors / (self.error_scale + 1e-8)
+            error_normalized = error_normalized.clamp(0, 1)
+            w_focal = error_normalized ** self.focal_gamma
+
+            # Combined weight
+            w = w_energy * w_focal
+        else:
+            w = w_energy
+
         wmse = (w * (yd - yd_pred)**2).mean()
 
         return torch.sqrt(wmse)
@@ -745,7 +850,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -755,6 +860,8 @@ class Training:
         self.cfg_loss.setdefault('USE_FORCES', False)
         self.cfg_loss.setdefault('F_LAMBDA_RAMP_EPOCHS', 0)
         self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
+        self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -775,10 +882,14 @@ class Training:
 
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
-            loss_fn = WRMSELoss_Ratio(dwt=dwt)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
+            loss_fn = WRMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
             dwt = self.cfg_loss.get('dwt', 1.0)
-            loss_fn = WMSELoss_Ratio(dwt=dwt)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
+            loss_fn = WMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
 
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_FORCES']:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
@@ -792,9 +903,13 @@ class Training:
             dwt = self.cfg_loss.get('dwt', 1.0)
             f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             if trust_threshold is not None:
                 # Use memory-efficient trust region loss that expects pre-filtered forces
-                loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda, trust_threshold=trust_threshold)
+                loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda,
+                                                       trust_threshold=trust_threshold, focal_gamma=focal_gamma,
+                                                       focal_ema_decay=focal_ema_decay)
             else:
                 loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
 
