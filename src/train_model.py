@@ -669,6 +669,12 @@ class Training:
         self.loss_fn  = self.build_loss()
         self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
+        # Track when force training starts for progressive F_LAMBDA ramping
+        if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('USE_FORCES_AFTER_EPOCH') is None:
+            self.force_start_epoch = 0
+        else:
+            self.force_start_epoch = None
+
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
 
@@ -739,7 +745,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'LAMBDA_Q', 'TRUST_THRESHOLD')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -747,6 +753,8 @@ class Training:
         self.cfg_loss.setdefault('LAMBDA_Q', 1.0e3)
         self.cfg_loss.setdefault('USE_FORCES_AFTER_EPOCH', None)
         self.cfg_loss.setdefault('USE_FORCES', False)
+        self.cfg_loss.setdefault('F_LAMBDA_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -883,8 +891,35 @@ class Training:
                 self.cfg_loss['USE_FORCES'] = True
                 self.loss_fn = self.build_loss().to(DEVICE)
                 self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+                self.force_start_epoch = epoch
 
                 self.es.reset()
+
+            # Progressive F_LAMBDA ramp
+            if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('F_LAMBDA_RAMP_EPOCHS', 0) > 0:
+                ramp_epochs = self.cfg_loss['F_LAMBDA_RAMP_EPOCHS']
+                start_epoch = self.force_start_epoch if self.force_start_epoch is not None else 0
+                progress = (epoch - start_epoch) / ramp_epochs
+                progress = max(0.0, min(1.0, progress))
+                target_f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
+                current_f_lambda = target_f_lambda * progress
+                self.loss_fn.f_lambda = torch.tensor(current_f_lambda).to(DEVICE)
+                if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                    logging.info("F_LAMBDA ramp: epoch {}, progress {:.1%}, f_lambda = {:.4f}".format(epoch, progress, current_f_lambda))
+
+            # Progressive trust-threshold annealing
+            if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
+                ramp_epochs = self.cfg_loss['TRUST_THRESHOLD_RAMP_EPOCHS']
+                start_epoch = self.force_start_epoch if self.force_start_epoch is not None else 0
+                progress = (epoch - start_epoch) / ramp_epochs
+                progress = max(0.0, min(1.0, progress))
+                target_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+                start_threshold = self.cfg_loss.get('TRUST_THRESHOLD_START', target_threshold)
+                self.current_trust_threshold = start_threshold + (target_threshold - start_threshold) * progress
+                if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                    logging.info("Trust-threshold anneal: epoch {}, progress {:.1%}, threshold = {:.1f}".format(epoch, progress, self.current_trust_threshold))
+            else:
+                self.current_trust_threshold = None
 
             print("loss function: {}".format(self.loss_fn))
 
@@ -982,7 +1017,9 @@ class Training:
         Returns indices of configurations where energy error is below threshold.
         Uses no_grad to avoid building computation graph for this step.
         """
-        trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+        trust_threshold = getattr(self, 'current_trust_threshold', None)
+        if trust_threshold is None:
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
 
         with torch.no_grad():
             y_pred = self.model(dataset.X)
