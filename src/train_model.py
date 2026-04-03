@@ -240,10 +240,11 @@ class WMSELoss_Ratio(torch.nn.Module):
     Energy weighting: w_energy = dwt / (dwt + E - E_min)
         - Low-energy configs get higher weight
 
-    Focal weighting (when focal_gamma > 0): w_focal = (|error| / error_scale)^gamma
-        - Well-predicted configs get down-weighted
-        - Hard examples retain full weight
+    Focal weighting (when focal_gamma > 0): w_focal = 1 + gamma * (|error| / error_scale)
+        - All configs retain base weight (w_energy)
+        - Hard examples (high error) get EXTRA weight
         - error_scale is tracked via exponential moving average (EMA)
+        - This is more stable than down-weighting easy examples
 
     Combined: w_total = w_energy * w_focal
     """
@@ -292,10 +293,13 @@ class WMSELoss_Ratio(torch.nn.Module):
                 self.error_scale = (self.focal_ema_decay * self.error_scale +
                                     (1 - self.focal_ema_decay) * current_max_error)
 
-            # Compute normalized errors and focal weight
+            # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
             error_normalized = error_normalized.clamp(0, 1)
-            w_focal = error_normalized ** self.focal_gamma
+
+            # Additive focal weight: base weight 1 + extra for hard examples
+            # This is more stable than multiplicative (which can zero out gradients)
+            w_focal = 1.0 + self.focal_gamma * error_normalized
 
             # Combined weight
             w = w_energy * w_focal
@@ -463,10 +467,13 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
                 self.error_scale = (self.focal_ema_decay * self.error_scale +
                                     (1 - self.focal_ema_decay) * current_max_error)
 
-            # Compute normalized errors and focal weight
+            # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
             error_normalized = error_normalized.clamp(0, 1)
-            w_focal = error_normalized ** self.focal_gamma
+
+            # Additive focal weight: base weight 1 + extra for hard examples
+            # This is more stable than multiplicative (which can zero out gradients)
+            w_focal = 1.0 + self.focal_gamma * error_normalized
 
             # Combined weight
             w = w_energy * w_focal
@@ -586,10 +593,12 @@ class WRMSELoss_Ratio(torch.nn.Module):
                 self.error_scale = (self.focal_ema_decay * self.error_scale +
                                     (1 - self.focal_ema_decay) * current_max_error)
 
-            # Compute normalized errors and focal weight
+            # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
             error_normalized = error_normalized.clamp(0, 1)
-            w_focal = error_normalized ** self.focal_gamma
+
+            # Additive focal weight: base weight 1 + extra for hard examples
+            w_focal = 1.0 + self.focal_gamma * error_normalized
 
             # Combined weight
             w = w_energy * w_focal
