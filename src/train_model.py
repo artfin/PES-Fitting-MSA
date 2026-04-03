@@ -259,6 +259,8 @@ class WMSELoss_Ratio(torch.nn.Module):
 
         # EMA tracker for error scale (used in focal weighting)
         self.error_scale = None
+        # Flag to ensure error_scale is only updated once per epoch (not during LBFGS line search)
+        self._error_scale_updated_this_step = False
 
     def set_scale(self, y_mean, y_std):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
@@ -267,6 +269,10 @@ class WMSELoss_Ratio(torch.nn.Module):
     def __repr__(self):
         return "WMSELoss_Ratio(dwt={}, focal_gamma={}, focal_ema_decay={})".format(
             self.dwt, self.focal_gamma, self.focal_ema_decay)
+
+    def reset_error_scale_flag(self):
+        """Call this at the start of each optimizer step to allow one error_scale update."""
+        self._error_scale_updated_this_step = False
 
     def forward(self, y, y_pred):
         assert self.y_mean is not None
@@ -285,13 +291,16 @@ class WMSELoss_Ratio(torch.nn.Module):
         if self.focal_gamma > 0:
             errors = (yd - yd_pred).abs()
 
-            # Update error scale via EMA (detached to avoid gradient flow)
-            current_max_error = errors.max().detach()
-            if self.error_scale is None:
-                self.error_scale = current_max_error
-            else:
-                self.error_scale = (self.focal_ema_decay * self.error_scale +
-                                    (1 - self.focal_ema_decay) * current_max_error)
+            # Update error scale via EMA only ONCE per optimizer step
+            # (not during LBFGS line search which calls forward() many times)
+            if not self._error_scale_updated_this_step:
+                current_max_error = errors.max().detach()
+                if self.error_scale is None:
+                    self.error_scale = current_max_error
+                else:
+                    self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                        (1 - self.focal_ema_decay) * current_max_error)
+                self._error_scale_updated_this_step = True
 
             # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
@@ -437,6 +446,8 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         # EMA tracker for error scale (used in focal weighting)
         self.error_scale = None
+        # Flag to ensure error_scale is only updated once per epoch (not during LBFGS line search)
+        self._error_scale_updated_this_step = False
 
     def set_scale(self, en_mean, en_std):
         self.en_mean = torch.from_numpy(en_mean).to(DEVICE)
@@ -445,6 +456,10 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     def __repr__(self):
         return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={}, focal_gamma={}, focal_ema_decay={})".format(
             self.natoms, self.dwt, self.f_lambda, self.trust_threshold, self.focal_gamma, self.focal_ema_decay)
+
+    def reset_error_scale_flag(self):
+        """Call this at the start of each optimizer step to allow one error_scale update."""
+        self._error_scale_updated_this_step = False
 
     def descale_energies(self, en):
         return en * self.en_std + self.en_mean
@@ -459,13 +474,16 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         if self.focal_gamma > 0:
             errors = (_en - _en_pred).abs().view(-1)
 
-            # Update error scale via EMA (detached to avoid gradient flow)
-            current_max_error = errors.max().detach()
-            if self.error_scale is None:
-                self.error_scale = current_max_error
-            else:
-                self.error_scale = (self.focal_ema_decay * self.error_scale +
-                                    (1 - self.focal_ema_decay) * current_max_error)
+            # Update error scale via EMA only ONCE per optimizer step
+            # (not during LBFGS line search which calls forward() many times)
+            if not self._error_scale_updated_this_step:
+                current_max_error = errors.max().detach()
+                if self.error_scale is None:
+                    self.error_scale = current_max_error
+                else:
+                    self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                        (1 - self.focal_ema_decay) * current_max_error)
+                self._error_scale_updated_this_step = True
 
             # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
@@ -559,6 +577,8 @@ class WRMSELoss_Ratio(torch.nn.Module):
 
         # EMA tracker for error scale (used in focal weighting)
         self.error_scale = None
+        # Flag to ensure error_scale is only updated once per epoch (not during LBFGS line search)
+        self._error_scale_updated_this_step = False
 
     def set_scale(self, y_mean, y_std):
         self.y_mean = torch.FloatTensor(y_mean.tolist()).to(DEVICE)
@@ -567,6 +587,10 @@ class WRMSELoss_Ratio(torch.nn.Module):
     def __repr__(self):
         return "WRMSELoss_Ratio(dwt={}, focal_gamma={}, focal_ema_decay={})".format(
             self.dwt, self.focal_gamma, self.focal_ema_decay)
+
+    def reset_error_scale_flag(self):
+        """Call this at the start of each optimizer step to allow one error_scale update."""
+        self._error_scale_updated_this_step = False
 
     def forward(self, y, y_pred):
         assert self.y_mean is not None
@@ -585,13 +609,15 @@ class WRMSELoss_Ratio(torch.nn.Module):
         if self.focal_gamma > 0:
             errors = (yd - yd_pred).abs()
 
-            # Update error scale via EMA (detached to avoid gradient flow)
-            current_max_error = errors.max().detach()
-            if self.error_scale is None:
-                self.error_scale = current_max_error
-            else:
-                self.error_scale = (self.focal_ema_decay * self.error_scale +
-                                    (1 - self.focal_ema_decay) * current_max_error)
+            # Update error scale via EMA only ONCE per optimizer step
+            if not self._error_scale_updated_this_step:
+                current_max_error = errors.max().detach()
+                if self.error_scale is None:
+                    self.error_scale = current_max_error
+                else:
+                    self.error_scale = (self.focal_ema_decay * self.error_scale +
+                                        (1 - self.focal_ema_decay) * current_max_error)
+                self._error_scale_updated_this_step = True
 
             # Compute normalized errors
             error_normalized = errors / (self.error_scale + 1e-8)
@@ -1329,6 +1355,11 @@ class Training:
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
         self.model.train()
+
+        # Reset focal weighting flag to allow one error_scale update per optimizer step
+        # (prevents non-deterministic loss during LBFGS line search)
+        if hasattr(self.loss_fn, 'reset_error_scale_flag'):
+            self.loss_fn.reset_error_scale_flag()
 
         start_time = timeit.default_timer()
         optimizer.step(closure)
