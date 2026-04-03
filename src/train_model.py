@@ -808,28 +808,45 @@ class Training:
 
     def build_scheduler(self):
         cfg_scheduler = self.cfg_solver['SCHEDULER']
+        scheduler_name = cfg_scheduler['NAME']
 
-        factor         = cfg_scheduler.get('LR_REDUCE_GAMMA', 0.1)
-        threshold      = cfg_scheduler.get('THRESHOLD', 0.1)
-        threshold_mode = cfg_scheduler.get('THRESHOLD_MODE', 'abs')
-        patience       = cfg_scheduler.get('PATIENCE', 10)
-        cooldown       = cfg_scheduler.get('COOLDOWN', 0)
-        min_lr         = cfg_scheduler.get('MIN_LR', 1e-5)
+        if scheduler_name == 'ReduceLROnPlateau':
+            factor         = cfg_scheduler.get('LR_REDUCE_GAMMA', 0.1)
+            threshold      = cfg_scheduler.get('THRESHOLD', 0.1)
+            threshold_mode = cfg_scheduler.get('THRESHOLD_MODE', 'abs')
+            patience       = cfg_scheduler.get('PATIENCE', 10)
+            cooldown       = cfg_scheduler.get('COOLDOWN', 0)
+            min_lr         = cfg_scheduler.get('MIN_LR', 1e-5)
 
-        if cfg_scheduler['NAME'] == 'ReduceLROnPlateau':
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=factor, threshold=threshold, threshold_mode=threshold_mode,
-                                                                   patience=patience, cooldown=cooldown, min_lr=min_lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, factor=factor, threshold=threshold, threshold_mode=threshold_mode,
+                patience=patience, cooldown=cooldown, min_lr=min_lr)
+
+            logging.info("Build scheduler:")
+            logging.info(" NAME:            {}".format(scheduler_name))
+            logging.info(" LR_REDUCE_GAMMA: {}".format(factor))
+            logging.info(" THRESHOLD:       {}".format(threshold))
+            logging.info(" THRESHOLD_MODE:  {}".format(threshold_mode))
+            logging.info(" PATIENCE:        {}".format(patience))
+            logging.info(" COOLDOWN:        {}".format(cooldown))
+            logging.info(" MIN_LR:          {}\n".format(min_lr))
+
+        elif scheduler_name == 'CosineAnnealingWarmRestarts':
+            T_0     = cfg_scheduler.get('T_0', 100)
+            T_mult  = cfg_scheduler.get('T_MULT', 2)
+            eta_min = cfg_scheduler.get('ETA_MIN', 1e-6)
+
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=T_0, T_mult=T_mult, eta_min=eta_min)
+
+            logging.info("Build scheduler:")
+            logging.info(" NAME:    {}".format(scheduler_name))
+            logging.info(" T_0:     {} (epochs until first restart)".format(T_0))
+            logging.info(" T_MULT:  {} (period multiplier after each restart)".format(T_mult))
+            logging.info(" ETA_MIN: {}\n".format(eta_min))
+
         else:
-            raise ValueError("unreachable")
-
-        logging.info("Build scheduler:")
-        logging.info(" NAME:            {}".format(cfg_scheduler['NAME']))
-        logging.info(" LR_REDUCE_GAMMA: {}".format(factor))
-        logging.info(" THRESHOLD:       {}".format(threshold))
-        logging.info(" THRESHOLD_MODE:  {}".format(threshold_mode))
-        logging.info(" PATIENCE:        {}".format(patience))
-        logging.info(" COOLDOWN:        {}".format(cooldown))
-        logging.info(" MIN_LR:          {}\n".format(min_lr))
+            raise ValueError("Unknown scheduler: {}".format(scheduler_name))
 
         return scheduler
 
@@ -925,7 +942,11 @@ class Training:
 
             self.train_epoch(epoch, self.optimizer)
 
-            self.scheduler.step(self.loss_val)
+            # Step scheduler - ReduceLROnPlateau requires metric, CosineAnnealing does not
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(self.loss_val)
+            else:
+                self.scheduler.step()
 
             if epoch % PRINT_TRAINING_STEPS == 0:
                 end = time.time()
@@ -1338,12 +1359,13 @@ class Training:
             # tensorboard writer
             self.writer.add_scalar("loss/train", loss_train, epoch)
             self.writer.add_scalar("loss/val", loss_val, epoch)
+            self.writer.add_scalar("lr", current_lr, epoch)
 
             # log metrics to WANDB to visualize model performance
             if USE_WANDB:
-                wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr}) 
+                wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr})
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1; lr: {4:.2e}".format(epoch, PRINT_PRECISION, loss_train, loss_val, current_lr))
 
         else:
             assert False, "unreachable"
