@@ -979,7 +979,7 @@ class Training:
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
 
-            loss.backward(retain_graph=True)
+            loss.backward()
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
