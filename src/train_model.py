@@ -149,10 +149,10 @@ def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = lambda_
+        self.lambda_ = torch.tensor(lambda_).to(DEVICE)
 
     def __repr__(self):
-        return "L1Regularization(lambda={})".format(self.lambda_)
+        return "L1Regularization(lambda={})".format(self.lambda_.item())
 
     def forward(self, model):
         l1_norm = torch.tensor(0.).to(dtype=torch.float64, device=DEVICE)
@@ -164,10 +164,10 @@ class L1Regularization(torch.nn.Module):
 class L2Regularization(torch.nn.Module):
     def __init__(self, lambda_):
         super().__init__()
-        self.lambda_ = lambda_
+        self.lambda_ = torch.tensor(lambda_).to(DEVICE)
 
     def __repr__(self):
-        return "L2Regularization(lambda={})".format(self.lambda_)
+        return "L2Regularization(lambda={})".format(self.lambda_.item())
 
     def forward(self, model):
         l2_norm = torch.tensor(0.).to(DEVICE)
@@ -663,6 +663,7 @@ class Training:
         logging.info("Number of parameters: {}".format(nparams))
 
         self.cfg_solver = cfg['TRAINING']
+        self.grad_clip_norm = self.cfg_solver.get('GRAD_CLIP_NORM', None)
 
         self.cfg_loss = cfg['LOSS']
         self.loss_fn  = self.build_loss()
@@ -708,14 +709,13 @@ class Training:
             return None
 
         if self.cfg_regularization['NAME'] == 'L1':
-            lambda_ = self.cfg_regularization['LAMBDA']
+            lambda_ = float(self.cfg_regularization['LAMBDA'])
             reg = L1Regularization(lambda_)
         elif self.cfg_regularization['NAME'] == 'L2':
-            lambda_ = self.cfg_regularization['LAMBDA']
+            lambda_ = float(self.cfg_regularization['LAMBDA'])
             reg = L2Regularization(lambda_)
         else:
             raise ValueError("unreachable")
-
 
         return reg
 
@@ -942,18 +942,19 @@ class Training:
 
         return y_pred, dEdx
 
-    def compute_forces_subset(self, dataset, indices):
+    def compute_forces_from_energy(self, X_subset, dX_subset, y_pred_subset):
         """
-        Compute forces only for a subset of configurations specified by indices.
-        This is memory-efficient for trust region training where we only need
-        forces for configurations with low energy error.
+        Compute forces for a subset given pre-computed energy predictions.
+        This avoids a second forward pass through the model.
+
+        Args:
+            X_subset: Input polynomials for subset (must have requires_grad=True)
+            dX_subset: Polynomial gradients for subset
+            y_pred_subset: Energy predictions for subset (from same forward pass)
         """
-        X_subset = dataset.X[indices]
-        dX_subset = dataset.dX[indices]
+        logging.debug("compute_forces_from_energy: X_subset shape={}, dX_subset shape={}".format(
+            X_subset.shape, dX_subset.shape))
 
-        X_subset.requires_grad = True
-
-        y_pred_subset = self.model(X_subset)
         dEdp = torch.autograd.grad(
             outputs=y_pred_subset,
             inputs=X_subset,
@@ -961,8 +962,6 @@ class Training:
             retain_graph=True,
             create_graph=True
         )[0]
-
-        X_subset.requires_grad = False
 
         # take into account normalization of polynomials
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
@@ -975,7 +974,7 @@ class Training:
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
         dEdx = -torch.mul(dEdx, y_scale)
 
-        return y_pred_subset, dEdx
+        return dEdx
 
     def compute_trust_mask(self, dataset):
         """
@@ -996,10 +995,11 @@ class Training:
             en_true_descaled = dataset.y * en_std + en_mean
 
             energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
+
             trust_mask = energy_errors < trust_threshold
             trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
 
-        return trust_indices, trust_mask
+        return trust_indices, trust_mask, energy_errors
 
     def compute_forces_eval(self, dataset):
         """
@@ -1037,6 +1037,36 @@ class Training:
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
 
+        # Precompute trust-region mask once per epoch so that the objective
+        # stays fixed during the LBFGS step. Recomputing it inside the closure
+        # breaks the line search because the loss landscape changes between
+        # closure evaluations.
+        use_trust_region = False
+        trust_indices = None
+        n_in_trust = 0
+        X_subset = None
+        dX_subset = None
+        train_dy_subset = None
+
+        if self.cfg_loss['USE_FORCES']:
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            if trust_threshold is not None:
+                use_trust_region = True
+                trust_indices, trust_mask, energy_errors = self.compute_trust_mask(self.train)
+                n_in_trust = len(trust_indices)
+
+                if n_in_trust > 0:
+                    X_subset = self.train.X[trust_indices].clone()
+                    X_subset.requires_grad = True
+                    dX_subset = self.train.dX[trust_indices]
+                    train_dy_subset = self.train.dy[trust_indices]
+
+                logging.info(
+                    "Trust region: {}/{} configs ({:.1f}%) | energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
+                        n_in_trust, len(self.train.X), 100.0 * n_in_trust / len(self.train.X),
+                        energy_errors.min().item(), energy_errors.max().item(),
+                        energy_errors.median().item()))
+
         def closure():
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
@@ -1044,27 +1074,13 @@ class Training:
             optimizer.zero_grad()
 
             if self.cfg_loss['USE_FORCES']:
-                trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
-
-                if trust_threshold is not None:
-                    # EFFICIENT TRUST REGION APPROACH:
-                    # 1. Compute trust mask BEFORE forces (cheap, no grad)
-                    # 2. Compute forces ONLY on trusted subset (expensive, with grad)
-                    # 3. Compute loss with full energy + subset forces
-
-                    trust_indices, trust_mask = self.compute_trust_mask(self.train)
-                    n_in_trust = len(trust_indices)
-
+                if use_trust_region:
                     if n_in_trust > 0:
-                        # Compute forces only for trusted configs
-                        _, train_dy_pred_subset = self.compute_forces_subset(self.train, trust_indices)
-
-                        # Full forward pass for energy (need gradients for backprop)
+                        y_pred_subset = self.model(X_subset)
+                        train_dy_pred_subset = self.compute_forces_from_energy(
+                            X_subset, dX_subset, y_pred_subset
+                        )
                         train_y_pred = self.model(self.train.X)
-
-                        # Get reference forces for trusted configs only
-                        train_dy_subset = self.train.dy[trust_indices]
-
                         loss = self.loss_fn(
                             self.train.y, train_y_pred,
                             train_dy_subset, train_dy_pred_subset,
@@ -1074,10 +1090,6 @@ class Training:
                         # No configs in trust region yet - energy only
                         train_y_pred = self.model(self.train.X)
                         loss = self.loss_fn.forward_energy_only(self.train.y, train_y_pred)
-
-                    if CLOSURE_CALL_COUNT == 1:
-                        logging.info("Trust region: {}/{} configs ({:.1f}%)".format(
-                            n_in_trust, len(self.train.X), 100.0 * n_in_trust / len(self.train.X)))
                 else:
                     # Original approach: compute forces for ALL configs
                     train_y_pred, train_dy_pred = self.compute_forces(self.train)
@@ -1127,6 +1139,10 @@ class Training:
                 loss = loss + self.regularization(self.model)
 
             loss.backward()
+
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
@@ -1309,14 +1325,25 @@ class Training:
         self.model.eval()
 
         if self.cfg_loss['USE_FORCES']:
-            train_y_pred, train_dy_pred = self.compute_forces(self.train)
-            loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+            # Use memory-efficient force evaluation (no create_graph needed)
+            train_y_pred, train_dy_pred = self.compute_forces_eval(self.train)
+            val_y_pred, val_dy_pred     = self.compute_forces_eval(self.val)
+            test_y_pred, test_dy_pred   = self.compute_forces_eval(self.test)
 
-            val_y_pred, val_dy_pred = self.compute_forces(self.val)
-            loss_val_e, loss_val_f = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
+            # Trust-region loss expects an extra trust_indices argument;
+            # for final evaluation we evaluate forces on the full dataset.
+            if isinstance(self.loss_fn, WMSELoss_TrustRegion_wforces):
+                train_indices = torch.arange(len(self.train.y), device=DEVICE)
+                val_indices   = torch.arange(len(self.val.y), device=DEVICE)
+                test_indices  = torch.arange(len(self.test.y), device=DEVICE)
 
-            test_y_pred, test_dy_pred = self.compute_forces(self.test)
-            loss_test_e, loss_test_f = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
+                loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
+                loss_val_e, loss_val_f     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
+                loss_test_e, loss_test_f   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices)
+            else:
+                loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+                loss_val_e, loss_val_f     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
+                loss_test_e, loss_test_f   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
             logging.info("Model evaluation after training:")
             logging.info("Train      loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_f))
@@ -1402,7 +1429,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
