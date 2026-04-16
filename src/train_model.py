@@ -1505,7 +1505,8 @@ class Training:
             contrib = (phi_act * w_act * f_sq).detach().cpu()
             phi_cpu = phi_act.detach().cpu()
 
-            qs = torch.tensor([0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99])
+            qs = torch.tensor([0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+                              dtype=contrib.dtype)
             cq = torch.quantile(contrib, qs).tolist()
             contrib_sum = float(contrib.sum().item())
             contrib_max = float(contrib.max().item())
@@ -1520,7 +1521,7 @@ class Training:
             top10 = _tail_share(0.10)
 
             if force_weights is not None:
-                pq = torch.quantile(phi_cpu, qs[:5]).tolist()
+                pq = torch.quantile(phi_cpu, qs[:5].to(phi_cpu.dtype)).tolist()
                 # Bin phi into membership categories.
                 bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
                 # counts per bin
