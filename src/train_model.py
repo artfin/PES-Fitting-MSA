@@ -918,6 +918,20 @@ class Training:
         )
         self._trust_history_initialized = False
 
+        # Per-epoch force-loss contribution + phi histogram (active set only).
+        self._force_diag_path = os.path.join(
+            self.model_folder, "{}.force_diagnostics.csv".format(model_name)
+        )
+        self._force_diag_initialized = False
+
+        # L-BFGS line-search telemetry (state inspected after optimizer.step).
+        self._lbfgs_diag_path = os.path.join(
+            self.model_folder, "{}.lbfgs_diagnostics.csv".format(model_name)
+        )
+        self._lbfgs_diag_initialized = False
+        self._lbfgs_prev_n_iter = 0
+        self._lbfgs_prev_func_evals = 0
+
     def reset_weights(self):
         for layer in self.model.children():
             if hasattr(layer, 'reset_parameters'):
@@ -1448,6 +1462,211 @@ class Training:
         # Snapshot current mask for next-epoch comparison.
         self._prev_trust_mask = cur.clone()
 
+    def log_force_loss_diagnostics(self, epoch, train_dy, train_dy_pred,
+                                   train_e_d, train_e_pred,
+                                   trust_indices, force_weights):
+        """Per-config force-loss contribution + phi histogram on the active set.
+
+        Contribution mirrors the loss term per config:
+            c_i = phi_i * w_energy_i * w_focal_i * ||f_i - f_i_pred||^2 / (3 N_atoms)
+        (un-normalized; we want raw share, not the loss value itself.)
+
+        In hard-mask mode phi is treated as 1; phi columns are NaN.
+        """
+        if trust_indices is None or trust_indices.numel() == 0:
+            return
+
+        natoms = self.train.NATOMS
+        n_active = int(trust_indices.numel())
+
+        with torch.no_grad():
+            # Per-config force squared error on the active set.
+            dy_act      = train_dy[trust_indices]
+            dy_pred_act = train_dy_pred[trust_indices]
+            f_sq = (
+                torch.sum((dy_act - dy_pred_act) ** 2, dim=1)
+                / (3.0 * natoms)
+            )  # (n_active,)
+
+            # Re-derive w_energy * w_focal on the active set. _compute_weights
+            # is safe to call here: error_scale was already updated inside the
+            # closure, so the EMA guard prevents double-update.
+            if hasattr(self.loss_fn, '_compute_weights'):
+                w_full = self.loss_fn._compute_weights(train_e_d, train_e_pred)
+                w_act = w_full.view(-1)[trust_indices]
+            else:
+                w_act = torch.ones(n_active, device=DEVICE)
+
+            if force_weights is not None:
+                phi_act = force_weights.view(-1).to(f_sq.dtype)
+            else:
+                phi_act = torch.ones(n_active, device=DEVICE, dtype=f_sq.dtype)
+
+            contrib = (phi_act * w_act * f_sq).detach().cpu()
+            phi_cpu = phi_act.detach().cpu()
+
+            qs = torch.tensor([0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99])
+            cq = torch.quantile(contrib, qs).tolist()
+            contrib_sum = float(contrib.sum().item())
+            contrib_max = float(contrib.max().item())
+
+            # Top-k tail share (k = 1%, 5%, 10% of active set).
+            sorted_c, _ = torch.sort(contrib, descending=True)
+            def _tail_share(frac):
+                k = max(1, int(round(frac * n_active)))
+                return float(sorted_c[:k].sum().item()) / max(contrib_sum, 1e-30)
+            top1  = _tail_share(0.01)
+            top5  = _tail_share(0.05)
+            top10 = _tail_share(0.10)
+
+            if force_weights is not None:
+                pq = torch.quantile(phi_cpu, qs[:5]).tolist()
+                # Bin phi into membership categories.
+                bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
+                # counts per bin
+                idx = torch.bucketize(phi_cpu, bins) - 1
+                idx = idx.clamp(0, 4)
+                bin_counts = [int((idx == b).sum().item()) for b in range(5)]
+            else:
+                pq = [float('nan')] * 5
+                bin_counts = [0] * 5  # all entries are phi=1, hard mode N/A
+
+        if not self._force_diag_initialized:
+            try:
+                with open(self._force_diag_path, "w") as f:
+                    f.write(
+                        "epoch,n_active,contrib_sum,contrib_max,"
+                        "contrib_q10,contrib_q25,contrib_q50,contrib_q75,"
+                        "contrib_q90,contrib_q95,contrib_q99,"
+                        "top1pct_share,top5pct_share,top10pct_share,"
+                        "phi_q10,phi_q25,phi_q50,phi_q75,phi_q90,"
+                        "phi_lt_25,phi_25_50,phi_50_75,phi_75_90,phi_ge_90\n"
+                    )
+                self._force_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize force diag CSV: {}".format(e))
+        try:
+            with open(self._force_diag_path, "a") as f:
+                f.write(
+                    "{},{},{:.6e},{:.6e},"
+                    "{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},"
+                    "{:.6f},{:.6f},{:.6f},"
+                    "{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},"
+                    "{},{},{},{},{}\n".format(
+                        epoch, n_active, contrib_sum, contrib_max,
+                        cq[0], cq[1], cq[2], cq[3], cq[4], cq[5], cq[6],
+                        top1, top5, top10,
+                        pq[0], pq[1], pq[2], pq[3], pq[4],
+                        bin_counts[0], bin_counts[1], bin_counts[2],
+                        bin_counts[3], bin_counts[4],
+                    )
+                )
+        except OSError as e:
+            logging.warning("Could not append to force diag CSV: {}".format(e))
+
+        logging.info(
+            "[force-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
+            "of force loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
+                epoch, top1, top5, top10, cq[2], cq[5], contrib_max
+            )
+        )
+
+    def log_lbfgs_diagnostics(self, epoch, optimizer):
+        """L-BFGS line-search telemetry, dumped per epoch.
+
+        Pulls inner state from torch.optim.LBFGS:
+          - this-step iteration / closure-call counts (deltas from cumulative)
+          - last accepted step length t
+          - initial Hessian diag scaling H_diag = (s . y) / (y . y)
+          - curvature pair stats: <s_k, y_k> = 1 / ro_k -- min/max/last/mean
+            over the stored history (small or absent => degenerate curvature)
+          - flat gradient norm at the last accepted iterate
+        """
+        if not isinstance(optimizer, torch.optim.LBFGS):
+            return
+
+        params = optimizer.param_groups[0]['params']
+        if not params:
+            return
+        state = optimizer.state.get(params[0], {})
+        if not state:
+            return
+
+        cum_n_iter     = int(state.get('n_iter', 0))
+        cum_func_evals = int(state.get('func_evals', 0))
+        iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
+        evals_this_step = cum_func_evals - self._lbfgs_prev_func_evals
+        self._lbfgs_prev_n_iter = cum_n_iter
+        self._lbfgs_prev_func_evals = cum_func_evals
+
+        t_val = state.get('t', None)
+        try:
+            t_val = float(t_val) if t_val is not None else float('nan')
+        except (TypeError, ValueError):
+            t_val = float('nan')
+
+        H_diag = state.get('H_diag', None)
+        try:
+            H_diag = float(H_diag) if H_diag is not None else float('nan')
+        except (TypeError, ValueError):
+            H_diag = float('nan')
+
+        ro = state.get('ro', []) or []
+        n_pairs = len(ro)
+        if n_pairs > 0:
+            sy_vals = []
+            for r in ro:
+                try:
+                    rv = float(r)
+                    if rv != 0.0:
+                        sy_vals.append(1.0 / rv)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+            if sy_vals:
+                sy_min  = min(sy_vals)
+                sy_max  = max(sy_vals)
+                sy_last = sy_vals[-1]
+                sy_mean = sum(sy_vals) / len(sy_vals)
+            else:
+                sy_min = sy_max = sy_last = sy_mean = float('nan')
+        else:
+            sy_min = sy_max = sy_last = sy_mean = float('nan')
+
+        prev_flat_grad = state.get('prev_flat_grad', None)
+        if prev_flat_grad is not None:
+            try:
+                grad_norm = float(prev_flat_grad.norm().item())
+            except (RuntimeError, AttributeError):
+                grad_norm = float('nan')
+        else:
+            grad_norm = float('nan')
+
+        if not self._lbfgs_diag_initialized:
+            try:
+                with open(self._lbfgs_diag_path, "w") as f:
+                    f.write("epoch,iters_this_step,evals_this_step,t,H_diag,"
+                            "n_pairs,grad_norm,sy_min,sy_mean,sy_max,sy_last\n")
+                self._lbfgs_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize lbfgs diag CSV: {}".format(e))
+        try:
+            with open(self._lbfgs_diag_path, "a") as f:
+                f.write("{},{},{},{:.6e},{:.6e},{},{:.6e},"
+                        "{:.6e},{:.6e},{:.6e},{:.6e}\n".format(
+                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
+                    n_pairs, grad_norm, sy_min, sy_mean, sy_max, sy_last,
+                ))
+        except OSError as e:
+            logging.warning("Could not append to lbfgs diag CSV: {}".format(e))
+
+        logging.info(
+            "[lbfgs-diag] epoch={} | iters={} evals={} t={:.3e} H_diag={:.3e} "
+            "pairs={} grad_norm={:.3e} sy(last/min/max)={:.3e}/{:.3e}/{:.3e}".format(
+                epoch, iters_this_step, evals_this_step, t_val, H_diag,
+                n_pairs, grad_norm, sy_last, sy_min, sy_max,
+            )
+        )
+
     def compute_forces_eval(self, dataset):
         """
         Compute forces for evaluation (no create_graph needed).
@@ -1633,6 +1852,10 @@ class Training:
         current_lr = optimizer.param_groups[0]['lr']
         logging.info("(optimizer) current lr: {}".format(current_lr))
 
+        # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
+        if self.cfg_loss['USE_FORCES']:
+            self.log_lbfgs_diagnostics(epoch, optimizer)
+
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
         self.model.eval()
@@ -1670,6 +1893,14 @@ class Training:
                     torch.sum((train_dy - train_dy_pred) ** 2, dim=1) / (3 * natoms)
                 ).detach()
                 self._prev_train_force_errors = per_config_f_rmse
+
+            # Per-config force-loss contribution + phi histogram on the active set.
+            if use_trust_region and trust_indices is not None and n_in_trust > 0:
+                self.log_force_loss_diagnostics(
+                    epoch, train_dy, train_dy_pred,
+                    train_e_d, train_e_pred,
+                    trust_indices, force_weights,
+                )
 
             # Compute weighted loss values for logging (energy component only for scheduler)
             enmin_train = train_e_d.min()
