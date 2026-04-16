@@ -416,28 +416,55 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
 
 class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
-    Memory-efficient trust region loss for force training with optional focal weighting.
+    Memory-efficient trust region loss for force training with optional focal
+    weighting and an optional soft boundary.
 
-    Forces are pre-filtered before being passed to this loss (computed only for
-    trusted configs where energy error < threshold). This avoids OOM by never
-    computing forces for configs outside the trust region.
+    Forces are pre-filtered before being passed to this loss (computed only
+    for configs in the trust / active set). This avoids OOM by never computing
+    forces for configs outside the active set.
 
-    Focal weighting (when focal_gamma > 0) down-weights well-predicted configs,
-    focusing the loss on hard examples.
+    Two modes (selected by `soft_boundary`):
+
+      Hard mask (default; backward-compatible):
+        Membership in the trust set is binary (energy error < trust_threshold).
+        Force loss is normalized by n_in_trust.
+
+      Soft boundary (soft_boundary=True):
+        Each config carries a per-config weight
+            phi(e_i) = sigmoid((trust_threshold - e_i) / soft_scale) in [0, 1]
+        smoothly decaying with energy error. Force loss is normalized by the
+        SUM of weights, so downweighting actually reduces a config's
+        contribution rather than redistributing it.
+
+        The "active set" passed in is the subset of configs whose phi exceeds
+        soft_cutoff (a memory optimization only -- configs outside the
+        active set contribute negligibly).
+
+        Soft mode removes the discontinuous "evasion" incentive of the hard
+        mask, where pushing a config across `tau` discretely zeroed its
+        force loss.
+
+    Focal weighting (when focal_gamma > 0) up-weights hard-to-fit configs.
 
     Expected inputs:
-    - en, en_pred: Full energy tensors (all configs)
-    - forces_subset: Reference forces for ONLY trusted configs
-    - forces_pred_subset: Predicted forces for ONLY trusted configs
-    - trust_indices: Indices of trusted configs (for weight computation)
+    - en, en_pred:        full energy tensors (all configs)
+    - forces_subset:      reference forces for active-set configs
+    - forces_pred_subset: predicted forces for active-set configs
+    - trust_indices:      indices of active-set configs
+    - force_weights:      optional per-config soft phi values for the active
+                          set; when None we are in hard-mask mode.
     """
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0,
+                 soft_boundary=False, soft_scale=None,
                  focal_gamma=0.0, focal_ema_decay=0.95):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
         self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
         self.trust_threshold = trust_threshold
+        # Soft boundary parameters (False = hard mask, backward-compatible)
+        self.soft_boundary = soft_boundary
+        self.soft_scale = soft_scale  # cm^-1; defaults to trust_threshold/4
         self.focal_gamma = focal_gamma
         self.focal_ema_decay = focal_ema_decay
 
@@ -446,7 +473,8 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         # EMA tracker for error scale (used in focal weighting)
         self.error_scale = None
-        # Flag to ensure error_scale is only updated once per epoch (not during LBFGS line search)
+        # Flag to ensure error_scale is only updated once per optimizer step
+        # (not during LBFGS line search which calls forward() many times)
         self._error_scale_updated_this_step = False
 
     def set_scale(self, en_mean, en_std):
@@ -454,8 +482,28 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         self.en_std = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, trust_threshold={}, focal_gamma={}, focal_ema_decay={})".format(
-            self.natoms, self.dwt, self.f_lambda, self.trust_threshold, self.focal_gamma, self.focal_ema_decay)
+        return ("WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, "
+                "trust_threshold={}, soft_boundary={}, soft_scale={}, "
+                "focal_gamma={}, focal_ema_decay={})").format(
+            self.natoms, self.dwt, self.f_lambda, self.trust_threshold,
+            self.soft_boundary, self.soft_scale,
+            self.focal_gamma, self.focal_ema_decay)
+
+    @staticmethod
+    def soft_phi(energy_errors, trust_threshold, soft_scale=None):
+        """Return sigmoid soft trust factor phi(e_i) in [0, 1], detached.
+
+        phi(e_i) = sigmoid((trust_threshold - e_i) / soft_scale)
+
+        At e_i = trust_threshold: phi = 0.5
+        For e_i << trust_threshold: phi -> 1
+        For e_i >> trust_threshold: phi -> 0
+
+        energy_errors: 1-D tensor of |E_pred - E_true| per config (cm^-1).
+        """
+        s = soft_scale if soft_scale is not None else (trust_threshold / 4.0)
+        e = energy_errors.detach().clamp(min=0.0)
+        return torch.sigmoid((trust_threshold - e) / s)
 
     def reset_error_scale_flag(self):
         """Call this at the start of each optimizer step to allow one error_scale update."""
@@ -500,15 +548,27 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         return w
 
-    def forward(self, en, en_pred, forces_subset, forces_pred_subset, trust_indices):
+    def forward(self, en, en_pred, forces_subset, forces_pred_subset,
+                trust_indices, force_weights=None):
         """
         Compute combined energy + force loss.
-        Energy loss is computed on ALL configs, force loss only on trusted subset.
+        Energy loss is computed on ALL configs, force loss only on the
+        active (trust) subset.
+
+        force_weights: optional 1-D tensor of soft phi values for the
+        active subset (same length as trust_indices). If provided we are
+        in soft-boundary mode and the force loss is normalized by the
+        SUM of these weights; if None we are in hard-mask mode (count
+        normalization, weights effectively 1.0).
         """
-        wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces_subset, forces_pred_subset, trust_indices)
+        wmse_en, wmse_forces = self.forward_separate(
+            en, en_pred, forces_subset, forces_pred_subset,
+            trust_indices, force_weights
+        )
         return wmse_en + wmse_forces
 
-    def forward_separate(self, en, en_pred, forces_subset, forces_pred_subset, trust_indices):
+    def forward_separate(self, en, en_pred, forces_subset, forces_pred_subset,
+                         trust_indices, force_weights=None):
         assert self.en_mean is not None
         assert self.en_std is not None
 
@@ -524,20 +584,35 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         # Energy loss on ALL configs
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
-        # Force loss on trusted subset only
+        # Force loss on active subset only
         n_in_trust = len(trust_indices)
         if n_in_trust > 0:
-            # Get weights for trusted configs
+            # Combined per-config weight on the active subset:
+            #   hard mask: w_trusted = w_energy * w_focal
+            #   soft mask: w_trusted = w_energy * w_focal * phi(e_i)
             w_trusted = w[trust_indices]
+            if force_weights is not None:
+                w_trusted = w_trusted * force_weights
 
             # Reshape forces
             forces_subset = forces_subset.reshape(n_in_trust, self.natoms, 3)
             forces_pred_subset = forces_pred_subset.reshape(n_in_trust, self.natoms, 3)
 
-            # Compute weighted force MSE
+            # Weighted force MSE
             df = forces_subset - forces_pred_subset
             wdf = torch.einsum('ijk,i->ijk', df, w_trusted)
-            wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms * n_in_trust)
+            sq = torch.einsum('ijk,ijk->', wdf, df)
+
+            if force_weights is not None:
+                # Soft mode: normalize by sum of soft weights so that
+                # downweighting a config genuinely shrinks its contribution.
+                denom = (force_weights.sum().clamp(min=1.0)
+                         * 3.0 * self.natoms)
+            else:
+                # Hard mode: original count-based normalization.
+                denom = 3.0 * self.natoms * n_in_trust
+
+            wmse_forces = self.f_lambda * sq / denom
         else:
             wmse_forces = torch.tensor(0.0, device=DEVICE)
 
@@ -828,6 +903,21 @@ class Training:
             "order":    self.train.order,
         }
 
+        # Trust-region diagnostics state (lazy init in train_epoch).
+        # _prev_trust_mask: bool tensor (N,) -- last epoch's membership
+        # _prev_train_force_errors: float tensor (N,) -- per-config train force
+        #     RMSE from the last validation pass; used to test the eviction signal
+        # _trust_flip_count: int tensor (N,) -- cumulative # times each config
+        #     has toggled in/out of the trust set across training
+        # _trust_history_path: where to write per-epoch CSV summary
+        self._prev_trust_mask = None
+        self._prev_train_force_errors = None
+        self._trust_flip_count = None
+        self._trust_history_path = os.path.join(
+            self.model_folder, "{}.trust_history.csv".format(model_name)
+        )
+        self._trust_history_initialized = False
+
     def reset_weights(self):
         for layer in self.model.children():
             if hasattr(layer, 'reset_parameters'):
@@ -885,7 +975,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -895,6 +985,9 @@ class Training:
         self.cfg_loss.setdefault('USE_FORCES', False)
         self.cfg_loss.setdefault('F_LAMBDA_RAMP_EPOCHS', 0)
         self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('TRUST_SOFT_BOUNDARY', False)
+        self.cfg_loss.setdefault('TRUST_SOFT_SCALE', None)
+        self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
 
@@ -942,8 +1035,13 @@ class Training:
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             if trust_threshold is not None:
                 # Use memory-efficient trust region loss that expects pre-filtered forces
+                soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
+                soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
                 loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda,
-                                                       trust_threshold=trust_threshold, focal_gamma=focal_gamma,
+                                                       trust_threshold=trust_threshold,
+                                                       soft_boundary=soft_boundary,
+                                                       soft_scale=soft_scale,
+                                                       focal_gamma=focal_gamma,
                                                        focal_ema_decay=focal_ema_decay)
             else:
                 loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
@@ -1184,13 +1282,27 @@ class Training:
 
     def compute_trust_mask(self, dataset):
         """
-        Compute trust region mask based on energy prediction errors.
-        Returns indices of configurations where energy error is below threshold.
-        Uses no_grad to avoid building computation graph for this step.
+        Compute trust region active set based on energy prediction errors.
+
+        In hard-mask mode (default): active set = {i : e_i < trust_threshold}.
+        In soft-boundary mode (TRUST_SOFT_BOUNDARY=True): active set =
+            {i : phi(e_i) > soft_cutoff}, where phi is the sigmoid soft
+            trust factor; the per-config phi values are returned as well.
+
+        Returns:
+          trust_indices : 1-D LongTensor of active-set config indices
+          trust_mask    : 1-D BoolTensor of shape (N,) indicating membership
+          energy_errors : 1-D float tensor of |E_pred - E_true| (cm^-1)
+          force_weights : 1-D float tensor of phi(e_i) for the active set
+                          in soft-boundary mode, or None in hard-mask mode
         """
         trust_threshold = getattr(self, 'current_trust_threshold', None)
         if trust_threshold is None:
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+
+        soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
+        soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
+        soft_cutoff = self.cfg_loss.get('TRUST_SOFT_CUTOFF', 0.01)
 
         with torch.no_grad():
             y_pred = self.model(dataset.X)
@@ -1204,10 +1316,137 @@ class Training:
 
             energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
 
-            trust_mask = energy_errors < trust_threshold
-            trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+            if soft_boundary:
+                phi = WMSELoss_TrustRegion_wforces.soft_phi(
+                    energy_errors, trust_threshold, soft_scale=soft_scale
+                )
+                trust_mask = phi > soft_cutoff
+                trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+                force_weights = phi[trust_indices]
+            else:
+                trust_mask = energy_errors < trust_threshold
+                trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+                force_weights = None
 
-        return trust_indices, trust_mask, energy_errors
+        return trust_indices, trust_mask, energy_errors, force_weights
+
+    def log_trust_region_diagnostics(self, epoch, trust_mask, energy_errors,
+                                     force_weights):
+        """Diagnose trust-region evolution: churn, eviction signal, flip counts.
+
+        Compares the current trust mask against the previous epoch's mask
+        and the per-config force errors recorded at the end of the previous
+        validation pass. Writes a CSV row per epoch and logs a summary.
+
+        The eviction signal is the key check for "evasion" behavior:
+        if configs that just LEFT the trust set had systematically higher
+        force errors than configs that STAYED, the optimizer is plausibly
+        gaming the boundary by pushing hard configs out.
+        """
+        N = trust_mask.numel()
+        cur = trust_mask.detach()
+        n_in = int(cur.sum().item())
+        frac = n_in / max(N, 1)
+
+        # Initialize trackers lazily on the first call.
+        if self._trust_flip_count is None:
+            self._trust_flip_count = torch.zeros(N, dtype=torch.long, device=DEVICE)
+
+        if self._prev_trust_mask is None:
+            entered = n_in
+            left = 0
+            stable_in = n_in
+            stable_out = N - n_in
+            mean_err_left = float('nan')
+            mean_err_stayed = float('nan')
+            med_err_left = float('nan')
+            med_err_stayed = float('nan')
+        else:
+            prev = self._prev_trust_mask
+            entered_mask = cur & (~prev)
+            left_mask    = (~cur) & prev
+            stable_in_mask  = cur & prev
+            stable_out_mask = (~cur) & (~prev)
+            entered = int(entered_mask.sum().item())
+            left = int(left_mask.sum().item())
+            stable_in = int(stable_in_mask.sum().item())
+            stable_out = int(stable_out_mask.sum().item())
+
+            # Update cumulative flip count.
+            flips = entered_mask | left_mask
+            self._trust_flip_count[flips] += 1
+
+            # Eviction signal: compare prev-epoch force errors of left vs stayed.
+            if (self._prev_train_force_errors is not None
+                    and self._prev_train_force_errors.numel() == N):
+                pfe = self._prev_train_force_errors
+                if left > 0:
+                    mean_err_left = float(pfe[left_mask].mean().item())
+                    med_err_left  = float(pfe[left_mask].median().item())
+                else:
+                    mean_err_left = float('nan')
+                    med_err_left  = float('nan')
+                if stable_in > 0:
+                    mean_err_stayed = float(pfe[stable_in_mask].mean().item())
+                    med_err_stayed  = float(pfe[stable_in_mask].median().item())
+                else:
+                    mean_err_stayed = float('nan')
+                    med_err_stayed  = float('nan')
+            else:
+                mean_err_left = float('nan')
+                mean_err_stayed = float('nan')
+                med_err_left = float('nan')
+                med_err_stayed = float('nan')
+
+        # Soft-mode phi statistics (None in hard mode).
+        if force_weights is not None and force_weights.numel() > 0:
+            phi_sum = float(force_weights.sum().item())
+            phi_mean = float(force_weights.mean().item())
+            phi_min = float(force_weights.min().item())
+        else:
+            phi_sum = float('nan')
+            phi_mean = float('nan')
+            phi_min = float('nan')
+
+        max_flips = int(self._trust_flip_count.max().item())
+        ever_in = int((self._trust_flip_count > 0).sum().item()) + stable_in
+        # Configs that have never flipped AND are currently out: never-trusted.
+        # (Approximate -- exact count requires another tracker; we don't bother.)
+
+        logging.info(
+            "[trust-diag] epoch={} | n_in={}/{} ({:.1%}) | entered={} left={} "
+            "stable_in={} | prev-epoch force-RMSE: left={:.2f} stayed={:.2f} "
+            "(med {:.2f}/{:.2f}) | max_flips={}".format(
+                epoch, n_in, N, frac, entered, left, stable_in,
+                mean_err_left, mean_err_stayed,
+                med_err_left, med_err_stayed, max_flips
+            )
+        )
+
+        # Append CSV row for post-hoc plotting.
+        if not self._trust_history_initialized:
+            try:
+                with open(self._trust_history_path, "w") as f:
+                    f.write("epoch,N,n_in,frac,entered,left,stable_in,stable_out,"
+                            "mean_err_left,mean_err_stayed,med_err_left,med_err_stayed,"
+                            "phi_sum,phi_mean,phi_min,max_flips\n")
+                self._trust_history_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize trust history CSV: {}".format(e))
+        try:
+            with open(self._trust_history_path, "a") as f:
+                f.write("{},{},{},{:.6f},{},{},{},{},"
+                        "{:.6f},{:.6f},{:.6f},{:.6f},"
+                        "{:.6f},{:.6f},{:.6f},{}\n".format(
+                    epoch, N, n_in, frac, entered, left, stable_in, stable_out,
+                    mean_err_left, mean_err_stayed, med_err_left, med_err_stayed,
+                    phi_sum, phi_mean, phi_min, max_flips
+                ))
+        except OSError as e:
+            logging.warning("Could not append to trust history CSV: {}".format(e))
+
+        # Snapshot current mask for next-epoch comparison.
+        self._prev_trust_mask = cur.clone()
 
     def compute_forces_eval(self, dataset):
         """
@@ -1255,12 +1494,16 @@ class Training:
         X_subset = None
         dX_subset = None
         train_dy_subset = None
+        force_weights = None
+        energy_errors = None
+        trust_mask = None
 
         if self.cfg_loss['USE_FORCES']:
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             if trust_threshold is not None:
                 use_trust_region = True
-                trust_indices, trust_mask, energy_errors = self.compute_trust_mask(self.train)
+                trust_indices, trust_mask, energy_errors, force_weights = \
+                    self.compute_trust_mask(self.train)
                 n_in_trust = len(trust_indices)
 
                 if n_in_trust > 0:
@@ -1269,11 +1512,31 @@ class Training:
                     dX_subset = self.train.dX[trust_indices]
                     train_dy_subset = self.train.dy[trust_indices]
 
-                logging.info(
-                    "Trust region: {}/{} configs ({:.1f}%) | energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
-                        n_in_trust, len(self.train.X), 100.0 * n_in_trust / len(self.train.X),
-                        energy_errors.min().item(), energy_errors.max().item(),
-                        energy_errors.median().item()))
+                soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
+                if soft_boundary and force_weights is not None and n_in_trust > 0:
+                    logging.info(
+                        "Trust region (soft): {}/{} configs ({:.1f}%) | "
+                        "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
+                        "phi: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
+                            n_in_trust, len(self.train.X),
+                            100.0 * n_in_trust / len(self.train.X),
+                            energy_errors.min().item(), energy_errors.max().item(),
+                            energy_errors.median().item(),
+                            force_weights.min().item(), force_weights.mean().item(),
+                            force_weights.sum().item()))
+                else:
+                    logging.info(
+                        "Trust region: {}/{} configs ({:.1f}%) | "
+                        "energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
+                            n_in_trust, len(self.train.X),
+                            100.0 * n_in_trust / len(self.train.X),
+                            energy_errors.min().item(), energy_errors.max().item(),
+                            energy_errors.median().item()))
+
+                # Run trust-region diagnostics (churn + eviction signal).
+                self.log_trust_region_diagnostics(
+                    epoch, trust_mask, energy_errors, force_weights
+                )
 
         def closure():
             nonlocal CLOSURE_CALL_COUNT
@@ -1292,7 +1555,7 @@ class Training:
                         loss = self.loss_fn(
                             self.train.y, train_y_pred,
                             train_dy_subset, train_dy_pred_subset,
-                            trust_indices
+                            trust_indices, force_weights
                         )
                     else:
                         # No configs in trust region yet - energy only
@@ -1398,6 +1661,15 @@ class Training:
             val_f_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
             train_f_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
             val_f_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))
+
+            # Snapshot per-config train force RMSE for next-epoch trust-region
+            # diagnostics (eviction signal: do "left" configs have higher
+            # force errors than "stayed" configs?).
+            with torch.no_grad():
+                per_config_f_rmse = torch.sqrt(
+                    torch.sum((train_dy - train_dy_pred) ** 2, dim=1) / (3 * natoms)
+                ).detach()
+                self._prev_train_force_errors = per_config_f_rmse
 
             # Compute weighted loss values for logging (energy component only for scheduler)
             enmin_train = train_e_d.min()
