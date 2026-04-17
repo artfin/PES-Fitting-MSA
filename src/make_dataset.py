@@ -71,7 +71,7 @@ def make_dataset_fpaths(cfg_dataset):
         return dict(items)
 
     # keywords to be considered to make a hash
-    keywords = ('SOURCE', 'LOAD_FORCES', 'ENERGY_LIMIT', 'NORMALIZE', 'ANCHOR_POSITIONS', 'ORDER', 'SYMMETRY', 'VARIABLES', 'PURIFY')
+    keywords = ('SOURCE', 'LOAD_GRADIENTS', 'ENERGY_LIMIT', 'NORMALIZE', 'ANCHOR_POSITIONS', 'ORDER', 'SYMMETRY', 'VARIABLES', 'PURIFY')
     d = flatten({kw : cfg_dataset[kw] for kw in keywords})
 
     from hashlib import sha1
@@ -107,13 +107,13 @@ def make_dataset(cfg_dataset, dataset_fpaths):
     # default split function [dataset] -> [train, val, test] 
     data_split = sklearn.model_selection.train_test_split
 
-    if cfg_dataset['LOAD_FORCES']:
+    if cfg_dataset['LOAD_GRADIENTS']:
         if len(cfg_dataset['SOURCE']) > 1:
-            logging.info("Stratification is not implemented for `use_forces=True`")
+            logging.info("Stratification is not implemented for `use_gradients=True`")
             assert False
 
         dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=cfg_dataset['SOURCE'][0],
-                              order=cfg_dataset['ORDER'], load_forces=True, symmetry=cfg_dataset['SYMMETRY'],
+                              order=cfg_dataset['ORDER'], load_gradients=True, symmetry=cfg_dataset['SYMMETRY'],
                               atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
         NCONFIGS = dataset.X.size()[0]
@@ -156,7 +156,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
         assert len(anchor_pos) == 3
 
         dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=cfg_dataset['SOURCE'][0],
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              order=cfg_dataset['ORDER'], load_gradients=False, symmetry=cfg_dataset['SYMMETRY'],
                               atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
                               anchor_pos=cfg_dataset['ANCHOR_POSITIONS'])
 
@@ -209,7 +209,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
             assert False
 
         dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEC', file_path=cfg_dataset['SOURCE'][0],
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              order=cfg_dataset['ORDER'], load_gradients=False, symmetry=cfg_dataset['SYMMETRY'],
                               atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
         nconfigs = len(dataset.xyz_configs)
@@ -256,7 +256,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
         datasets = [
             PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=cfg_dataset['SOURCE'][0],
-                        order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
+                        order=cfg_dataset['ORDER'], load_gradients=False, symmetry=sg,
                         atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
             for sg in qmodel_structure.keys()
         ]
@@ -321,7 +321,7 @@ def make_dataset(cfg_dataset, dataset_fpaths):
 
         for file_path in cfg_dataset['SOURCE']:
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ=cfg_dataset['TYPE'], file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
-                                  load_forces=cfg_dataset['LOAD_FORCES'], atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+                                  load_gradients=cfg_dataset['LOAD_GRADIENTS'], atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
             if GLOBAL_SET:
                 assert GLOBAL_NATOMS == dataset.NATOMS

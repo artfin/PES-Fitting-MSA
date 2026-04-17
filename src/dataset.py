@@ -67,8 +67,8 @@ class XYZConfigPair:
     z2      : np.array
     energy  : Optional[np.array] = None
     dipole  : Optional[np.array] = None
-    forces1 : Optional[np.array] = None
-    forces2 : Optional[np.array] = None
+    gradients1 : Optional[np.array] = None
+    gradients2 : Optional[np.array] = None
 
 @dataclass
 class PolyDataset_t:
@@ -88,7 +88,7 @@ class PolyDataset_t:
     grm          : Optional[torch.Tensor] = None
 
 
-def load_npz(fpath, load_forces=False, load_dipole=False):
+def load_npz(fpath, load_gradients=False, load_dipole=False):
     fd = np.load(fpath)
 
     if "theory" in fd:
@@ -108,7 +108,7 @@ def load_npz(fpath, load_forces=False, load_dipole=False):
         z        = fd['z']
 
         xyz_configs = []
-        if load_forces:
+        if load_gradients:
             for coords, energy, g in zip(fd['R'], fd['E'], fd['F']):
                 xyz_configs.append(
                     XYZConfig(
@@ -136,9 +136,9 @@ def load_npz(fpath, load_forces=False, load_dipole=False):
         assert fd['R1'].shape[0] == NCONFIGS
         assert fd['R2'].shape[0] == NCONFIGS
 
-        if load_forces:
-            assert 'F1' in fd and 'F2' in fd, "Forces requested but F1/F2 not found in NPZ file"
-            xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, forces1=f1, forces2=f2)
+        if load_gradients:
+            assert 'F1' in fd and 'F2' in fd, "Gradients requested but F1/F2 not found in NPZ file"
+            xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, gradients1=f1, gradients2=f2)
                            for c1, c2, energy, f1, f2 in zip(fd['R1'], fd['R2'], fd['E'], fd['F1'], fd['F2'])]
         elif load_dipole:
             xyz_configs = [XYZConfigPair(coords1=c1, coords2=c2, z1=z1, z2=z2, energy=energy, dipole=dipole)
@@ -228,7 +228,7 @@ def load_extxyz(fpath, atom_mapping=None):
     """
     Load extended XYZ file using the extxyz library.
 
-    Supports per-atom properties (forces, mol_id) and per-config properties (energy, dipole).
+    Supports per-atom properties (gradients, mol_id) and per-config properties (energy, dipole).
 
     If atom_mapping is provided, validates that mol_id in the file matches the expected
     molecule assignment from the config.
@@ -377,14 +377,14 @@ def prepare_grm(xyz_configs, anchor_pos):
     return torch.from_numpy(grm)
 
 class PolyDataset(Dataset):
-    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_forces=False, atom_mapping=None, variables=None, purify=False, anchor_pos=None):
+    def __init__(self, wdir, typ, file_path, order=None, symmetry=None, load_gradients=False, atom_mapping=None, variables=None, purify=False, anchor_pos=None):
         self.wdir = wdir
         logging.info("working directory: {}".format(self.wdir))
 
         self.typ          = typ
         self.order        = order
         self.symmetry     = symmetry
-        self.load_forces  = load_forces
+        self.load_gradients  = load_gradients
         self.atom_mapping = atom_mapping
         self.purify       = purify
 
@@ -410,11 +410,11 @@ class PolyDataset(Dataset):
 
         logging.info("Loading configurations from file_path: {}".format(file_path))
         if file_path.endswith(".xyzext"):
-            # Extended XYZ format with per-atom properties (forces, mol_id)
+            # Extended XYZ format with per-atom properties (gradients, mol_id)
             NATOMS, NCONFIGS, self.xyz_configs = load_extxyz(file_path, atom_mapping)
         elif file_path.endswith(".xyz"):
-            if load_forces:
-                logging.error("STORING/LOADING FORCES IN XYZ FILE IS NOT SUPPORTED FOR NOW")
+            if load_gradients:
+                logging.error("STORING/LOADING GRADIENTS IN XYZ FILE IS NOT SUPPORTED FOR NOW")
                 assert False
             if self.typ == 'ENERGY':
                 NATOMS, NCONFIGS, self.xyz_configs = load_xyz_with_energy(file_path)
@@ -426,7 +426,7 @@ class PolyDataset(Dataset):
             #write_npz("ch4-n2-rigid.npz", xyz_configs)
         elif file_path.endswith(".npz"):
             if self.typ == 'ENERGY':
-                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_forces)
+                NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_gradients)
             elif self.typ == 'DIPOLE':
                 assert anchor_pos is not None
                 NATOMS, NCONFIGS, self.xyz_configs = load_npz(file_path, load_dipole=True)
@@ -452,9 +452,9 @@ class PolyDataset(Dataset):
         #  X: values of polynomials
         # dX: derivatives of polynomials w.r.t. cartesian coordinates
         #  y: values of energies | dipoles
-        # dy: (minus) derivatives of energies w.r.t. cartesian coordinates [a.k.a forces]
+        # dy: derivatives of energies w.r.t. cartesian coordinates [dE/dx]
 
-        if self.load_forces:
+        if self.load_gradients:
             self.X, self.dX, self.y, self.dy = self.prepare_dataset_with_derivatives_from_configs()
         else:
             if self.typ == 'ENERGY':
@@ -546,7 +546,7 @@ class PolyDataset(Dataset):
 
             assert os.path.isfile(self.F_LIBNAME), "No F_BASIS_LIBRARY={} found".format(self.F_LIBNAME)
 
-            if self.load_forces:
+            if self.load_gradients:
                 self.F_DER_LIBNAME = os.path.join(self.wdir, 'f_gradbasis' + stub + '.so')
                 if not os.path.isfile(self.F_DER_LIBNAME):
                     from genpip import compile_derivatives_dlib_f
@@ -565,7 +565,7 @@ class PolyDataset(Dataset):
 
             assert os.path.isfile(self.C_LIBNAME), "No C_LIBRARY={} found".format(self.C_LIBNAME)
 
-            if self.load_forces:
+            if self.load_gradients:
                 self.C_DER_LIBNAME = os.path.join(self.wdir, 'c_jac' + stub + '.so')
                 if not os.path.isfile(self.C_DER_LIBNAME):
                     from genpip import compile_derivatives_dlib_c
@@ -738,10 +738,10 @@ class PolyDataset(Dataset):
                 for atom_idx, mapping in enumerate(self.atom_mapping):
                     (monomer, _), = mapping.items()
                     if monomer == 0:
-                        grad[ind, atom_idx, :] = xyz_config.forces1[iter1]
+                        grad[ind, atom_idx, :] = xyz_config.gradients1[iter1]
                         iter1 = iter1 + 1
                     elif monomer == 1:
-                        grad[ind, atom_idx, :] = xyz_config.forces2[iter2]
+                        grad[ind, atom_idx, :] = xyz_config.gradients2[iter2]
                         iter2 = iter2 + 1
 
         X  = torch.from_numpy(poly)
@@ -1094,7 +1094,7 @@ class PolyDataset(Dataset):
         self.evmono.argtypes = [ndpointer(ct.c_double, ndim=1, flags="F"), ndpointer(ct.c_double, ndim=1, flags="F")]
         self.evpoly.argtypes = [ndpointer(ct.c_double, ndim=1, flags="F"), ndpointer(ct.c_double, ndim=1, flags="F")]
 
-        if self.load_forces:
+        if self.load_gradients:
             logging.info("Loading and setting up Fortran procedures for derivatives evaluation from LIBNAME: {}".format(self.F_DER_LIBNAME))
             derlib = ct.CDLL(self.F_DER_LIBNAME)
 
@@ -1116,7 +1116,7 @@ class PolyDataset(Dataset):
         from numpy.ctypeslib import ndpointer
         self.evpoly.argtypes = [ndpointer(NP_FLOAT, flags="C"), ndpointer(NP_FLOAT, flags="C")]
 
-        if self.load_forces:
+        if self.load_gradients:
             logging.info("Loading and setting up C procedures for derivatives evaluation from LIBNAME: {}".format(self.C_DER_LIBNAME))
             derlib = ct.CDLL(self.C_DER_LIBNAME)
             proc_name = 'evpoly_jac_{}_{}'.format(self.symmetry.replace(' ', '_'), self.order)

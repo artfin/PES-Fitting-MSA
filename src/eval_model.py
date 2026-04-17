@@ -181,7 +181,7 @@ class Evaluator:
 
         return dip_pred[:, 1:]
 
-    def forces(self, dataset):
+    def gradients(self, dataset):
         Xtr = self.xscaler.transform(dataset.X)
         Xtr = torch.from_numpy(Xtr).to(TORCH_FLOAT)
 
@@ -197,12 +197,12 @@ class Evaluator:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(TORCH_FLOAT)
         dEdp = torch.div(dEdp, x_scale)
 
-        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
         dEdx = torch.einsum('ij,ijk -> ik', dEdp, dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(TORCH_FLOAT)
-        dEdx = -torch.mul(dEdx, y_scale)
+        dEdx = torch.mul(dEdx, y_scale)
 
         return dEdx
 
@@ -335,7 +335,7 @@ def plot_errors_for_files(cfg_dataset, evaluator, EMAX, figpath=None):
 
     for file_path in file_paths:
         pd = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=file_path, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
-                         load_forces=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+                         load_gradients=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
         intermol_energy = evaluator.energy(pd.X)
         error = (pd.y - intermol_energy).detach().numpy()
@@ -396,7 +396,7 @@ def plot_errors_for_files(cfg_dataset, evaluator, EMAX, figpath=None):
 
     plt.show()
 
-def model_evaluation_forces(evaluator, train, val, test, emax):
+def model_evaluation_gradients(evaluator, train, val, test, emax):
     natoms = train.NATOMS
 
     rmse = []
@@ -407,29 +407,29 @@ def model_evaluation_forces(evaluator, train, val, test, emax):
             continue
 
         if emax is not None:
-            ind         = (sampling_set.y < emax).nonzero()[:,0]
-            fs          = sampling_set.dy[ind]
-            forces_pred = evaluator.forces(sampling_set)
-            preds       = forces_pred[ind].reshape(-1, natoms, 3)
+            ind            = (sampling_set.y < emax).nonzero()[:,0]
+            gs             = sampling_set.dy[ind]
+            gradients_pred = evaluator.gradients(sampling_set)
+            preds          = gradients_pred[ind].reshape(-1, natoms, 3)
         else:
-            fs          = sampling_set.dy
-            forces_pred = evaluator.forces(sampling_set)
-            preds       = forces_pred.reshape(-1, natoms, 3)
+            gs             = sampling_set.dy
+            gradients_pred = evaluator.gradients(sampling_set)
+            preds          = gradients_pred.reshape(-1, natoms, 3)
 
-        df = fs - preds
-        _mse = torch.mean(torch.einsum('ijk,ijk->i', df, df)) / (3.0 * natoms)
+        dg = gs - preds
+        _mse = torch.mean(torch.einsum('ijk,ijk->i', dg, dg)) / (3.0 * natoms)
         _rmse = torch.sqrt(_mse)
         rmse.append(_rmse)
 
-    rmse_kcal_mol_A = [ff / KCALTOCM / BOHRTOANG for ff in rmse]
+    rmse_kcal_mol_A = [gg / KCALTOCM / BOHRTOANG for gg in rmse]
 
     if emax is not None:
-        logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
-        logging.info("[< {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
+        logging.info("[< {:.0f} cm-1] RMSE GRADIENT: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
+        logging.info("[< {:.0f} cm-1] RMSE GRADIENT: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
     else:
         emax = torch.max(train.y)
-        logging.info("[full energy range: < {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
-        logging.info("[full energy range: < {:.0f} cm-1] RMSE FORCE: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
+        logging.info("[full energy range: < {:.0f} cm-1] RMSE GRADIENT: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} cm-1/bohr".format(emax, *rmse))
+        logging.info("[full energy range: < {:.0f} cm-1] RMSE GRADIENT: (train) {:.5f} \t (val) {:.5f} \t (test) {:.5f} kcal/mol/A".format(emax, *rmse_kcal_mol_A))
 
 
 def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes=False):
@@ -524,8 +524,8 @@ if __name__ == '__main__':
                         help="whether to create an overview of errors in dipole over train/val/test sets [False]")
     parser.add_argument("--energy_overview", required=False, type=str2bool, default=False,
                         help="whether to create an overview of errors in energies over train/val/test sets [False]")
-    parser.add_argument("--forces_overview", required=False, type=str2bool, default=False,
-                        help="whether to create an overview of errors in forces over trian/val/test sets [False]")
+    parser.add_argument("--gradients_overview", required=False, type=str2bool, default=False,
+                        help="whether to create an overview of errors in gradients over trian/val/test sets [False]")
     parser.add_argument("--ch4_overview",  required=False, type=str2bool, default=False,
                         help="whether to create an overview over CH4 energies [False]")
     parser.add_argument("--add_reference_pes", required=False, type=str2bool, default=False,
@@ -548,7 +548,7 @@ if __name__ == '__main__':
     logging.info("Values of optional parameters:")
     logging.info("  chk_name:          {}".format(args.chk_name))
     logging.info("  energy_overview:   {}".format(args.energy_overview))
-    logging.info("  forces_overview:   {}".format(args.forces_overview))
+    logging.info("  gradients_overview:   {}".format(args.gradients_overview))
     logging.info("  dipole_overview:   {}".format(args.dipole_overview))
     logging.info("  ch4_overview:      {}".format(args.ch4_overview))
     logging.info("  add_reference:     {}".format(args.add_reference_pes))
@@ -579,7 +579,7 @@ if __name__ == '__main__':
         if cfg['TYPE'] == 'DIPOLE':
             cfg_dataset.setdefault("PURIFY", False)
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLE', file_path=args.test_file,
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              order=cfg_dataset['ORDER'], load_gradients=False, symmetry=cfg_dataset['SYMMETRY'],
                               atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'],
                               anchor_pos=cfg_dataset['ANCHOR_POSITIONS'])
 
@@ -636,7 +636,7 @@ if __name__ == '__main__':
 
             datasets = [
                 PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEQ', file_path=args.test_file,
-                            order=cfg_dataset['ORDER'], load_forces=False, symmetry=sg,
+                            order=cfg_dataset['ORDER'], load_gradients=False, symmetry=sg,
                             atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
                 for sg in qmodel_structure.keys()
             ]
@@ -702,7 +702,7 @@ if __name__ == '__main__':
         elif cfg['TYPE'] == 'DIPOLEC':
             cfg_dataset.setdefault("PURIFY", False)
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='DIPOLEC', file_path=args.test_file,
-                              order=cfg_dataset['ORDER'], load_forces=False, symmetry=cfg_dataset['SYMMETRY'],
+                              order=cfg_dataset['ORDER'], load_gradients=False, symmetry=cfg_dataset['SYMMETRY'],
                               atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
             dip_pred = evaluator.dipolec(dataset.X)
@@ -724,12 +724,12 @@ if __name__ == '__main__':
             cfg_dataset.setdefault("PURIFY", False)
 
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=args.test_file, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
-                                  load_forces=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+                                  load_gradients=False, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
             model_evaluation_energy(evaluator, dataset, None, None, args.EMAX, args.add_reference_pes)
         else:
-            if not args.forces_overview:
-                cfg_dataset['LOAD_FORCES'] = False
+            if not args.gradients_overview:
+                cfg_dataset['LOAD_GRADIENTS'] = False
 
             train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
 
@@ -743,7 +743,7 @@ if __name__ == '__main__':
 
             plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, figpath=errors_fpath, add_reference_pes=args.add_reference_pes)
 
-    if args.forces_overview:
+    if args.gradients_overview:
         if args.test_file:
             assert os.path.isfile(args.test_file), "File with test configurations does exist at {}".format(args.test_file)
 
@@ -751,12 +751,12 @@ if __name__ == '__main__':
             cfg_dataset.setdefault("PURIFY", False)
 
             dataset = PolyDataset(wdir=cfg_dataset['EXTERNAL_FOLDER'], typ='ENERGY', file_path=args.test_file, order=cfg_dataset['ORDER'], symmetry=cfg_dataset['SYMMETRY'],
-                                  load_forces=True, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
+                                  load_gradients=True, atom_mapping=cfg_dataset['ATOM_MAPPING'], variables=cfg_dataset['VARIABLES'], purify=cfg_dataset['PURIFY'])
 
-            model_evaluation_forces(evaluator, dataset, None, None, args.EMAX)
+            model_evaluation_gradients(evaluator, dataset, None, None, args.EMAX)
         else:
             train, val, test = load_dataset(cfg_dataset, cfg['TYPE'])
-            model_evaluation_forces(evaluator, train, val, test, args.EMAX)
+            model_evaluation_gradients(evaluator, train, val, test, args.EMAX)
 
     if args.ch4_overview:
         overview_png = None

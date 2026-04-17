@@ -362,12 +362,12 @@ class WRMSELoss_Ratio_dipole(torch.nn.Module):
         #return 1000.0 * torch.mean(torch.abs(wdd))
 
 
-class WMSELoss_Ratio_wforces(torch.nn.Module):
-    def __init__(self, natoms, dwt=1.0, f_lambda=1.0):
+class WMSELoss_Ratio_wgradients(torch.nn.Module):
+    def __init__(self, natoms, dwt=1.0, g_lambda=1.0):
         super().__init__()
         self.natoms = natoms
         self.dwt    = torch.tensor(dwt).to(DEVICE)
-        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
+        self.g_lambda = torch.tensor(g_lambda).to(DEVICE)
 
         self.en_mean = None
         self.en_std  = None
@@ -377,23 +377,23 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         self.en_std  = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_Ratio_wforces(natoms={}, dwt={}, f_lambda={})".format(self.natoms, self.dwt, self.f_lambda)
+        return "WMSELoss_Ratio_wgradients(natoms={}, dwt={}, g_lambda={})".format(self.natoms, self.dwt, self.g_lambda)
 
-    def forward(self, en, en_pred, forces, forces_pred):
-        wmse_en, wmse_forces = self.forward_separate(en, en_pred, forces, forces_pred)
-        return wmse_en + wmse_forces
+    def forward(self, en, en_pred, gradients, gradients_pred):
+        wmse_en, wmse_gradients = self.forward_separate(en, en_pred, gradients, gradients_pred)
+        return wmse_en + wmse_gradients
 
     def descale_energies(self, en):
         return en * self.en_std + self.en_mean
 
-    def forward_separate(self, en, en_pred, forces, forces_pred):
+    def forward_separate(self, en, en_pred, gradients, gradients_pred):
         assert self.en_mean is not None
         assert self.en_std is not None
 
         en_pred = en_pred.to(DEVICE)
 
         # descale energies
-        # forces are supposed to be already unnormalized
+        # gradients are supposed to be already unnormalized
         _en      = self.descale_energies(en)
         _en_pred = self.descale_energies(en_pred)
 
@@ -402,37 +402,37 @@ class WMSELoss_Ratio_wforces(torch.nn.Module):
         w       = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
-        nconfigs = forces.size()[0]
+        nconfigs = gradients.size()[0]
 
-        forces_pred = forces_pred.reshape(nconfigs, self.natoms, 3)
-        forces    = forces.reshape(nconfigs, self.natoms, 3)
+        gradients_pred = gradients_pred.reshape(nconfigs, self.natoms, 3)
+        gradients    = gradients.reshape(nconfigs, self.natoms, 3)
 
-        df = forces - forces_pred
+        df = gradients - gradients_pred
         wdf = torch.einsum('ijk,i->ijk', df, w)
-        wmse_forces = self.f_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
+        wmse_gradients = self.g_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
 
-        return wmse_en, wmse_forces
+        return wmse_en, wmse_gradients
 
 
-class WMSELoss_TrustRegion_wforces(torch.nn.Module):
+class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
     """
-    Memory-efficient trust region loss for force training with optional focal
+    Memory-efficient trust region loss for gradient training with optional focal
     weighting and an optional soft boundary.
 
-    Forces are pre-filtered before being passed to this loss (computed only
+    Gradients are pre-filtered before being passed to this loss (computed only
     for configs in the trust / active set). This avoids OOM by never computing
-    forces for configs outside the active set.
+    gradients for configs outside the active set.
 
     Two modes (selected by `soft_boundary`):
 
       Hard mask (default; backward-compatible):
         Membership in the trust set is binary (energy error < trust_threshold).
-        Force loss is normalized by n_in_trust.
+        Gradient loss is normalized by n_in_trust.
 
       Soft boundary (soft_boundary=True):
         Each config carries a per-config weight
             phi(e_i) = sigmoid((trust_threshold - e_i) / soft_scale) in [0, 1]
-        smoothly decaying with energy error. Force loss is normalized by the
+        smoothly decaying with energy error. Gradient loss is normalized by the
         SUM of weights, so downweighting actually reduces a config's
         contribution rather than redistributing it.
 
@@ -442,35 +442,35 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         Soft mode removes the discontinuous "evasion" incentive of the hard
         mask, where pushing a config across `tau` discretely zeroed its
-        force loss.
+        gradient loss.
 
     Focal weighting (when focal_gamma > 0) up-weights hard-to-fit configs.
 
     Expected inputs:
     - en, en_pred:        full energy tensors (all configs)
-    - forces_subset:      reference forces for active-set configs
-    - forces_pred_subset: predicted forces for active-set configs
+    - gradients_subset:      reference gradients for active-set configs
+    - gradients_pred_subset: predicted gradients for active-set configs
     - trust_indices:      indices of active-set configs
-    - force_weights:      optional per-config soft phi values for the active
+    - gradient_weights:      optional per-config soft phi values for the active
                           set; when None we are in hard-mask mode.
     """
-    def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0,
+    def __init__(self, natoms, dwt=1.0, g_lambda=1.0, trust_threshold=100.0,
                  soft_boundary=False, soft_scale=None,
                  focal_gamma=0.0, focal_ema_decay=0.95,
-                 force_clamp_quantile=None):
+                 gradient_clamp_quantile=None):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
-        self.f_lambda = torch.tensor(f_lambda).to(DEVICE)
+        self.g_lambda = torch.tensor(g_lambda).to(DEVICE)
         self.trust_threshold = trust_threshold
         # Soft boundary parameters (False = hard mask, backward-compatible)
         self.soft_boundary = soft_boundary
         self.soft_scale = soft_scale  # cm^-1; defaults to trust_threshold/4
         self.focal_gamma = focal_gamma
         self.focal_ema_decay = focal_ema_decay
-        # Per-config force-loss clamping: clamp at this quantile (e.g. 0.95).
+        # Per-config gradient-loss clamping: clamp at this quantile (e.g. 0.95).
         # None = no clamping (backward-compatible).
-        self.force_clamp_quantile = force_clamp_quantile
+        self.gradient_clamp_quantile = gradient_clamp_quantile
 
         self.en_mean = None
         self.en_std = None
@@ -486,14 +486,14 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         self.en_std = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return ("WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, "
+        return ("WMSELoss_TrustRegion_wgradients(natoms={}, dwt={}, g_lambda={}, "
                 "trust_threshold={}, soft_boundary={}, soft_scale={}, "
                 "focal_gamma={}, focal_ema_decay={}, "
-                "force_clamp_quantile={})").format(
-            self.natoms, self.dwt, self.f_lambda, self.trust_threshold,
+                "gradient_clamp_quantile={})").format(
+            self.natoms, self.dwt, self.g_lambda, self.trust_threshold,
             self.soft_boundary, self.soft_scale,
             self.focal_gamma, self.focal_ema_decay,
-            self.force_clamp_quantile)
+            self.gradient_clamp_quantile)
 
     @staticmethod
     def soft_phi(energy_errors, trust_threshold, soft_scale=None):
@@ -554,27 +554,27 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
 
         return w
 
-    def forward(self, en, en_pred, forces_subset, forces_pred_subset,
-                trust_indices, force_weights=None):
+    def forward(self, en, en_pred, gradients_subset, gradients_pred_subset,
+                trust_indices, gradient_weights=None):
         """
-        Compute combined energy + force loss.
-        Energy loss is computed on ALL configs, force loss only on the
+        Compute combined energy + gradient loss.
+        Energy loss is computed on ALL configs, gradient loss only on the
         active (trust) subset.
 
-        force_weights: optional 1-D tensor of soft phi values for the
+        gradient_weights: optional 1-D tensor of soft phi values for the
         active subset (same length as trust_indices). If provided we are
-        in soft-boundary mode and the force loss is normalized by the
+        in soft-boundary mode and the gradient loss is normalized by the
         SUM of these weights; if None we are in hard-mask mode (count
         normalization, weights effectively 1.0).
         """
-        wmse_en, wmse_forces = self.forward_separate(
-            en, en_pred, forces_subset, forces_pred_subset,
-            trust_indices, force_weights
+        wmse_en, wmse_gradients = self.forward_separate(
+            en, en_pred, gradients_subset, gradients_pred_subset,
+            trust_indices, gradient_weights
         )
-        return wmse_en + wmse_forces
+        return wmse_en + wmse_gradients
 
-    def forward_separate(self, en, en_pred, forces_subset, forces_pred_subset,
-                         trust_indices, force_weights=None):
+    def forward_separate(self, en, en_pred, gradients_subset, gradients_pred_subset,
+                         trust_indices, gradient_weights=None):
         assert self.en_mean is not None
         assert self.en_std is not None
 
@@ -590,51 +590,51 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         # Energy loss on ALL configs
         wmse_en = (w * (_en - _en_pred)**2).mean()
 
-        # Force loss on active subset only
+        # Gradient loss on active subset only
         n_in_trust = len(trust_indices)
         if n_in_trust > 0:
             # Combined per-config weight on the active subset:
             #   hard mask: w_trusted = w_energy * w_focal
             #   soft mask: w_trusted = w_energy * w_focal * phi(e_i)
             w_trusted = w[trust_indices]
-            if force_weights is not None:
-                w_trusted = w_trusted * force_weights
+            if gradient_weights is not None:
+                w_trusted = w_trusted * gradient_weights
 
-            # Reshape forces
-            forces_subset = forces_subset.reshape(n_in_trust, self.natoms, 3)
-            forces_pred_subset = forces_pred_subset.reshape(n_in_trust, self.natoms, 3)
+            # Reshape gradients
+            gradients_subset = gradients_subset.reshape(n_in_trust, self.natoms, 3)
+            gradients_pred_subset = gradients_pred_subset.reshape(n_in_trust, self.natoms, 3)
 
-            # Per-config weighted force squared error
-            df = forces_subset - forces_pred_subset
+            # Per-config weighted gradient squared error
+            df = gradients_subset - gradients_pred_subset
             per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
             contrib = w_trusted * per_config_sq               # (n_in_trust,)
 
             # Clamp outlier per-config contributions at a quantile threshold.
             # Gradient is zeroed for clamped configs, preventing them from
             # dominating the L-BFGS search direction.
-            if self.force_clamp_quantile is not None:
+            if self.gradient_clamp_quantile is not None:
                 with torch.no_grad():
                     threshold = torch.quantile(
-                        contrib, self.force_clamp_quantile
+                        contrib, self.gradient_clamp_quantile
                     )
                 contrib = torch.clamp(contrib, max=threshold)
 
             sq = contrib.sum()
 
-            if force_weights is not None:
+            if gradient_weights is not None:
                 # Soft mode: normalize by sum of soft weights so that
                 # downweighting a config genuinely shrinks its contribution.
-                denom = (force_weights.sum().clamp(min=1.0)
+                denom = (gradient_weights.sum().clamp(min=1.0)
                          * 3.0 * self.natoms)
             else:
                 # Hard mode: original count-based normalization.
                 denom = 3.0 * self.natoms * n_in_trust
 
-            wmse_forces = self.f_lambda * sq / denom
+            wmse_gradients = self.g_lambda * sq / denom
         else:
-            wmse_forces = torch.tensor(0.0, device=DEVICE)
+            wmse_gradients = torch.tensor(0.0, device=DEVICE)
 
-        return wmse_en, wmse_forces
+        return wmse_en, wmse_gradients
 
     def forward_energy_only(self, en, en_pred):
         """Fallback for when no configs are in trust region."""
@@ -902,11 +902,11 @@ class Training:
         self.loss_fn  = self.build_loss()
         self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
 
-        # Track when force training starts for progressive F_LAMBDA ramping
-        if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('USE_FORCES_AFTER_EPOCH') is None:
-            self.force_start_epoch = 0
+        # Track when gradient training starts for progressive G_LAMBDA ramping
+        if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH') is None:
+            self.gradient_start_epoch = 0
         else:
-            self.force_start_epoch = None
+            self.gradient_start_epoch = None
 
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
@@ -923,24 +923,24 @@ class Training:
 
         # Trust-region diagnostics state (lazy init in train_epoch).
         # _prev_trust_mask: bool tensor (N,) -- last epoch's membership
-        # _prev_train_force_errors: float tensor (N,) -- per-config train force
+        # _prev_train_gradient_errors: float tensor (N,) -- per-config train gradient
         #     RMSE from the last validation pass; used to test the eviction signal
         # _trust_flip_count: int tensor (N,) -- cumulative # times each config
         #     has toggled in/out of the trust set across training
         # _trust_history_path: where to write per-epoch CSV summary
         self._prev_trust_mask = None
-        self._prev_train_force_errors = None
+        self._prev_train_gradient_errors = None
         self._trust_flip_count = None
         self._trust_history_path = os.path.join(
             self.model_folder, "{}.trust_history.csv".format(model_name)
         )
         self._trust_history_initialized = False
 
-        # Per-epoch force-loss contribution + phi histogram (active set only).
-        self._force_diag_path = os.path.join(
-            self.model_folder, "{}.force_diagnostics.csv".format(model_name)
+        # Per-epoch gradient-loss contribution + phi histogram (active set only).
+        self._gradient_diag_path = os.path.join(
+            self.model_folder, "{}.gradient_diagnostics.csv".format(model_name)
         )
-        self._force_diag_initialized = False
+        self._gradient_diag_initialized = False
 
         # L-BFGS line-search telemetry (state inspected after optimizer.step).
         self._lbfgs_diag_path = os.path.join(
@@ -1007,22 +1007,22 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'FORCE_CLAMP_QUANTILE')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'GRADIENT_CLAMP_QUANTILE')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
         # have all defaults in the same place and set them to configuration if the value is omitted in the YAML file
         self.cfg_loss.setdefault('LAMBDA_Q', 1.0e3)
-        self.cfg_loss.setdefault('USE_FORCES_AFTER_EPOCH', None)
-        self.cfg_loss.setdefault('USE_FORCES', False)
-        self.cfg_loss.setdefault('F_LAMBDA_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('USE_GRADIENTS_AFTER_EPOCH', None)
+        self.cfg_loss.setdefault('USE_GRADIENTS', False)
+        self.cfg_loss.setdefault('G_LAMBDA_RAMP_EPOCHS', 0)
         self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
         self.cfg_loss.setdefault('TRUST_SOFT_BOUNDARY', False)
         self.cfg_loss.setdefault('TRUST_SOFT_SCALE', None)
         self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
-        self.cfg_loss.setdefault('FORCE_CLAMP_QUANTILE', None)
+        self.cfg_loss.setdefault('GRADIENT_CLAMP_QUANTILE', None)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -1034,52 +1034,52 @@ class Training:
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
             Eref = self.cfg_loss.get('EREF', 2000.0)
             loss_fn = WMSELoss_Boltzmann(Eref=Eref)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             loss_fn = WRMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
             dwt = self.cfg_loss.get('dwt', 1.0)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             loss_fn = WMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
 
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WRMSELoss_PS(Emax=Emax)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
             Emax = self.cfg_loss.get('EMAX', 2000.0)
             loss_fn = WMSELoss_PS(Emax=Emax)
 
 
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_FORCES']:
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_GRADIENTS']:
             dwt = self.cfg_loss.get('dwt', 1.0)
-            f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
+            g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             if trust_threshold is not None:
-                # Use memory-efficient trust region loss that expects pre-filtered forces
+                # Use memory-efficient trust region loss that expects pre-filtered gradients
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
                 soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
-                force_clamp_quantile = self.cfg_loss.get('FORCE_CLAMP_QUANTILE', None)
-                loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda,
+                gradient_clamp_quantile = self.cfg_loss.get('GRADIENT_CLAMP_QUANTILE', None)
+                loss_fn = WMSELoss_TrustRegion_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
                                                        trust_threshold=trust_threshold,
                                                        soft_boundary=soft_boundary,
                                                        soft_scale=soft_scale,
                                                        focal_gamma=focal_gamma,
                                                        focal_ema_decay=focal_ema_decay,
-                                                       force_clamp_quantile=force_clamp_quantile)
+                                                       gradient_clamp_quantile=gradient_clamp_quantile)
             else:
-                loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
+                loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda)
 
         else:
             print(self.cfg_loss)
@@ -1187,23 +1187,23 @@ class Training:
 
         for epoch in range(MAX_EPOCHS):
             # switch into mixed loss function: E + F
-            if self.cfg_loss['USE_FORCES_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_FORCES_AFTER_EPOCH']:
-                self.cfg_loss['USE_FORCES'] = True
+            if self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH']:
+                self.cfg_loss['USE_GRADIENTS'] = True
                 self.loss_fn = self.build_loss().to(DEVICE)
                 self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
-                self.force_start_epoch = epoch
+                self.gradient_start_epoch = epoch
 
                 self.es.reset()
 
                 # Reset L-BFGS curvature history. The stored (s_k, y_k) pairs
                 # describe the energy-only loss surface and produce degenerate
-                # search directions on the new energy+force surface, causing
+                # search directions on the new energy+gradient surface, causing
                 # the Wolfe line search to return t=0 indefinitely.
                 if isinstance(self.optimizer, torch.optim.LBFGS):
                     self.optimizer.state.clear()
                     self._lbfgs_prev_n_iter = 0
                     self._lbfgs_prev_func_evals = 0
-                    logging.info("Reset L-BFGS state at force inclusion (epoch {})".format(epoch))
+                    logging.info("Reset L-BFGS state at gradient inclusion (epoch {})".format(epoch))
 
                 # Reset LR to initial value so the optimizer has full step
                 # budget to explore the new loss landscape.
@@ -1211,24 +1211,24 @@ class Training:
                 for pg in self.optimizer.param_groups:
                     pg['lr'] = initial_lr
                 self.scheduler = self.build_scheduler()
-                logging.info("Reset LR to {} and rebuilt scheduler at force inclusion".format(initial_lr))
+                logging.info("Reset LR to {} and rebuilt scheduler at gradient inclusion".format(initial_lr))
 
-            # Progressive F_LAMBDA ramp
-            if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('F_LAMBDA_RAMP_EPOCHS', 0) > 0:
-                ramp_epochs = self.cfg_loss['F_LAMBDA_RAMP_EPOCHS']
-                start_epoch = self.force_start_epoch if self.force_start_epoch is not None else 0
+            # Progressive G_LAMBDA ramp
+            if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('G_LAMBDA_RAMP_EPOCHS', 0) > 0:
+                ramp_epochs = self.cfg_loss['G_LAMBDA_RAMP_EPOCHS']
+                start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
                 progress = (epoch - start_epoch) / ramp_epochs
                 progress = max(0.0, min(1.0, progress))
-                target_f_lambda = self.cfg_loss.get('F_LAMBDA', 1.0)
-                current_f_lambda = target_f_lambda * progress
-                self.loss_fn.f_lambda = torch.tensor(current_f_lambda).to(DEVICE)
+                target_g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
+                current_g_lambda = target_g_lambda * progress
+                self.loss_fn.g_lambda = torch.tensor(current_g_lambda).to(DEVICE)
                 if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
-                    logging.info("F_LAMBDA ramp: epoch {}, progress {:.1%}, f_lambda = {:.4f}".format(epoch, progress, current_f_lambda))
+                    logging.info("G_LAMBDA ramp: epoch {}, progress {:.1%}, g_lambda = {:.4f}".format(epoch, progress, current_g_lambda))
 
             # Progressive trust-threshold annealing
-            if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
+            if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
                 ramp_epochs = self.cfg_loss['TRUST_THRESHOLD_RAMP_EPOCHS']
-                start_epoch = self.force_start_epoch if self.force_start_epoch is not None else 0
+                start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
                 progress = (epoch - start_epoch) / ramp_epochs
                 progress = max(0.0, min(1.0, progress))
                 target_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
@@ -1239,18 +1239,18 @@ class Training:
             else:
                 self.current_trust_threshold = None
 
-            # Periodic L-BFGS curvature reset. The combined energy+force
-            # surface evolves as F_LAMBDA ramps; stale curvature pairs cause
-            # the Wolfe line search to return t=0. Clearing the history forces
+            # Periodic L-BFGS curvature reset. The combined energy+gradient
+            # surface evolves as G_LAMBDA ramps; stale curvature pairs cause
+            # the Wolfe line search to return t=0. Clearing the history gradients
             # steepest-descent restart and fresh curvature accumulation.
             lbfgs_reset_interval = self.cfg_solver['OPTIMIZER'].get(
                 'LBFGS_RESET_INTERVAL', 0
             )
             if (lbfgs_reset_interval > 0
-                    and self.cfg_loss['USE_FORCES']
+                    and self.cfg_loss['USE_GRADIENTS']
                     and isinstance(self.optimizer, torch.optim.LBFGS)
-                    and epoch > self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', 0)
-                    and (epoch - self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', 0))
+                    and epoch > self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0)
+                    and (epoch - self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0))
                         % lbfgs_reset_interval == 0):
                 self.optimizer.state.clear()
                 self._lbfgs_prev_n_iter = 0
@@ -1292,7 +1292,7 @@ class Training:
 
         return self.model
 
-    def compute_forces(self, dataset):
+    def compute_gradients(self, dataset):
         Xtr = dataset.X
 
         Xtr.requires_grad = True
@@ -1307,19 +1307,19 @@ class Training:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
-        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
-        # `torch.einsum` throws a Runtime error without an explicit conversion to Double 
+        # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dEdx = -torch.mul(dEdx, y_scale)
+        dEdx = torch.mul(dEdx, y_scale)
 
         return y_pred, dEdx
 
-    def compute_forces_from_energy(self, X_subset, dX_subset, y_pred_subset):
+    def compute_gradients_from_energy(self, X_subset, dX_subset, y_pred_subset):
         """
-        Compute forces for a subset given pre-computed energy predictions.
+        Compute gradients for a subset given pre-computed energy predictions.
         This avoids a second forward pass through the model.
 
         Args:
@@ -1327,7 +1327,7 @@ class Training:
             dX_subset: Polynomial gradients for subset
             y_pred_subset: Energy predictions for subset (from same forward pass)
         """
-        logging.debug("compute_forces_from_energy: X_subset shape={}, dX_subset shape={}".format(
+        logging.debug("compute_gradients_from_energy: X_subset shape={}, dX_subset shape={}".format(
             X_subset.shape, dX_subset.shape))
 
         dEdp = torch.autograd.grad(
@@ -1342,12 +1342,12 @@ class Training:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
-        # force = -dE/dx = -\sigma(E) * dE/d(poly) * d(poly)/dx
+        # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dX_subset.double())
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dEdx = -torch.mul(dEdx, y_scale)
+        dEdx = torch.mul(dEdx, y_scale)
 
         return dEdx
 
@@ -1364,7 +1364,7 @@ class Training:
           trust_indices : 1-D LongTensor of active-set config indices
           trust_mask    : 1-D BoolTensor of shape (N,) indicating membership
           energy_errors : 1-D float tensor of |E_pred - E_true| (cm^-1)
-          force_weights : 1-D float tensor of phi(e_i) for the active set
+          gradient_weights : 1-D float tensor of phi(e_i) for the active set
                           in soft-boundary mode, or None in hard-mask mode
         """
         trust_threshold = getattr(self, 'current_trust_threshold', None)
@@ -1388,30 +1388,30 @@ class Training:
             energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
 
             if soft_boundary:
-                phi = WMSELoss_TrustRegion_wforces.soft_phi(
+                phi = WMSELoss_TrustRegion_wgradients.soft_phi(
                     energy_errors, trust_threshold, soft_scale=soft_scale
                 )
                 trust_mask = phi > soft_cutoff
                 trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
-                force_weights = phi[trust_indices]
+                gradient_weights = phi[trust_indices]
             else:
                 trust_mask = energy_errors < trust_threshold
                 trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
-                force_weights = None
+                gradient_weights = None
 
-        return trust_indices, trust_mask, energy_errors, force_weights
+        return trust_indices, trust_mask, energy_errors, gradient_weights
 
     def log_trust_region_diagnostics(self, epoch, trust_mask, energy_errors,
-                                     force_weights):
+                                     gradient_weights):
         """Diagnose trust-region evolution: churn, eviction signal, flip counts.
 
         Compares the current trust mask against the previous epoch's mask
-        and the per-config force errors recorded at the end of the previous
+        and the per-config gradient errors recorded at the end of the previous
         validation pass. Writes a CSV row per epoch and logs a summary.
 
         The eviction signal is the key check for "evasion" behavior:
         if configs that just LEFT the trust set had systematically higher
-        force errors than configs that STAYED, the optimizer is plausibly
+        gradient errors than configs that STAYED, the optimizer is plausibly
         gaming the boundary by pushing hard configs out.
         """
         N = trust_mask.numel()
@@ -1447,10 +1447,10 @@ class Training:
             flips = entered_mask | left_mask
             self._trust_flip_count[flips] += 1
 
-            # Eviction signal: compare prev-epoch force errors of left vs stayed.
-            if (self._prev_train_force_errors is not None
-                    and self._prev_train_force_errors.numel() == N):
-                pfe = self._prev_train_force_errors
+            # Eviction signal: compare prev-epoch gradient errors of left vs stayed.
+            if (self._prev_train_gradient_errors is not None
+                    and self._prev_train_gradient_errors.numel() == N):
+                pfe = self._prev_train_gradient_errors
                 if left > 0:
                     mean_err_left = float(pfe[left_mask].mean().item())
                     med_err_left  = float(pfe[left_mask].median().item())
@@ -1470,10 +1470,10 @@ class Training:
                 med_err_stayed = float('nan')
 
         # Soft-mode phi statistics (None in hard mode).
-        if force_weights is not None and force_weights.numel() > 0:
-            phi_sum = float(force_weights.sum().item())
-            phi_mean = float(force_weights.mean().item())
-            phi_min = float(force_weights.min().item())
+        if gradient_weights is not None and gradient_weights.numel() > 0:
+            phi_sum = float(gradient_weights.sum().item())
+            phi_mean = float(gradient_weights.mean().item())
+            phi_min = float(gradient_weights.min().item())
         else:
             phi_sum = float('nan')
             phi_mean = float('nan')
@@ -1486,7 +1486,7 @@ class Training:
 
         logging.info(
             "[trust-diag] epoch={} | n_in={}/{} ({:.1%}) | entered={} left={} "
-            "stable_in={} | prev-epoch force-RMSE: left={:.2f} stayed={:.2f} "
+            "stable_in={} | prev-epoch gradient-RMSE: left={:.2f} stayed={:.2f} "
             "(med {:.2f}/{:.2f}) | max_flips={}".format(
                 epoch, n_in, N, frac, entered, left, stable_in,
                 mean_err_left, mean_err_stayed,
@@ -1519,10 +1519,10 @@ class Training:
         # Snapshot current mask for next-epoch comparison.
         self._prev_trust_mask = cur.clone()
 
-    def log_force_loss_diagnostics(self, epoch, train_dy, train_dy_pred,
+    def log_gradient_loss_diagnostics(self, epoch, train_dy, train_dy_pred,
                                    train_e_d, train_e_pred,
-                                   trust_indices, force_weights):
-        """Per-config force-loss contribution + phi histogram on the active set.
+                                   trust_indices, gradient_weights):
+        """Per-config gradient-loss contribution + phi histogram on the active set.
 
         Contribution mirrors the loss term per config:
             c_i = phi_i * w_energy_i * w_focal_i * ||f_i - f_i_pred||^2 / (3 N_atoms)
@@ -1537,7 +1537,7 @@ class Training:
         n_active = int(trust_indices.numel())
 
         with torch.no_grad():
-            # Per-config force squared error on the active set.
+            # Per-config gradient squared error on the active set.
             dy_act      = train_dy[trust_indices]
             dy_pred_act = train_dy_pred[trust_indices]
             f_sq = (
@@ -1554,8 +1554,8 @@ class Training:
             else:
                 w_act = torch.ones(n_active, device=DEVICE)
 
-            if force_weights is not None:
-                phi_act = force_weights.view(-1).to(f_sq.dtype)
+            if gradient_weights is not None:
+                phi_act = gradient_weights.view(-1).to(f_sq.dtype)
             else:
                 phi_act = torch.ones(n_active, device=DEVICE, dtype=f_sq.dtype)
 
@@ -1577,7 +1577,7 @@ class Training:
             top5  = _tail_share(0.05)
             top10 = _tail_share(0.10)
 
-            if force_weights is not None:
+            if gradient_weights is not None:
                 pq = torch.quantile(phi_cpu, qs[:5].to(phi_cpu.dtype)).tolist()
                 # Bin phi into membership categories.
                 bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
@@ -1589,9 +1589,9 @@ class Training:
                 pq = [float('nan')] * 5
                 bin_counts = [0] * 5  # all entries are phi=1, hard mode N/A
 
-        if not self._force_diag_initialized:
+        if not self._gradient_diag_initialized:
             try:
-                with open(self._force_diag_path, "w") as f:
+                with open(self._gradient_diag_path, "w") as f:
                     f.write(
                         "epoch,n_active,contrib_sum,contrib_max,"
                         "contrib_q10,contrib_q25,contrib_q50,contrib_q75,"
@@ -1600,11 +1600,11 @@ class Training:
                         "phi_q10,phi_q25,phi_q50,phi_q75,phi_q90,"
                         "phi_lt_25,phi_25_50,phi_50_75,phi_75_90,phi_ge_90\n"
                     )
-                self._force_diag_initialized = True
+                self._gradient_diag_initialized = True
             except OSError as e:
-                logging.warning("Could not initialize force diag CSV: {}".format(e))
+                logging.warning("Could not initialize gradient diag CSV: {}".format(e))
         try:
-            with open(self._force_diag_path, "a") as f:
+            with open(self._gradient_diag_path, "a") as f:
                 f.write(
                     "{},{},{:.6e},{:.6e},"
                     "{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},"
@@ -1620,11 +1620,11 @@ class Training:
                     )
                 )
         except OSError as e:
-            logging.warning("Could not append to force diag CSV: {}".format(e))
+            logging.warning("Could not append to gradient diag CSV: {}".format(e))
 
         logging.info(
-            "[force-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
-            "of force loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
+            "[grad-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
+            "of gradient loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
                 epoch, top1, top5, top10, cq[2], cq[5], contrib_max
             )
         )
@@ -1725,11 +1725,11 @@ class Training:
             )
         )
 
-    def compute_forces_eval(self, dataset):
+    def compute_gradients_eval(self, dataset):
         """
-        Compute forces for evaluation (no create_graph needed).
-        Much more memory efficient than compute_forces() since we don't need
-        to backpropagate through the force computation.
+        Compute gradients for evaluation (no create_graph needed).
+        Much more memory efficient than compute_gradients() since we don't need
+        to backpropagate through the gradient computation.
         """
         Xtr = dataset.X.clone().detach()
         Xtr.requires_grad = True
@@ -1749,12 +1749,12 @@ class Training:
         x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
         dEdp = torch.div(dEdp, x_scale)
 
-        # force = -dE/dx
+        # gradient = dE/dx
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
-        dEdx = -torch.mul(dEdx, y_scale)
+        dEdx = torch.mul(dEdx, y_scale)
 
         return y_pred.detach(), dEdx.detach()
 
@@ -1771,15 +1771,15 @@ class Training:
         X_subset = None
         dX_subset = None
         train_dy_subset = None
-        force_weights = None
+        gradient_weights = None
         energy_errors = None
         trust_mask = None
 
-        if self.cfg_loss['USE_FORCES']:
+        if self.cfg_loss['USE_GRADIENTS']:
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             if trust_threshold is not None:
                 use_trust_region = True
-                trust_indices, trust_mask, energy_errors, force_weights = \
+                trust_indices, trust_mask, energy_errors, gradient_weights = \
                     self.compute_trust_mask(self.train)
                 n_in_trust = len(trust_indices)
 
@@ -1790,7 +1790,7 @@ class Training:
                     train_dy_subset = self.train.dy[trust_indices]
 
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
-                if soft_boundary and force_weights is not None and n_in_trust > 0:
+                if soft_boundary and gradient_weights is not None and n_in_trust > 0:
                     logging.info(
                         "Trust region (soft): {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
@@ -1799,8 +1799,8 @@ class Training:
                             100.0 * n_in_trust / len(self.train.X),
                             energy_errors.min().item(), energy_errors.max().item(),
                             energy_errors.median().item(),
-                            force_weights.min().item(), force_weights.mean().item(),
-                            force_weights.sum().item()))
+                            gradient_weights.min().item(), gradient_weights.mean().item(),
+                            gradient_weights.sum().item()))
                 else:
                     logging.info(
                         "Trust region: {}/{} configs ({:.1f}%) | "
@@ -1812,7 +1812,7 @@ class Training:
 
                 # Run trust-region diagnostics (churn + eviction signal).
                 self.log_trust_region_diagnostics(
-                    epoch, trust_mask, energy_errors, force_weights
+                    epoch, trust_mask, energy_errors, gradient_weights
                 )
 
         def closure():
@@ -1821,26 +1821,26 @@ class Training:
 
             optimizer.zero_grad()
 
-            if self.cfg_loss['USE_FORCES']:
+            if self.cfg_loss['USE_GRADIENTS']:
                 if use_trust_region:
                     if n_in_trust > 0:
                         y_pred_subset = self.model(X_subset)
-                        train_dy_pred_subset = self.compute_forces_from_energy(
+                        train_dy_pred_subset = self.compute_gradients_from_energy(
                             X_subset, dX_subset, y_pred_subset
                         )
                         train_y_pred = self.model(self.train.X)
                         loss = self.loss_fn(
                             self.train.y, train_y_pred,
                             train_dy_subset, train_dy_pred_subset,
-                            trust_indices, force_weights
+                            trust_indices, gradient_weights
                         )
                     else:
                         # No configs in trust region yet - energy only
                         train_y_pred = self.model(self.train.X)
                         loss = self.loss_fn.forward_energy_only(self.train.y, train_y_pred)
                 else:
-                    # Original approach: compute forces for ALL configs
-                    train_y_pred, train_dy_pred = self.compute_forces(self.train)
+                    # Original approach: compute gradients for ALL configs
+                    train_y_pred, train_dy_pred = self.compute_gradients(self.train)
                     loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLE':
@@ -1911,17 +1911,17 @@ class Training:
         logging.info("(optimizer) current lr: {}".format(current_lr))
 
         # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
-        if self.cfg_loss['USE_FORCES']:
+        if self.cfg_loss['USE_GRADIENTS']:
             self.log_lbfgs_diagnostics(epoch, optimizer)
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
         self.model.eval()
 
-        if self.cfg_loss['USE_FORCES']:
-            # Use memory-efficient force evaluation (no create_graph)
-            train_y_pred, train_dy_pred = self.compute_forces_eval(self.train)
-            val_y_pred, val_dy_pred = self.compute_forces_eval(self.val)
+        if self.cfg_loss['USE_GRADIENTS']:
+            # Use memory-efficient gradient evaluation (no create_graph)
+            train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
+            val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
 
             # Compute energy metrics directly (works with any loss function)
             train_e_d    = self.loss_fn.descale_energies(self.train.y)
@@ -1934,30 +1934,30 @@ class Training:
             val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred))
             val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred) * (val_e_d - val_e_pred)))
 
-            # Compute force metrics directly
+            # Compute gradient metrics directly
             natoms   = self.train.NATOMS
             train_dy = self.train.dy.reshape(-1, 3 * natoms)
             val_dy   = self.val.dy.reshape(-1, 3 * natoms)
-            train_f_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
-            val_f_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
-            train_f_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
-            val_f_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))
+            train_g_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
+            val_g_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
+            train_g_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
+            val_g_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))
 
-            # Snapshot per-config train force RMSE for next-epoch trust-region
+            # Snapshot per-config train gradient RMSE for next-epoch trust-region
             # diagnostics (eviction signal: do "left" configs have higher
-            # force errors than "stayed" configs?).
+            # gradient errors than "stayed" configs?).
             with torch.no_grad():
                 per_config_f_rmse = torch.sqrt(
                     torch.sum((train_dy - train_dy_pred) ** 2, dim=1) / (3 * natoms)
                 ).detach()
-                self._prev_train_force_errors = per_config_f_rmse
+                self._prev_train_gradient_errors = per_config_f_rmse
 
-            # Per-config force-loss contribution + phi histogram on the active set.
+            # Per-config gradient-loss contribution + phi histogram on the active set.
             if use_trust_region and trust_indices is not None and n_in_trust > 0:
-                self.log_force_loss_diagnostics(
+                self.log_gradient_loss_diagnostics(
                     epoch, train_dy, train_dy_pred,
                     train_e_d, train_e_pred,
-                    trust_indices, force_weights,
+                    trust_indices, gradient_weights,
                 )
 
             # Compute weighted loss values for logging (energy component only for scheduler)
@@ -1970,11 +1970,11 @@ class Training:
             loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
             logging.info("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
-                                           (energy) MAE train:  {:.3f} cm-1; (force) MAE train:  {:.3f} cm-1/bohr\n \
-                                           (energy) MAE val:    {:.3f} cm-1; (force) MAE val:    {:.3f} cm-1/bohr\n \
-                                           (energy) RMSE train: {:.3f} cm-1; (force) RMSE train: {:.3f} cm-1/bohr\n \
-                                           (energy) RMSE val:   {:.3f} cm-1; (force) RMSE val:   {:.3f} cm-1/bohr".format(
-                epoch, loss_train_e, loss_val_e, train_e_mae, train_f_mae, val_e_mae, val_f_mae, train_e_rmse, train_f_rmse, val_e_rmse, val_f_rmse
+                                           (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
+                                           (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE val:   {:.3f} cm-1; (gradient) RMSE val:   {:.3f} cm-1/bohr".format(
+                epoch, loss_train_e, loss_val_e, train_e_mae, train_g_mae, val_e_mae, val_g_mae, train_e_rmse, train_g_rmse, val_e_rmse, val_g_rmse
             ))
 
             # value to be passed to EarlyStopping/ReduceLR mechanisms
@@ -1988,7 +1988,7 @@ class Training:
                 wandb.log({
                     "loss_train_e" : loss_train_e, "loss_val_e" : loss_val_e,
                     "train_e_mae" : train_e_mae, "train_e_rmse" : train_e_rmse, "val_e_mae" : val_e_mae, "val_e_rmse" : val_e_rmse,
-                    "train_f_mae" : train_f_mae, "train_f_rmse" : train_f_rmse, "val_f_mae" : val_f_mae, "val_f_rmse" : val_f_rmse,
+                    "train_g_mae" : train_g_mae, "train_g_rmse" : train_g_rmse, "val_g_mae" : val_g_mae, "val_g_rmse" : val_g_rmse,
                     "lr" : current_lr})
 
 
@@ -2099,31 +2099,31 @@ class Training:
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
         self.model.eval()
 
-        if self.cfg_loss['USE_FORCES']:
-            # Use memory-efficient force evaluation (no create_graph needed)
-            train_y_pred, train_dy_pred = self.compute_forces_eval(self.train)
-            val_y_pred, val_dy_pred     = self.compute_forces_eval(self.val)
-            test_y_pred, test_dy_pred   = self.compute_forces_eval(self.test)
+        if self.cfg_loss['USE_GRADIENTS']:
+            # Use memory-efficient gradient evaluation (no create_graph needed)
+            train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
+            val_y_pred, val_dy_pred     = self.compute_gradients_eval(self.val)
+            test_y_pred, test_dy_pred   = self.compute_gradients_eval(self.test)
 
             # Trust-region loss expects an extra trust_indices argument;
-            # for final evaluation we evaluate forces on the full dataset.
-            if isinstance(self.loss_fn, WMSELoss_TrustRegion_wforces):
+            # for final evaluation we evaluate gradients on the full dataset.
+            if isinstance(self.loss_fn, WMSELoss_TrustRegion_wgradients):
                 train_indices = torch.arange(len(self.train.y), device=DEVICE)
                 val_indices   = torch.arange(len(self.val.y), device=DEVICE)
                 test_indices  = torch.arange(len(self.test.y), device=DEVICE)
 
-                loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
-                loss_val_e, loss_val_f     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
-                loss_test_e, loss_test_f   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices)
+                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
+                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
+                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices)
             else:
-                loss_train_e, loss_train_f = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
-                loss_val_e, loss_val_f     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
-                loss_test_e, loss_test_f   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
+                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
+                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
             logging.info("Model evaluation after training:")
-            logging.info("Train      loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_f))
-            logging.info("Validation loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_f))
-            logging.info("Test       loss: {1:.{0}f} cm-1; force loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_f))
+            logging.info("Train      loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_g))
+            logging.info("Validation loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_g))
+            logging.info("Test       loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_g))
 
         elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
@@ -2226,7 +2226,7 @@ def load_dataset(cfg_dataset, typ):
         #  `str`  : path to folder with files to compute invariant polynomials: .f90 to compute polynomials (and their derivatives) + .MONO + .POLY 
         ('EXTERNAL_FOLDER', KeywordType.KEYWORD_OPTIONAL, os.path.join(BASEDIR, "datasets", "external")),
         # DATA SELECTION 
-        ('LOAD_FORCES',  KeywordType.KEYWORD_OPTIONAL, False), # `bool` : whether to load forces from dataset
+        ('LOAD_GRADIENTS',  KeywordType.KEYWORD_OPTIONAL, False), # `bool` : whether to load gradients from dataset
         ('ENERGY_LIMIT', KeywordType.KEYWORD_OPTIONAL, None),  # `bool` : NOT SUPPORTED now -- set an upper bound on energies in the training dataset 
         # DATASET PREPROCESSING
         ('NORMALIZE',        KeywordType.KEYWORD_REQUIRED, None),  # `str`  : how to perform data normalization  
@@ -2251,7 +2251,7 @@ def load_dataset(cfg_dataset, typ):
 
     if typ == 'DIPOLE':
         assert 'ANCHOR_POSITIONS' in cfg_dataset
-        assert not cfg_dataset['LOAD_FORCES']
+        assert not cfg_dataset['LOAD_GRADIENTS']
 
     VARIABLES_BLOCK_REQUIRED = ('INTRAMOLECULAR', 'INTERMOLECULAR', 'EXP_LAMBDA')
     for keyword in VARIABLES_BLOCK_REQUIRED:
