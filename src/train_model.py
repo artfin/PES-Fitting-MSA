@@ -456,7 +456,8 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     """
     def __init__(self, natoms, dwt=1.0, f_lambda=1.0, trust_threshold=100.0,
                  soft_boundary=False, soft_scale=None,
-                 focal_gamma=0.0, focal_ema_decay=0.95):
+                 focal_gamma=0.0, focal_ema_decay=0.95,
+                 force_clamp_quantile=None):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
@@ -467,6 +468,9 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
         self.soft_scale = soft_scale  # cm^-1; defaults to trust_threshold/4
         self.focal_gamma = focal_gamma
         self.focal_ema_decay = focal_ema_decay
+        # Per-config force-loss clamping: clamp at this quantile (e.g. 0.95).
+        # None = no clamping (backward-compatible).
+        self.force_clamp_quantile = force_clamp_quantile
 
         self.en_mean = None
         self.en_std = None
@@ -484,10 +488,12 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
     def __repr__(self):
         return ("WMSELoss_TrustRegion_wforces(natoms={}, dwt={}, f_lambda={}, "
                 "trust_threshold={}, soft_boundary={}, soft_scale={}, "
-                "focal_gamma={}, focal_ema_decay={})").format(
+                "focal_gamma={}, focal_ema_decay={}, "
+                "force_clamp_quantile={})").format(
             self.natoms, self.dwt, self.f_lambda, self.trust_threshold,
             self.soft_boundary, self.soft_scale,
-            self.focal_gamma, self.focal_ema_decay)
+            self.focal_gamma, self.focal_ema_decay,
+            self.force_clamp_quantile)
 
     @staticmethod
     def soft_phi(energy_errors, trust_threshold, soft_scale=None):
@@ -598,10 +604,22 @@ class WMSELoss_TrustRegion_wforces(torch.nn.Module):
             forces_subset = forces_subset.reshape(n_in_trust, self.natoms, 3)
             forces_pred_subset = forces_pred_subset.reshape(n_in_trust, self.natoms, 3)
 
-            # Weighted force MSE
+            # Per-config weighted force squared error
             df = forces_subset - forces_pred_subset
-            wdf = torch.einsum('ijk,i->ijk', df, w_trusted)
-            sq = torch.einsum('ijk,ijk->', wdf, df)
+            per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
+            contrib = w_trusted * per_config_sq               # (n_in_trust,)
+
+            # Clamp outlier per-config contributions at a quantile threshold.
+            # Gradient is zeroed for clamped configs, preventing them from
+            # dominating the L-BFGS search direction.
+            if self.force_clamp_quantile is not None:
+                with torch.no_grad():
+                    threshold = torch.quantile(
+                        contrib, self.force_clamp_quantile
+                    )
+                contrib = torch.clamp(contrib, max=threshold)
+
+            sq = contrib.sum()
 
             if force_weights is not None:
                 # Soft mode: normalize by sum of soft weights so that
@@ -989,7 +1007,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_FORCES', 'USE_FORCES_AFTER_EPOCH', 'F_LAMBDA', 'F_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'FORCE_CLAMP_QUANTILE')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -1004,6 +1022,7 @@ class Training:
         self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
+        self.cfg_loss.setdefault('FORCE_CLAMP_QUANTILE', None)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -1051,12 +1070,14 @@ class Training:
                 # Use memory-efficient trust region loss that expects pre-filtered forces
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
                 soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
+                force_clamp_quantile = self.cfg_loss.get('FORCE_CLAMP_QUANTILE', None)
                 loss_fn = WMSELoss_TrustRegion_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda,
                                                        trust_threshold=trust_threshold,
                                                        soft_boundary=soft_boundary,
                                                        soft_scale=soft_scale,
                                                        focal_gamma=focal_gamma,
-                                                       focal_ema_decay=focal_ema_decay)
+                                                       focal_ema_decay=focal_ema_decay,
+                                                       force_clamp_quantile=force_clamp_quantile)
             else:
                 loss_fn = WMSELoss_Ratio_wforces(natoms=self.train.NATOMS, dwt=dwt, f_lambda=f_lambda)
 
