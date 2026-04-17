@@ -457,7 +457,7 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, g_lambda=1.0, trust_threshold=100.0,
                  soft_boundary=False, soft_scale=None,
                  focal_gamma=0.0, focal_ema_decay=0.95,
-                 gradient_clamp_quantile=None):
+                 huber_delta=None):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
@@ -468,9 +468,9 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         self.soft_scale = soft_scale  # cm^-1; defaults to trust_threshold/4
         self.focal_gamma = focal_gamma
         self.focal_ema_decay = focal_ema_decay
-        # Per-config gradient-loss clamping: clamp at this quantile (e.g. 0.95).
-        # None = no clamping (backward-compatible).
-        self.gradient_clamp_quantile = gradient_clamp_quantile
+        # Pseudo-Huber cutoff on per-component gradient residuals (cm^-1/Bohr).
+        # None = pure MSE on gradients (backward-compatible).
+        self.huber_delta = huber_delta
 
         self.en_mean = None
         self.en_std = None
@@ -489,11 +489,11 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         return ("WMSELoss_TrustRegion_wgradients(natoms={}, dwt={}, g_lambda={}, "
                 "trust_threshold={}, soft_boundary={}, soft_scale={}, "
                 "focal_gamma={}, focal_ema_decay={}, "
-                "gradient_clamp_quantile={})").format(
+                "huber_delta={})").format(
             self.natoms, self.dwt, self.g_lambda, self.trust_threshold,
             self.soft_boundary, self.soft_scale,
             self.focal_gamma, self.focal_ema_decay,
-            self.gradient_clamp_quantile)
+            self.huber_delta)
 
     @staticmethod
     def soft_phi(energy_errors, trust_threshold, soft_scale=None):
@@ -604,21 +604,22 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
             gradients_subset = gradients_subset.reshape(n_in_trust, self.natoms, 3)
             gradients_pred_subset = gradients_pred_subset.reshape(n_in_trust, self.natoms, 3)
 
-            # Per-config weighted gradient squared error
+            # Per-config residual sum: MSE (sum of squared components) or
+            # pseudo-Huber (bounded-influence sum per component) when delta set.
             df = gradients_subset - gradients_pred_subset
-            per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
+            if self.huber_delta is not None:
+                # Pseudo-Huber: L_delta(r) = delta^2 * (sqrt(1 + (r/delta)^2) - 1)
+                # Quadratic for |r| << delta, linear for |r| >> delta. Smooth
+                # everywhere (L-BFGS-friendly). delta is derived from training
+                # data (~2 * MAD) so no new user-facing knob.
+                d = self.huber_delta
+                per_config_sq = torch.sum(
+                    d * d * (torch.sqrt(1.0 + (df / d) ** 2) - 1.0),
+                    dim=(1, 2),
+                )
+            else:
+                per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
             contrib = w_trusted * per_config_sq               # (n_in_trust,)
-
-            # Clamp outlier per-config contributions at a quantile threshold.
-            # Gradient is zeroed for clamped configs, preventing them from
-            # dominating the L-BFGS search direction.
-            if self.gradient_clamp_quantile is not None:
-                with torch.no_grad():
-                    threshold = torch.quantile(
-                        contrib, self.gradient_clamp_quantile
-                    )
-                contrib = torch.clamp(contrib, max=threshold)
-
             sq = contrib.sum()
 
             if gradient_weights is not None:
@@ -1007,7 +1008,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'GRADIENT_CLAMP_QUANTILE')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -1022,7 +1023,7 @@ class Training:
         self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
-        self.cfg_loss.setdefault('GRADIENT_CLAMP_QUANTILE', None)
+        self.cfg_loss.setdefault('USE_HUBER_GRADIENT', False)
 
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
@@ -1070,14 +1071,24 @@ class Training:
                 # Use memory-efficient trust region loss that expects pre-filtered gradients
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
                 soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
-                gradient_clamp_quantile = self.cfg_loss.get('GRADIENT_CLAMP_QUANTILE', None)
+                use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
+                huber_delta = None
+                if use_huber:
+                    mad = getattr(self.train, 'mad_grad_components', None)
+                    assert mad is not None and mad > 0, (
+                        "USE_HUBER_GRADIENT requires train.mad_grad_components; "
+                        "available only for gradient-loaded datasets.")
+                    # Huber 95%-efficiency constant at the normal is k = 1.345*sigma.
+                    # For Gaussian, sigma ~= 1.4826 * MAD, so k ~= 1.994 * MAD.
+                    huber_delta = 2.0 * float(mad)
+                    logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
                 loss_fn = WMSELoss_TrustRegion_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
                                                        trust_threshold=trust_threshold,
                                                        soft_boundary=soft_boundary,
                                                        soft_scale=soft_scale,
                                                        focal_gamma=focal_gamma,
                                                        focal_ema_decay=focal_ema_decay,
-                                                       gradient_clamp_quantile=gradient_clamp_quantile)
+                                                       huber_delta=huber_delta)
             else:
                 loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda)
 
@@ -2292,6 +2303,16 @@ def load_dataset(cfg_dataset, typ):
     assert train.energy_limit == cfg_dataset['ENERGY_LIMIT']
     assert train.purify       == cfg_dataset['PURIFY']
     logging.info("Loading training dataset: {}; len: {}".format(train_fpath, len(train.y)))
+
+    # Robust scale of gradient components on the training split.
+    # MAD of componentwise deviations from zero (gradients are ~zero-mean on
+    # average). Used to auto-derive the Huber cutoff delta = ~2 * MAD.
+    if train.dy is not None:
+        comp = train.dy.reshape(-1).to(TORCH_FLOAT)
+        mad = comp.abs().median().item()
+        train.mad_grad_components = mad
+        logging.info("Gradient-component MAD (training split): {:.6e} cm-1/Bohr "
+                     "(#components={})".format(mad, comp.numel()))
 
     val   = PolyDataset.from_pickle(val_fpath)
     assert val.energy_limit == cfg_dataset['ENERGY_LIMIT']
