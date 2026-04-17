@@ -1239,6 +1239,24 @@ class Training:
             else:
                 self.current_trust_threshold = None
 
+            # Periodic L-BFGS curvature reset. The combined energy+force
+            # surface evolves as F_LAMBDA ramps; stale curvature pairs cause
+            # the Wolfe line search to return t=0. Clearing the history forces
+            # steepest-descent restart and fresh curvature accumulation.
+            lbfgs_reset_interval = self.cfg_solver['OPTIMIZER'].get(
+                'LBFGS_RESET_INTERVAL', 0
+            )
+            if (lbfgs_reset_interval > 0
+                    and self.cfg_loss['USE_FORCES']
+                    and isinstance(self.optimizer, torch.optim.LBFGS)
+                    and epoch > self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', 0)
+                    and (epoch - self.cfg_loss.get('USE_FORCES_AFTER_EPOCH', 0))
+                        % lbfgs_reset_interval == 0):
+                self.optimizer.state.clear()
+                self._lbfgs_prev_n_iter = 0
+                self._lbfgs_prev_func_evals = 0
+                logging.info("Periodic L-BFGS state reset (epoch {})".format(epoch))
+
             print("loss function: {}".format(self.loss_fn))
 
             self.train_epoch(epoch, self.optimizer)
