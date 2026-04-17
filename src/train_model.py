@@ -1195,6 +1195,24 @@ class Training:
 
                 self.es.reset()
 
+                # Reset L-BFGS curvature history. The stored (s_k, y_k) pairs
+                # describe the energy-only loss surface and produce degenerate
+                # search directions on the new energy+force surface, causing
+                # the Wolfe line search to return t=0 indefinitely.
+                if isinstance(self.optimizer, torch.optim.LBFGS):
+                    self.optimizer.state.clear()
+                    self._lbfgs_prev_n_iter = 0
+                    self._lbfgs_prev_func_evals = 0
+                    logging.info("Reset L-BFGS state at force inclusion (epoch {})".format(epoch))
+
+                # Reset LR to initial value so the optimizer has full step
+                # budget to explore the new loss landscape.
+                initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
+                for pg in self.optimizer.param_groups:
+                    pg['lr'] = initial_lr
+                self.scheduler = self.build_scheduler()
+                logging.info("Reset LR to {} and rebuilt scheduler at force inclusion".format(initial_lr))
+
             # Progressive F_LAMBDA ramp
             if self.cfg_loss['USE_FORCES'] and self.cfg_loss.get('F_LAMBDA_RAMP_EPOCHS', 0) > 0:
                 ramp_epochs = self.cfg_loss['F_LAMBDA_RAMP_EPOCHS']
