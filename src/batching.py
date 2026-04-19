@@ -77,3 +77,64 @@ class MultiBatchSampler:
     def advance(self, Ok):
         """Call after the optimizer step to shift Ok_prev <- Ok."""
         self._Ok_prev = Ok
+
+
+class DistributedFullOverlapSampler:
+    """Distributed version of FullOverlapSampler for multi-GPU training.
+
+    Each rank gets a different slice of the batch. All ranks use synchronized
+    RNG (same seed) to generate identical permutations, then each rank takes
+    its slice based on rank index.
+
+    This ensures:
+    - All ranks process the full dataset over an epoch
+    - No overlap between ranks within a step
+    - Deterministic and reproducible across runs
+
+    Args:
+        n_samples: Total dataset size
+        batch_size: Total batch size (will be divided among ranks)
+        rank: This process's rank (0 to world_size-1)
+        world_size: Total number of processes
+        seed: Random seed (must be same on all ranks!)
+    """
+
+    def __init__(self, n_samples, batch_size, rank, world_size, seed=42):
+        assert batch_size >= world_size, \
+            f"batch_size ({batch_size}) must be >= world_size ({world_size})"
+
+        self.n_samples = int(n_samples)
+        self.rank = rank
+        self.world_size = world_size
+
+        # Divide batch evenly among ranks
+        self.per_rank_batch = batch_size // world_size
+        self.total_batch = self.per_rank_batch * world_size
+
+        # All ranks must use same seed for synchronized permutations
+        self._base_seed = int(seed)
+        self._rng = np.random.RandomState(self._base_seed)
+        self._epoch = 0
+
+    def steps_per_epoch(self):
+        return max(1, self.n_samples // self.total_batch)
+
+    def set_epoch(self, epoch):
+        """Reset RNG for new epoch. Must call on all ranks with same epoch!"""
+        self._epoch = epoch
+        self._rng = np.random.RandomState(self._base_seed + epoch)
+
+    def next_step(self):
+        """Get indices for this rank's portion of the batch.
+
+        Returns:
+            tuple: (indices,) - array of indices for this rank
+        """
+        # All ranks generate the same permutation (same RNG state)
+        perm = self._rng.permutation(self.n_samples)
+        full_batch = perm[:self.total_batch]
+
+        # Each rank takes its slice
+        start = self.rank * self.per_rank_batch
+        end = start + self.per_rank_batch
+        return (full_batch[start:end],)

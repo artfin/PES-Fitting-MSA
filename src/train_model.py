@@ -32,7 +32,13 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(BASEDIR / "vendor"))
 from pytorch_lbfgs import LBFGS as HjmshiLBFGS, FullBatchLBFGS as HjmshiFullBatchLBFGS
 
-from batching import FullOverlapSampler, MultiBatchSampler
+from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverlapSampler
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+from distributed import (
+    setup_distributed, cleanup, is_distributed,
+    is_main_process, get_rank, get_world_size, reduce_mean, barrier
+)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 PRINT_TRAINING_STEPS = 1
@@ -139,6 +145,8 @@ def load_from_checkpoint(chk_path):
 
 
 def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
+    if not is_main_process():
+        return
     logging.info("Saving the checkpoint.")
 
     checkpoint = {
@@ -837,8 +845,9 @@ class EarlyStopping:
                 self.status = True
 
         if epoch % PRINT_TRAINING_STEPS == 0:
-            logging.info("(Early Stopping) Best validation RMSE: {1:.{0}f}; current validation RMSE: {2:.{0}f}".format(PRINT_PRECISION, self.best_score, score))
-            logging.info("(Early Stopping) counter: {}; patience: {}; tolerance: {}".format(self.counter, self.patience, self.tol))
+            if is_main_process():
+                logging.info("(Early Stopping) Best validation RMSE: {1:.{0}f}; current validation RMSE: {2:.{0}f}".format(PRINT_PRECISION, self.best_score, score))
+                logging.info("(Early Stopping) counter: {}; patience: {}; tolerance: {}".format(self.counter, self.patience, self.tol))
 
 
 def count_params(model):
@@ -857,8 +866,7 @@ class Training:
         if not os.path.isdir(EVENTDIR):
             os.makedirs(EVENTDIR)
 
-        log_dir = os.path.join("runs", model_name)
-        self.writer = SummaryWriter(log_dir=log_dir)
+        self.model_name = model_name
 
         self.model_folder = model_folder
 
@@ -958,6 +966,11 @@ class Training:
         self._lbfgs_diag_initialized = False
         self._lbfgs_prev_n_iter = 0
         self._lbfgs_prev_func_evals = 0
+
+    def _log(self, msg):
+        """Rank-0 only logging helper."""
+        if is_main_process():
+            logging.info(msg)
 
     def reset_weights(self):
         for layer in self.model.children():
@@ -1237,85 +1250,185 @@ class Training:
 
 
     def train_model(self):
-        self.model = self.model.to(DEVICE)
+        # Setup distributed training (returns defaults for single GPU)
+        self.rank, self.world_size, self.local_rank = setup_distributed()
+        try:
 
-        if self.cfg_solver.get('TORCH_COMPILE', False):
-            self.model = torch.compile(self.model, mode='reduce-overhead')
-            logging.info("Model compiled with torch.compile(mode='reduce-overhead')")
+            # Set device based on mode
+            if self.world_size > 1:
+                self.device = torch.device(f"cuda:{self.local_rank}")
+            else:
+                self.device = DEVICE
 
-        multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
+            self.model = self.model.to(self.device)
 
-        if multibatch:
-            # Keep the training set on CPU; each step copies only its batch
-            # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
-            if torch.cuda.is_available():
-                self.train.X = self.train.X.pin_memory()
-                self.train.y = self.train.y.pin_memory()
-                if self.train.dX is not None:
-                    self.train.dX = self.train.dX.pin_memory()
-                    self.train.dy = self.train.dy.pin_memory()
-            # Val stays on GPU for cheap eval.
-            self.val.X = self.val.X.to(DEVICE)
-            self.val.y = self.val.y.to(DEVICE)
-        else:
-            self.train.X = self.train.X.to(DEVICE)
-            self.train.y = self.train.y.to(DEVICE)
-            self.val.X = self.val.X.to(DEVICE)
-            self.val.y = self.val.y.to(DEVICE)
+            if self.cfg_solver.get('TORCH_COMPILE', False):
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+                if is_main_process():
+                    logging.info("Model compiled with torch.compile(mode='reduce-overhead')")
 
-        self.loss_fn = self.loss_fn.to(DEVICE)
+            # Wrap with DDP for distributed training
+            if self.world_size > 1:
+                self.model = DDP(self.model, device_ids=[self.local_rank])
+                if is_main_process():
+                    logging.info(f"Distributed training enabled: {self.world_size} GPUs")
 
-        if self.cfg['TYPE'] == 'DIPOLE':
-            self.train.grm = self.train.grm.to(DEVICE)
-            self.val.grm   = self.val.grm.to(DEVICE)
+            # Initialize TensorBoard only on rank 0 to avoid event-file corruption.
+            if is_main_process():
+                log_dir = os.path.join("runs", self.model_name)
+                self.writer = SummaryWriter(log_dir=log_dir)
+            else:
+                self.writer = None
 
-        if self.cfg['TYPE'] == 'DIPOLEQ':
-            self.train.xyz_ordered = self.train.xyz_ordered.to(DEVICE)
-            self.val.xyz_ordered = self.val.xyz_ordered.to(DEVICE)
-            self.test.xyz_ordered = self.test.xyz_ordered.to(DEVICE)
+            # nn.Module.to() moves parameters and buffers, but our loss classes
+            # store plain Tensor attributes (e.g. self.dwt). Move them explicitly.
+            def _move_plain_tensors(mod, device):
+                for k, v in mod.__dict__.items():
+                    if isinstance(v, torch.Tensor) and not isinstance(v, torch.nn.Module):
+                        setattr(mod, k, v.to(device))
+            _move_plain_tensors(self.loss_fn, self.device)
+            if self.regularization is not None:
+                _move_plain_tensors(self.regularization, self.device)
 
-        if self.train.dX is not None and not multibatch:
-            self.train.dX = self.train.dX.to(DEVICE)
-            self.train.dy = self.train.dy.to(DEVICE)
+            multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
 
-            self.val.dX = self.val.dX.to(DEVICE)
-            self.val.dy = self.val.dy.to(DEVICE)
-        elif self.train.dX is not None and multibatch:
-            # Only move validation gradient tensors; train stays on pinned CPU.
-            self.val.dX = self.val.dX.to(DEVICE)
-            self.val.dy = self.val.dy.to(DEVICE)
+            if multibatch:
+                # Keep the training set on CPU; each step copies only its batch
+                # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
+                if torch.cuda.is_available():
+                    self.train.X = self.train.X.pin_memory()
+                    self.train.y = self.train.y.pin_memory()
+                    if self.train.dX is not None:
+                        self.train.dX = self.train.dX.pin_memory()
+                        self.train.dy = self.train.dy.pin_memory()
+                # Val stays on GPU for cheap eval.
+                self.val.X = self.val.X.to(self.device)
+                self.val.y = self.val.y.to(self.device)
+            else:
+                self.train.X = self.train.X.to(self.device)
+                self.train.y = self.train.y.to(self.device)
+                self.val.X = self.val.X.to(self.device)
+                self.val.y = self.val.y.to(self.device)
+
+            self.loss_fn = self.loss_fn.to(self.device)
+
+            if self.cfg['TYPE'] == 'DIPOLE':
+                self.train.grm = self.train.grm.to(self.device)
+                self.val.grm   = self.val.grm.to(self.device)
+
+            if self.cfg['TYPE'] == 'DIPOLEQ':
+                self.train.xyz_ordered = self.train.xyz_ordered.to(self.device)
+                self.val.xyz_ordered = self.val.xyz_ordered.to(self.device)
+                self.test.xyz_ordered = self.test.xyz_ordered.to(self.device)
+
+            if self.train.dX is not None and not multibatch:
+                self.train.dX = self.train.dX.to(self.device)
+                self.train.dy = self.train.dy.to(self.device)
+
+                self.val.dX = self.val.dX.to(self.device)
+                self.val.dy = self.val.dy.to(self.device)
+            elif self.train.dX is not None and multibatch:
+                # Only move validation gradient tensors; train stays on pinned CPU.
+                self.val.dX = self.val.dX.to(self.device)
+                self.val.dy = self.val.dy.to(self.device)
 
 
-        if multibatch:
-            self.optimizer = self._build_multibatch_optimizer()
-            self._init_multibatch_sampler()
-        else:
-            self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
-        self.scheduler = self.build_scheduler()
+            if multibatch:
+                self.optimizer = self._build_multibatch_optimizer()
+                self._init_multibatch_sampler()
+            else:
+                self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
+            self.scheduler = self.build_scheduler()
 
-        start = time.time()
+            start = time.time()
 
-        MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
+            MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
 
-        for epoch in range(MAX_EPOCHS):
-            # switch into mixed loss function: E + F
-            if self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH']:
-                self.cfg_loss['USE_GRADIENTS'] = True
-                self.loss_fn = self.build_loss().to(DEVICE)
-                self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
-                self.gradient_start_epoch = epoch
+            for epoch in range(MAX_EPOCHS):
+                # switch into mixed loss function: E + F
+                if self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH']:
+                    self.cfg_loss['USE_GRADIENTS'] = True
+                    self.loss_fn = self.build_loss().to(self.device)
+                    self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+                    self.gradient_start_epoch = epoch
 
-                self.es.reset()
+                    self.es.reset()
 
-                # Reset L-BFGS curvature history. The stored (s_k, y_k) pairs
-                # describe the energy-only loss surface and produce degenerate
-                # search directions on the new energy+gradient surface, causing
-                # the Wolfe line search to return t=0 indefinitely.
-                if isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS)):
+                    # Reset L-BFGS curvature history. The stored (s_k, y_k) pairs
+                    # describe the energy-only loss surface and produce degenerate
+                    # search directions on the new energy+gradient surface, causing
+                    # the Wolfe line search to return t=0 indefinitely.
+                    if isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS)):
+                        if isinstance(self.optimizer, torch.optim.LBFGS):
+                            self.optimizer.state.clear()
+                        else:
+                            # vendored LBFGS / FullBatchLBFGS
+                            state = self.optimizer.state['global_state']
+                            state['n_iter'] = 0
+                            state['curv_skips'] = 0
+                            state['fail_skips'] = 0
+                            state['H_diag'] = 1
+                            state['fail'] = True
+                            state['old_dirs'] = []
+                            state['old_stps'] = []
+                            if 'rho' in state:
+                                state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
+                            if 'alpha' in state:
+                                state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
+                        self._lbfgs_prev_n_iter = 0
+                        self._lbfgs_prev_func_evals = 0
+                        self._log("Reset L-BFGS state at gradient inclusion (epoch {})".format(epoch))
+
+                    # Reset LR to initial value so the optimizer has full step
+                    # budget to explore the new loss landscape.
+                    initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
+                    for pg in self.optimizer.param_groups:
+                        pg['lr'] = initial_lr
+                    self.scheduler = self.build_scheduler()
+                    self._log("Reset LR to {} and rebuilt scheduler at gradient inclusion".format(initial_lr))
+
+                # Progressive G_LAMBDA ramp
+                if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('G_LAMBDA_RAMP_EPOCHS', 0) > 0:
+                    ramp_epochs = self.cfg_loss['G_LAMBDA_RAMP_EPOCHS']
+                    start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
+                    progress = (epoch - start_epoch) / ramp_epochs
+                    progress = max(0.0, min(1.0, progress))
+                    target_g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
+                    current_g_lambda = target_g_lambda * progress
+                    self.loss_fn.g_lambda = torch.tensor(current_g_lambda).to(self.device)
+                    if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                        self._log("G_LAMBDA ramp: epoch {}, progress {:.1%}, g_lambda = {:.4f}".format(epoch, progress, current_g_lambda))
+
+                # Progressive trust-threshold annealing
+                if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
+                    ramp_epochs = self.cfg_loss['TRUST_THRESHOLD_RAMP_EPOCHS']
+                    start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
+                    progress = (epoch - start_epoch) / ramp_epochs
+                    progress = max(0.0, min(1.0, progress))
+                    target_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+                    start_threshold = self.cfg_loss.get('TRUST_THRESHOLD_START', target_threshold)
+                    self.current_trust_threshold = start_threshold + (target_threshold - start_threshold) * progress
+                    if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                        self._log("Trust-threshold anneal: epoch {}, progress {:.1%}, threshold = {:.1f}".format(epoch, progress, self.current_trust_threshold))
+                else:
+                    self.current_trust_threshold = None
+
+                # Periodic L-BFGS curvature reset. The combined energy+gradient
+                # surface evolves as G_LAMBDA ramps; stale curvature pairs cause
+                # the Wolfe line search to return t=0. Clearing the history gradients
+                # steepest-descent restart and fresh curvature accumulation.
+                lbfgs_reset_interval = self.cfg_solver['OPTIMIZER'].get(
+                    'LBFGS_RESET_INTERVAL', 0
+                )
+                if (lbfgs_reset_interval > 0
+                        and self.cfg_loss['USE_GRADIENTS']
+                        and isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS))
+                        and epoch > self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0)
+                        and (epoch - self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0))
+                            % lbfgs_reset_interval == 0):
                     if isinstance(self.optimizer, torch.optim.LBFGS):
                         self.optimizer.state.clear()
                     else:
-                        # vendored LBFGS / FullBatchLBFGS
                         state = self.optimizer.state['global_state']
                         state['n_iter'] = 0
                         state['curv_skips'] = 0
@@ -1330,111 +1443,50 @@ class Training:
                             state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
                     self._lbfgs_prev_n_iter = 0
                     self._lbfgs_prev_func_evals = 0
-                    logging.info("Reset L-BFGS state at gradient inclusion (epoch {})".format(epoch))
+                    self._log("Periodic L-BFGS state reset (epoch {})".format(epoch))
 
-                # Reset LR to initial value so the optimizer has full step
-                # budget to explore the new loss landscape.
-                initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
-                for pg in self.optimizer.param_groups:
-                    pg['lr'] = initial_lr
-                self.scheduler = self.build_scheduler()
-                logging.info("Reset LR to {} and rebuilt scheduler at gradient inclusion".format(initial_lr))
+                self._log("loss function: {}".format(self.loss_fn))
 
-            # Progressive G_LAMBDA ramp
-            if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('G_LAMBDA_RAMP_EPOCHS', 0) > 0:
-                ramp_epochs = self.cfg_loss['G_LAMBDA_RAMP_EPOCHS']
-                start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
-                progress = (epoch - start_epoch) / ramp_epochs
-                progress = max(0.0, min(1.0, progress))
-                target_g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
-                current_g_lambda = target_g_lambda * progress
-                self.loss_fn.g_lambda = torch.tensor(current_g_lambda).to(DEVICE)
-                if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
-                    logging.info("G_LAMBDA ramp: epoch {}, progress {:.1%}, g_lambda = {:.4f}".format(epoch, progress, current_g_lambda))
-
-            # Progressive trust-threshold annealing
-            if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
-                ramp_epochs = self.cfg_loss['TRUST_THRESHOLD_RAMP_EPOCHS']
-                start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
-                progress = (epoch - start_epoch) / ramp_epochs
-                progress = max(0.0, min(1.0, progress))
-                target_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
-                start_threshold = self.cfg_loss.get('TRUST_THRESHOLD_START', target_threshold)
-                self.current_trust_threshold = start_threshold + (target_threshold - start_threshold) * progress
-                if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
-                    logging.info("Trust-threshold anneal: epoch {}, progress {:.1%}, threshold = {:.1f}".format(epoch, progress, self.current_trust_threshold))
-            else:
-                self.current_trust_threshold = None
-
-            # Periodic L-BFGS curvature reset. The combined energy+gradient
-            # surface evolves as G_LAMBDA ramps; stale curvature pairs cause
-            # the Wolfe line search to return t=0. Clearing the history gradients
-            # steepest-descent restart and fresh curvature accumulation.
-            lbfgs_reset_interval = self.cfg_solver['OPTIMIZER'].get(
-                'LBFGS_RESET_INTERVAL', 0
-            )
-            if (lbfgs_reset_interval > 0
-                    and self.cfg_loss['USE_GRADIENTS']
-                    and isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS))
-                    and epoch > self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0)
-                    and (epoch - self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0))
-                        % lbfgs_reset_interval == 0):
-                if isinstance(self.optimizer, torch.optim.LBFGS):
-                    self.optimizer.state.clear()
+                if bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
+                    self.train_epoch_multibatch(epoch, self.optimizer)
                 else:
-                    state = self.optimizer.state['global_state']
-                    state['n_iter'] = 0
-                    state['curv_skips'] = 0
-                    state['fail_skips'] = 0
-                    state['H_diag'] = 1
-                    state['fail'] = True
-                    state['old_dirs'] = []
-                    state['old_stps'] = []
-                    if 'rho' in state:
-                        state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
-                    if 'alpha' in state:
-                        state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
-                self._lbfgs_prev_n_iter = 0
-                self._lbfgs_prev_func_evals = 0
-                logging.info("Periodic L-BFGS state reset (epoch {})".format(epoch))
+                    self.train_epoch(epoch, self.optimizer)
 
-            print("loss function: {}".format(self.loss_fn))
+                # Step scheduler - ReduceLROnPlateau requires metric, CosineAnnealing does not
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(self.loss_val)
+                else:
+                    self.scheduler.step()
 
-            if bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
-                self.train_epoch_multibatch(epoch, self.optimizer)
-            else:
-                self.train_epoch(epoch, self.optimizer)
+                if epoch % PRINT_TRAINING_STEPS == 0:
+                    end = time.time()
+                    self._log("Elapsed time: {:.0f}s\n".format(end - start))
 
-            # Step scheduler - ReduceLROnPlateau requires metric, CosineAnnealing does not
-            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                self.scheduler.step(self.loss_val)
-            else:
-                self.scheduler.step()
+                # writing all pending events to disk
+                if self.writer is not None:
+                    self.writer.flush()
 
-            if epoch % PRINT_TRAINING_STEPS == 0:
-                end = time.time()
-                logging.info("Elapsed time: {:.0f}s\n".format(end - start))
+                # pass loss values to EarlyStopping mechanism 
+                self.es(epoch, self.loss_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
 
-            # writing all pending events to disk
-            self.writer.flush()
+                if self.es.status:
+                    self._log("Invoking early stop.")
+                    break
 
-            # pass loss values to EarlyStopping mechanism 
-            self.es(epoch, self.loss_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+            if self.loss_val < self.es.best_score:
+                save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
 
-            if self.es.status:
-                logging.info("Invoking early stop.")
-                break
+            self._log("\nReloading best model from the last checkpoint")
 
-        if self.loss_val < self.es.best_score:
-            save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
+            self.reset_weights()
+            checkpoint = torch.load(self.chk_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint["model"])
 
-        logging.info("\nReloading best model from the last checkpoint")
-
-        self.reset_weights()
-        checkpoint = torch.load(self.chk_path, map_location=torch.device(DEVICE))
-        self.model.load_state_dict(checkpoint["model"])
-
-        return self.model
+            return self.model
+        finally:
+            if is_main_process() and getattr(self, 'writer', None) is not None:
+                self.writer.close()
+            cleanup()
 
     def compute_gradients(self, dataset):
         Xtr = dataset.X
@@ -1448,7 +1500,7 @@ class Training:
 
         # take into account normalization of polynomials
         # now we have derivatives of energy w.r.t. to polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
         dEdp = torch.div(dEdp, x_scale)
 
         # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
@@ -1456,7 +1508,7 @@ class Training:
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
         dEdx = torch.mul(dEdx, y_scale)
 
         return y_pred, dEdx
@@ -1483,14 +1535,14 @@ class Training:
         )[0]
 
         # take into account normalization of polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
         dEdp = torch.div(dEdp, x_scale)
 
         # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dX_subset.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
         dEdx = torch.mul(dEdx, y_scale)
 
         return dEdx
@@ -1523,8 +1575,8 @@ class Training:
             y_pred = self.model(dataset.X)
 
             # Descale energies
-            en_mean = torch.from_numpy(self.yscaler.mean_).to(DEVICE)
-            en_std = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+            en_mean = torch.from_numpy(self.yscaler.mean_).to(self.device)
+            en_std = torch.from_numpy(self.yscaler.scale_).to(self.device)
 
             en_pred_descaled = y_pred * en_std + en_mean
             en_true_descaled = dataset.y * en_std + en_mean
@@ -1628,15 +1680,16 @@ class Training:
         # Configs that have never flipped AND are currently out: never-trusted.
         # (Approximate -- exact count requires another tracker; we don't bother.)
 
-        logging.info(
-            "[trust-diag] epoch={} | n_in={}/{} ({:.1%}) | entered={} left={} "
-            "stable_in={} | prev-epoch gradient-RMSE: left={:.2f} stayed={:.2f} "
-            "(med {:.2f}/{:.2f}) | max_flips={}".format(
-                epoch, n_in, N, frac, entered, left, stable_in,
-                mean_err_left, mean_err_stayed,
-                med_err_left, med_err_stayed, max_flips
+        if is_main_process():
+            logging.info(
+                "[trust-diag] epoch={} | n_in={}/{} ({:.1%}) | entered={} left={} "
+                "stable_in={} | prev-epoch gradient-RMSE: left={:.2f} stayed={:.2f} "
+                "(med {:.2f}/{:.2f}) | max_flips={}".format(
+                    epoch, n_in, N, frac, entered, left, stable_in,
+                    mean_err_left, mean_err_stayed,
+                    med_err_left, med_err_stayed, max_flips
+                )
             )
-        )
 
         # Append CSV row for post-hoc plotting.
         if not self._trust_history_initialized:
@@ -1766,12 +1819,13 @@ class Training:
         except OSError as e:
             logging.warning("Could not append to gradient diag CSV: {}".format(e))
 
-        logging.info(
-            "[grad-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
-            "of gradient loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
-                epoch, top1, top5, top10, cq[2], cq[5], contrib_max
+        if is_main_process():
+            logging.info(
+                "[grad-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
+                "of gradient loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
+                    epoch, top1, top5, top10, cq[2], cq[5], contrib_max
+                )
             )
-        )
 
     def log_lbfgs_diagnostics(self, epoch, optimizer):
         """L-BFGS line-search telemetry, dumped per epoch.
@@ -1861,13 +1915,14 @@ class Training:
         except OSError as e:
             logging.warning("Could not append to lbfgs diag CSV: {}".format(e))
 
-        logging.info(
-            "[lbfgs-diag] epoch={} | iters={} evals={} t={:.3e} H_diag={:.3e} "
-            "pairs={} grad_norm={:.3e} sy(last/min/max)={:.3e}/{:.3e}/{:.3e}".format(
-                epoch, iters_this_step, evals_this_step, t_val, H_diag,
-                n_pairs, grad_norm, sy_last, sy_min, sy_max,
+        if is_main_process():
+            logging.info(
+                "[lbfgs-diag] epoch={} | iters={} evals={} t={:.3e} H_diag={:.3e} "
+                "pairs={} grad_norm={:.3e} sy(last/min/max)={:.3e}/{:.3e}/{:.3e}".format(
+                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
+                    n_pairs, grad_norm, sy_last, sy_min, sy_max,
+                )
             )
-        )
 
     def compute_gradients_eval(self, dataset):
         """
@@ -1891,14 +1946,14 @@ class Training:
         Xtr.requires_grad = False
 
         # take into account normalization of polynomials
-        x_scale = torch.from_numpy(self.xscaler.scale_).to(DEVICE)
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
         dEdp = torch.div(dEdp, x_scale)
 
         # gradient = dE/dx
         dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
-        y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
         dEdx = torch.mul(dEdx, y_scale)
 
         return y_pred.detach(), dEdx.detach()
@@ -1936,7 +1991,7 @@ class Training:
 
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
                 if soft_boundary and gradient_weights is not None and n_in_trust > 0:
-                    logging.info(
+                    self._log(
                         "Trust region (soft): {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
                         "phi: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
@@ -1947,7 +2002,7 @@ class Training:
                             gradient_weights.min().item(), gradient_weights.mean().item(),
                             gradient_weights.sum().item()))
                 else:
-                    logging.info(
+                    self._log(
                         "Trust region: {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
                             n_in_trust, len(self.train.X),
@@ -2004,7 +2059,7 @@ class Training:
 
                 q_pred   = self.model(self.train.X)
                 X_inf    = torch.zeros_like(self.train.X).cpu()         # polynomials at infinite separation
-                X_inf_tr = torch.from_numpy(xscaler.transform(X_inf)).to(DEVICE)
+                X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf)).to(self.device)
                 q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
                 q_corr   = q_pred - q_inf                               # corrected partial charges
                 dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), q_corr)
@@ -2036,6 +2091,10 @@ class Training:
             if self.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
+            # Synchronize loss across ranks so L-BFGS line search makes
+            # identical decisions on every process.
+            if self.world_size > 1:
+                loss = reduce_mean(loss.detach())
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
@@ -2049,11 +2108,11 @@ class Training:
         start_time = timeit.default_timer()
         optimizer.step(closure)
         elapsed = timeit.default_timer() - start_time
-        logging.info("Optimizer makes step in {:.2f}s".format(elapsed))
-        logging.info("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+        self._log("Optimizer makes step in {:.2f}s".format(elapsed))
+        self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
 
         current_lr = optimizer.param_groups[0]['lr']
-        logging.info("(optimizer) current lr: {}".format(current_lr))
+        self._log("(optimizer) current lr: {}".format(current_lr))
 
         # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
         if self.cfg_loss['USE_GRADIENTS']:
@@ -2114,7 +2173,20 @@ class Training:
             w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
             loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
-            logging.info("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
+            # Reduce metrics across ranks for consistent scheduler / early stopping.
+            if self.world_size > 1:
+                train_e_mae  = reduce_mean(train_e_mae)
+                train_e_rmse = reduce_mean(train_e_rmse)
+                val_e_mae    = reduce_mean(val_e_mae)
+                val_e_rmse   = reduce_mean(val_e_rmse)
+                train_g_mae  = reduce_mean(train_g_mae)
+                train_g_rmse = reduce_mean(train_g_rmse)
+                val_g_mae    = reduce_mean(val_g_mae)
+                val_g_rmse   = reduce_mean(val_g_rmse)
+                loss_train_e = reduce_mean(loss_train_e)
+                loss_val_e   = reduce_mean(loss_val_e)
+
+            self._log("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
                                            (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
                                            (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
                                            (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
@@ -2125,11 +2197,12 @@ class Training:
             # value to be passed to EarlyStopping/ReduceLR mechanisms
             self.loss_val = loss_val_e
 
-            self.writer.add_scalar("loss/train", loss_train_e, epoch)
-            self.writer.add_scalar("loss/val", loss_val_e, epoch)
+            if self.writer is not None:
+                self.writer.add_scalar("loss/train", loss_train_e, epoch)
+                self.writer.add_scalar("loss/val", loss_val_e, epoch)
 
             # log metrics to WANDB to visualize model performance
-            if USE_WANDB:
+            if is_main_process() and USE_WANDB:
                 wandb.log({
                     "loss_train_e" : loss_train_e, "loss_val_e" : loss_val_e,
                     "train_e_mae" : train_e_mae, "train_e_rmse" : train_e_rmse, "val_e_mae" : val_e_mae, "val_e_rmse" : val_e_rmse,
@@ -2147,14 +2220,18 @@ class Training:
                 dip_pred_val = torch.einsum('ijk,ik->ij', self.val.grm, val_y_pred)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
             # log metrics to WANDB to visualize model performance
-            if USE_WANDB:
+            if is_main_process() and USE_WANDB:
                 wandb.log({"loss_train": loss_train, "loss_val": loss_val})
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
         elif self.cfg['TYPE'] == 'DIPOLEQ':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
@@ -2162,7 +2239,7 @@ class Training:
             with torch.no_grad():
                 train_q_pred   = self.model(self.train.X)
                 train_X_inf    = torch.zeros_like(self.train.X).cpu()
-                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
+                train_X_inf_tr = torch.from_numpy(self.xscaler.transform(train_X_inf)).to(self.device)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
                 dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
@@ -2170,25 +2247,31 @@ class Training:
 
                 val_q_pred   = self.model(self.val.X)
                 val_X_inf    = torch.zeros_like(self.val.X).cpu()
-                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
+                val_X_inf_tr = torch.from_numpy(self.xscaler.transform(val_X_inf)).to(self.device)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
                 dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
-
-                # value to be passed to EarlyStopping/ReduceLR mechanisms
-                self.loss_val = loss_val
 
                 train_qsum = torch.sum(train_q_corr, dim=1)
                 train_qreg = self.cfg_loss['LAMBDA_Q'] * torch.mean(train_qsum * train_qsum)
                 val_qsum   = torch.sum(val_q_corr, dim=1)
                 val_qreg   = self.cfg_loss['LAMBDA_Q'] * torch.mean(val_qsum * val_qsum)
 
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+                    train_qreg = reduce_mean(train_qreg)
+                    val_qreg   = reduce_mean(val_qreg)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
             # log metrics to WANDB to visualize model performance
-            if USE_WANDB:
+            if is_main_process() and USE_WANDB:
                 wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg, "lr" : current_lr})
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
                 epoch, PRINT_PRECISION, loss_train, train_qreg, loss_val, val_qreg
             ))
 
@@ -2200,9 +2283,13 @@ class Training:
                 val_dip_pred = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, val_dip_pred)
 
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
                 self.loss_val = loss_val
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
 
         elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
@@ -2214,19 +2301,24 @@ class Training:
                 val_y_pred = self.model(self.val.X)
                 loss_val   = self.loss_fn(self.val.y, val_y_pred)
 
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
                 self.loss_val = loss_val
 
             # tensorboard writer
-            self.writer.add_scalar("loss/train", loss_train, epoch)
-            self.writer.add_scalar("loss/val", loss_val, epoch)
-            self.writer.add_scalar("lr", current_lr, epoch)
+            if self.writer is not None:
+                self.writer.add_scalar("loss/train", loss_train, epoch)
+                self.writer.add_scalar("loss/val", loss_val, epoch)
+                self.writer.add_scalar("lr", current_lr, epoch)
 
             # log metrics to WANDB to visualize model performance
-            if USE_WANDB:
+            if is_main_process() and USE_WANDB:
                 wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr})
 
-            logging.info("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1; lr: {4:.2e}".format(epoch, PRINT_PRECISION, loss_train, loss_val, current_lr))
+            self._log("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1; lr: {4:.2e}".format(epoch, PRINT_PRECISION, loss_train, loss_val, current_lr))
 
         else:
             assert False, "unreachable"
@@ -2253,7 +2345,7 @@ class Training:
             line_search=line_search,
             debug=False,
         )
-        logging.info(
+        self._log(
             "Built multi-batch LBFGS: mode={} lr={} history_size={} line_search={}".format(
                 mode, lr, history_size, line_search
             )
@@ -2272,17 +2364,29 @@ class Training:
                 overlap_fraction=float(self.cfg_batch['OVERLAP_FRACTION']),
                 seed=seed,
             )
+        elif self.world_size > 1:
+            # Distributed mode: each rank gets a slice of the batch
+            self.sampler = DistributedFullOverlapSampler(
+                n_samples=n,
+                batch_size=B,
+                rank=self.rank,
+                world_size=self.world_size,
+                seed=seed,
+            )
         else:
+            # Single GPU mode
             self.sampler = FullOverlapSampler(
                 n_samples=n,
                 batch_size=B,
                 seed=seed,
             )
-        logging.info(
-            "Initialized sampler: mode={} N={} batch_size={} steps/epoch={}".format(
-                mode, n, B, self.sampler.steps_per_epoch()
+        if is_main_process():
+            dist_info = f" (distributed: {self.world_size} ranks)" if self.world_size > 1 else ""
+            logging.info(
+                "Initialized sampler: mode={} N={} batch_size={} steps/epoch={}{}".format(
+                    mode, n, B, self.sampler.steps_per_epoch(), dist_info
+                )
             )
-        )
 
     def _gather_batch(self, idx):
         """Move one batch of (X, y[, dX, dy]) to DEVICE. Returns a plain dict."""
@@ -2291,15 +2395,15 @@ class Training:
 
         X_cpu = self.train.X[idx]
         y_cpu = self.train.y[idx]
-        X = X_cpu.to(DEVICE, non_blocking=non_blocking)
-        y = y_cpu.to(DEVICE, non_blocking=non_blocking)
+        X = X_cpu.to(self.device, non_blocking=non_blocking)
+        y = y_cpu.to(self.device, non_blocking=non_blocking)
 
         batch = {'X': X, 'y': y}
         if use_grad:
             dX_cpu = self.train.dX[idx]
             dy_cpu = self.train.dy[idx]
-            batch['dX'] = dX_cpu.to(DEVICE, non_blocking=non_blocking)
-            batch['dy'] = dy_cpu.to(DEVICE, non_blocking=non_blocking)
+            batch['dX'] = dX_cpu.to(self.device, non_blocking=non_blocking)
+            batch['dy'] = dy_cpu.to(self.device, non_blocking=non_blocking)
         return batch
 
     def _loss_and_flat_grad(self, batch):
@@ -2355,6 +2459,9 @@ class Training:
         mode = self.cfg_batch['MODE']
         steps = self.sampler.steps_per_epoch()
 
+        if hasattr(self.sampler, 'set_epoch'):
+            self.sampler.set_epoch(epoch)
+
         start_time = timeit.default_timer()
 
         if mode == 'multi_batch':
@@ -2391,7 +2498,7 @@ class Training:
                 g_Ok_prev = g_Ok_new
                 last_loss = loss_Ok.detach()
 
-            logging.info(
+            self._log(
                 "Epoch {} multi_batch: {} steps, lr_last={}, loss_Ok_last={:.6e}".format(
                     epoch, steps, lr_used, float(last_loss) if last_loss is not None else float('nan')
                 )
@@ -2417,14 +2524,15 @@ class Training:
                         loss = self.loss_fn(batch_Sk['y'], y_pred)
                     if self.regularization is not None:
                         loss = loss + self.regularization(self.model)
+                    loss.backward()
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    if self.world_size > 1:
+                        loss = reduce_mean(loss.detach())
                     return loss
 
                 # Pre-compute loss & gradient at the current iterate before the inner loop
-                optimizer.zero_grad()
                 loss = closure()
-                loss.backward()
-                if self.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
                 options = {
                     'closure': closure,
@@ -2441,21 +2549,17 @@ class Training:
                         break
 
                     # Recompute gradient for next inner iteration
-                    optimizer.zero_grad()
                     loss = closure()
-                    loss.backward()
-                    if self.grad_clip_norm is not None:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     options['current_loss'] = loss
 
-            logging.info(
+            self._log(
                 "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(
                     epoch, steps, float(last_loss) if last_loss is not None else float('nan')
                 )
             )
 
         elapsed = timeit.default_timer() - start_time
-        logging.info("Epoch {} multibatch step time: {:.2f}s".format(epoch, elapsed))
+        self._log("Epoch {} multibatch step time: {:.2f}s".format(epoch, elapsed))
 
         self.model.eval()
         with torch.no_grad():
@@ -2493,7 +2597,19 @@ class Training:
                 w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
                 loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
-                logging.info("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
+                if self.world_size > 1:
+                    train_e_mae  = reduce_mean(train_e_mae)
+                    train_e_rmse = reduce_mean(train_e_rmse)
+                    val_e_mae    = reduce_mean(val_e_mae)
+                    val_e_rmse   = reduce_mean(val_e_rmse)
+                    train_g_mae  = reduce_mean(train_g_mae)
+                    train_g_rmse = reduce_mean(train_g_rmse)
+                    val_g_mae    = reduce_mean(val_g_mae)
+                    val_g_rmse   = reduce_mean(val_g_rmse)
+                    loss_train_e = reduce_mean(loss_train_e)
+                    loss_val_e   = reduce_mean(loss_val_e)
+
+                self._log("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
                                            (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
                                            (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
                                            (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
@@ -2503,25 +2619,29 @@ class Training:
 
                 loss_val = loss_val_e
 
-                self.writer.add_scalar("loss/train", loss_train_e, epoch)
+                if self.writer is not None:
+                    self.writer.add_scalar("loss/train", loss_train_e, epoch)
             else:
                 val_y_pred = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, val_y_pred)
-                logging.info("Epoch: {}; loss val: {:.3f} cm-1".format(epoch, loss_val))
+                if self.world_size > 1:
+                    loss_val = reduce_mean(loss_val)
+                self._log("Epoch: {}; loss val: {:.3f} cm-1".format(epoch, loss_val))
 
         self.loss_val = loss_val
         current_lr = optimizer.param_groups[0]['lr']
-        self.writer.add_scalar("loss/val", loss_val, epoch)
-        self.writer.add_scalar("lr", current_lr, epoch)
+        if self.writer is not None:
+            self.writer.add_scalar("loss/val", loss_val, epoch)
+            self.writer.add_scalar("lr", current_lr, epoch)
 
 
     def model_eval(self):
-        self.test.X = self.test.X.to(DEVICE)
-        self.test.y = self.test.y.to(DEVICE)
+        self.test.X = self.test.X.to(self.device)
+        self.test.y = self.test.y.to(self.device)
 
         if self.test.dX is not None:
-            self.test.dX = self.test.dX.to(DEVICE)
-            self.test.dy = self.test.dy.to(DEVICE)
+            self.test.dX = self.test.dX.to(self.device)
+            self.test.dy = self.test.dy.to(self.device)
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
@@ -2536,9 +2656,9 @@ class Training:
             # Trust-region loss expects an extra trust_indices argument;
             # for final evaluation we evaluate gradients on the full dataset.
             if isinstance(self.loss_fn, WMSELoss_TrustRegion_wgradients):
-                train_indices = torch.arange(len(self.train.y), device=DEVICE)
-                val_indices   = torch.arange(len(self.val.y), device=DEVICE)
-                test_indices  = torch.arange(len(self.test.y), device=DEVICE)
+                train_indices = torch.arange(len(self.train.y), device=self.device)
+                val_indices   = torch.arange(len(self.val.y), device=self.device)
+                test_indices  = torch.arange(len(self.test.y), device=self.device)
 
                 loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
                 loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
@@ -2548,10 +2668,18 @@ class Training:
                 loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
                 loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
 
-            logging.info("Model evaluation after training:")
-            logging.info("Train      loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_g))
-            logging.info("Validation loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_g))
-            logging.info("Test       loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_g))
+            if self.world_size > 1:
+                loss_train_e = reduce_mean(loss_train_e)
+                loss_train_g = reduce_mean(loss_train_g)
+                loss_val_e   = reduce_mean(loss_val_e)
+                loss_val_g   = reduce_mean(loss_val_g)
+                loss_test_e  = reduce_mean(loss_test_e)
+                loss_test_g  = reduce_mean(loss_test_g)
+
+            self._log("Model evaluation after training:")
+            self._log("Train      loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_g))
+            self._log("Validation loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_g))
+            self._log("Test       loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_g))
 
         elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
@@ -2566,10 +2694,15 @@ class Training:
                 pred_test  = self.model(self.test.X)
                 loss_test  = self.loss_fn(self.test.y, pred_test)
 
-            logging.info("Model evaluation after training:")
-            logging.info("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
-            logging.info("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
-            logging.info("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
+            if self.world_size > 1:
+                loss_train = reduce_mean(loss_train)
+                loss_val   = reduce_mean(loss_val)
+                loss_test  = reduce_mean(loss_test)
+
+            self._log("Model evaluation after training:")
+            self._log("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
+            self._log("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
+            self._log("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
 
         elif self.cfg['TYPE'] == 'DIPOLEQ':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
@@ -2577,7 +2710,7 @@ class Training:
             with torch.no_grad():
                 train_q_pred   = self.model(self.train.X)
                 train_X_inf    = torch.zeros_like(self.train.X).cpu()
-                train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
+                train_X_inf_tr = torch.from_numpy(self.xscaler.transform(train_X_inf)).to(self.device)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
                 dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
@@ -2585,7 +2718,7 @@ class Training:
 
                 val_q_pred   = self.model(self.val.X)
                 val_X_inf    = torch.zeros_like(self.val.X).cpu()
-                val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
+                val_X_inf_tr = torch.from_numpy(self.xscaler.transform(val_X_inf)).to(self.device)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
                 dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
@@ -2593,16 +2726,21 @@ class Training:
 
                 test_q_pred   = self.model(self.test.X)
                 test_X_inf    = torch.zeros_like(self.test.X).cpu()
-                test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf)).to(DEVICE)
+                test_X_inf_tr = torch.from_numpy(self.xscaler.transform(test_X_inf)).to(self.device)
                 test_q_inf    = self.model(test_X_inf_tr)
                 test_q_corr   = test_q_pred - test_q_inf
                 dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.to(TORCH_FLOAT), test_q_corr)
                 loss_test     = self.loss_fn(self.test.y, dip_pred_test)
 
-            logging.info("Model evluation after training:")
-            logging.info("Train      loss: {1:{0}f}".format(PRINT_PRECISION, loss_train))
-            logging.info("Validation loss: {1:{0}f}".format(PRINT_PRECISION, loss_val))
-            logging.info("Test       loss: {1:{0}f}".format(PRINT_PRECISION, loss_test))
+            if self.world_size > 1:
+                loss_train = reduce_mean(loss_train)
+                loss_val   = reduce_mean(loss_val)
+                loss_test  = reduce_mean(loss_test)
+
+            self._log("Model evluation after training:")
+            self._log("Train      loss: {1:{0}f}".format(PRINT_PRECISION, loss_train))
+            self._log("Validation loss: {1:{0}f}".format(PRINT_PRECISION, loss_val))
+            self._log("Test       loss: {1:{0}f}".format(PRINT_PRECISION, loss_test))
 
         else:
             assert False, "unreachable"
