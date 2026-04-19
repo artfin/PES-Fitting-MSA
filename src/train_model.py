@@ -2282,9 +2282,6 @@ class Training:
 
         loss.backward()
 
-        if self.grad_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-
         flat_grad = self.optimizer._gather_flat_grad()
         return loss, flat_grad
 
