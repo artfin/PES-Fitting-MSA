@@ -2507,9 +2507,23 @@ class Training:
         else:  # full_overlap
             last_loss = None
             max_iter = self.cfg_solver['OPTIMIZER'].get('MAX_ITER', 100)
+            debug_timing = self.cfg.get('DEBUG', {}).get('TIMING', False)
+
+            # Timing accumulators (only used if debug_timing)
+            if debug_timing:
+                t_gather = t_fwd_bwd = t_sync = t_optim = 0.0
+                total_inner_iters = 0
+
             for step in range(steps):
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
                 (Sk_idx,) = self.sampler.next_step()
                 batch_Sk = self._gather_batch(Sk_idx)
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_gather += timeit.default_timer() - _t0
 
                 def closure():
                     optimizer.zero_grad()
@@ -2530,13 +2544,29 @@ class Training:
                 loss_sync_fn = reduce_mean if self.world_size > 1 else None
 
                 # Pre-compute loss & gradient at the current iterate before the inner loop
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
                 optimizer.zero_grad()
                 loss = closure()
                 loss.backward()
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_fwd_bwd += timeit.default_timer() - _t0
+
                 if self.grad_clip_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
                 if loss_sync_fn is not None:
                     loss = loss_sync_fn(loss.detach())
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_sync += timeit.default_timer() - _t0
 
                 options = {
                     'closure': closure,
@@ -2546,7 +2576,16 @@ class Training:
                 }
 
                 for inner in range(max_iter):
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
                     obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_optim += timeit.default_timer() - _t0
+                        total_inner_iters += 1
+
                     last_loss = obj.detach() if hasattr(obj, 'detach') else torch.as_tensor(obj)
 
                     # Stop early if line search failed or step size is zero
@@ -2554,20 +2593,49 @@ class Training:
                         break
 
                     # Recompute gradient for next inner iteration
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
                     optimizer.zero_grad()
                     loss = closure()
                     loss.backward()
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_fwd_bwd += timeit.default_timer() - _t0
+
                     if self.grad_clip_norm is not None:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
                     if loss_sync_fn is not None:
                         loss = loss_sync_fn(loss.detach())
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_sync += timeit.default_timer() - _t0
+
                     options['current_loss'] = loss
 
-            self._log(
-                "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(
-                    epoch, steps, float(last_loss) if last_loss is not None else float('nan')
+            if debug_timing:
+                self._log(
+                    "Epoch {} full_overlap: {} steps, {} inner_iters, loss={:.6e}".format(
+                        epoch, steps, total_inner_iters, float(last_loss) if last_loss is not None else float('nan')
+                    )
                 )
-            )
+                self._log(
+                    "  Timing: gather={:.2f}s fwd_bwd={:.2f}s sync={:.2f}s optim={:.2f}s".format(
+                        t_gather, t_fwd_bwd, t_sync, t_optim
+                    )
+                )
+            else:
+                self._log(
+                    "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(
+                        epoch, steps, float(last_loss) if last_loss is not None else float('nan')
+                    )
+                )
 
         elapsed = timeit.default_timer() - start_time
         self._log("Epoch {} multibatch step time: {:.2f}s".format(epoch, elapsed))
