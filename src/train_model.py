@@ -28,6 +28,12 @@ from build_model import build_network, QModel
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
+# Vendored hjmshi/PyTorch-LBFGS used for multi-batch + full-overlap modes.
+sys.path.insert(0, str(BASEDIR / "vendor"))
+from pytorch_lbfgs import LBFGS as HjmshiLBFGS
+
+from batching import FullOverlapSampler, MultiBatchSampler
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 PRINT_TRAINING_STEPS = 1
 PRINT_PRECISION      = 3
@@ -912,6 +918,8 @@ class Training:
         self.cfg_regularization = cfg.get('REGULARIZATION', None)
         self.regularization = self.build_regularization()
 
+        self.cfg_batch = self._parse_batch_cfg(cfg.get('BATCH', None))
+
         self.chk_path = chk_path
         self.es = self.build_early_stopper()
         self.meta_info = {
@@ -987,6 +995,69 @@ class Training:
             raise ValueError("unreachable")
 
         return reg
+
+    def _parse_batch_cfg(self, cfg_batch):
+        defaults = {
+            'MULTIBATCH_ENABLED':    False,
+            'MODE':                  'multi_batch',   # 'multi_batch' | 'full_overlap'
+            'BATCH_SIZE':            None,
+            'OVERLAP_FRACTION':      0.25,            # used only in 'multi_batch'
+            'RESHUFFLE_EACH_EPOCH':  True,
+            'LR':                    1.0,
+            'HISTORY_SIZE':          10,
+            'LINE_SEARCH':           None,            # None|'None'|'Wolfe'|'Armijo'
+            'DAMPING':               True,            # Powell damping for 'multi_batch'
+            'DAMPING_EPS':           0.2,
+            'SEED':                  42,
+        }
+
+        if cfg_batch is None:
+            return defaults
+
+        known = set(defaults.keys())
+        for key in cfg_batch.keys():
+            assert key in known, "[BATCH] unknown option: {}".format(key)
+
+        out = dict(defaults)
+        out.update(cfg_batch)
+
+        if not out['MULTIBATCH_ENABLED']:
+            return out
+
+        assert out['MODE'] in ('multi_batch', 'full_overlap'), \
+            "[BATCH] MODE must be 'multi_batch' or 'full_overlap', got {}".format(out['MODE'])
+        assert out['BATCH_SIZE'] is not None and int(out['BATCH_SIZE']) > 0, \
+            "[BATCH] BATCH_SIZE must be a positive integer when MULTIBATCH_ENABLED"
+        out['BATCH_SIZE'] = int(out['BATCH_SIZE'])
+
+        overlap = float(out['OVERLAP_FRACTION'])
+        assert 0.0 < overlap < 0.5, \
+            "[BATCH] OVERLAP_FRACTION must be in (0, 0.5), got {}".format(overlap)
+        out['OVERLAP_FRACTION'] = overlap
+
+        if out['MODE'] == 'multi_batch':
+            ls = out['LINE_SEARCH']
+            assert ls in (None, 'None'), \
+                "[BATCH] MODE='multi_batch' expects LINE_SEARCH=None (fixed steplength); got {}".format(ls)
+        else:  # full_overlap
+            ls = out['LINE_SEARCH']
+            assert ls in ('Wolfe', 'Armijo'), \
+                "[BATCH] MODE='full_overlap' requires LINE_SEARCH='Wolfe' or 'Armijo'; got {}".format(ls)
+
+        assert self.cfg['TYPE'] == 'ENERGY', \
+            "[BATCH] multi-batch L-BFGS is currently only supported for TYPE=ENERGY"
+
+        assert self.cfg_loss.get('TRUST_THRESHOLD') is None, \
+            "[BATCH] trust-region loss (TRUST_THRESHOLD) is not supported with multi-batch L-BFGS yet"
+
+        assert float(self.cfg_loss.get('FOCAL_GAMMA', 0.0)) == 0.0, \
+            "[BATCH] focal-EMA weighting (FOCAL_GAMMA>0) is not supported with multi-batch L-BFGS yet"
+
+        opt_name = self.cfg_solver['OPTIMIZER']['NAME']
+        assert opt_name == 'LBFGS', \
+            "[BATCH] MULTIBATCH_ENABLED requires OPTIMIZER.NAME=LBFGS, got {}".format(opt_name)
+
+        return out
 
     def build_optimizer(self, cfg_optimizer):
         if cfg_optimizer['NAME'] == 'LBFGS':
@@ -1165,10 +1236,25 @@ class Training:
     def train_model(self):
         self.model = self.model.to(DEVICE)
 
-        self.train.X = self.train.X.to(DEVICE)
-        self.train.y = self.train.y.to(DEVICE)
-        self.val.X = self.val.X.to(DEVICE)
-        self.val.y = self.val.y.to(DEVICE)
+        multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
+
+        if multibatch:
+            # Keep the training set on CPU; each step copies only its batch
+            # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
+            if torch.cuda.is_available():
+                self.train.X = self.train.X.pin_memory()
+                self.train.y = self.train.y.pin_memory()
+                if self.train.dX is not None:
+                    self.train.dX = self.train.dX.pin_memory()
+                    self.train.dy = self.train.dy.pin_memory()
+            # Val stays on GPU for cheap eval.
+            self.val.X = self.val.X.to(DEVICE)
+            self.val.y = self.val.y.to(DEVICE)
+        else:
+            self.train.X = self.train.X.to(DEVICE)
+            self.train.y = self.train.y.to(DEVICE)
+            self.val.X = self.val.X.to(DEVICE)
+            self.val.y = self.val.y.to(DEVICE)
 
         self.loss_fn = self.loss_fn.to(DEVICE)
 
@@ -1181,15 +1267,23 @@ class Training:
             self.val.xyz_ordered = self.val.xyz_ordered.to(DEVICE)
             self.test.xyz_ordered = self.test.xyz_ordered.to(DEVICE)
 
-        if self.train.dX is not None:
+        if self.train.dX is not None and not multibatch:
             self.train.dX = self.train.dX.to(DEVICE)
             self.train.dy = self.train.dy.to(DEVICE)
 
             self.val.dX = self.val.dX.to(DEVICE)
             self.val.dy = self.val.dy.to(DEVICE)
+        elif self.train.dX is not None and multibatch:
+            # Only move validation gradient tensors; train stays on pinned CPU.
+            self.val.dX = self.val.dX.to(DEVICE)
+            self.val.dy = self.val.dy.to(DEVICE)
 
 
-        self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
+        if multibatch:
+            self.optimizer = self._build_multibatch_optimizer()
+            self._init_multibatch_sampler()
+        else:
+            self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
         self.scheduler = self.build_scheduler()
 
         start = time.time()
@@ -1270,7 +1364,10 @@ class Training:
 
             print("loss function: {}".format(self.loss_fn))
 
-            self.train_epoch(epoch, self.optimizer)
+            if bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
+                self.train_epoch_multibatch(epoch, self.optimizer)
+            else:
+                self.train_epoch(epoch, self.optimizer)
 
             # Step scheduler - ReduceLROnPlateau requires metric, CosineAnnealing does not
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -2098,6 +2195,224 @@ class Training:
             assert False, "unreachable"
 
 
+    # ---- Multi-batch L-BFGS path (vendored hjmshi/PyTorch-LBFGS) --------------
+
+    def _build_multibatch_optimizer(self):
+        mode = self.cfg_batch['MODE']
+        lr = float(self.cfg_batch['LR'])
+        history_size = int(self.cfg_batch['HISTORY_SIZE'])
+
+        if mode == 'multi_batch':
+            line_search = 'None'   # fixed steplength; Powell damping handles curvature.
+        else:
+            line_search = self.cfg_batch['LINE_SEARCH']
+
+        opt = HjmshiLBFGS(
+            self.model.parameters(),
+            lr=lr,
+            history_size=history_size,
+            line_search=line_search,
+            debug=False,
+        )
+        logging.info(
+            "Built multi-batch LBFGS: mode={} lr={} history_size={} line_search={}".format(
+                mode, lr, history_size, line_search
+            )
+        )
+        return opt
+
+    def _init_multibatch_sampler(self):
+        n = self.train.X.shape[0]
+        B = int(self.cfg_batch['BATCH_SIZE'])
+        seed = int(self.cfg_batch['SEED'])
+        mode = self.cfg_batch['MODE']
+        if mode == 'multi_batch':
+            self.sampler = MultiBatchSampler(
+                n_samples=n,
+                batch_size=B,
+                overlap_fraction=float(self.cfg_batch['OVERLAP_FRACTION']),
+                seed=seed,
+            )
+        else:
+            self.sampler = FullOverlapSampler(
+                n_samples=n,
+                batch_size=B,
+                seed=seed,
+            )
+        logging.info(
+            "Initialized sampler: mode={} N={} batch_size={} steps/epoch={}".format(
+                mode, n, B, self.sampler.steps_per_epoch()
+            )
+        )
+
+    def _gather_batch(self, idx):
+        """Move one batch of (X, y[, dX, dy]) to DEVICE. Returns a plain dict."""
+        use_grad = self.cfg_loss['USE_GRADIENTS']
+        non_blocking = torch.cuda.is_available()
+
+        X_cpu = self.train.X[idx]
+        y_cpu = self.train.y[idx]
+        X = X_cpu.to(DEVICE, non_blocking=non_blocking)
+        y = y_cpu.to(DEVICE, non_blocking=non_blocking)
+
+        batch = {'X': X, 'y': y}
+        if use_grad:
+            dX_cpu = self.train.dX[idx]
+            dy_cpu = self.train.dy[idx]
+            batch['dX'] = dX_cpu.to(DEVICE, non_blocking=non_blocking)
+            batch['dy'] = dy_cpu.to(DEVICE, non_blocking=non_blocking)
+        return batch
+
+    def _loss_and_flat_grad(self, batch):
+        """Forward + backward on one batch; returns (loss_tensor, flat_grad)."""
+        self.optimizer.zero_grad()
+
+        if self.cfg_loss['USE_GRADIENTS']:
+            X = batch['X'].clone()
+            X.requires_grad = True
+            y_pred = self.model(X)
+            dy_pred = self.compute_gradients_from_energy(X, batch['dX'], y_pred)
+            loss = self.loss_fn(batch['y'], y_pred, batch['dy'], dy_pred)
+        else:
+            y_pred = self.model(batch['X'])
+            loss = self.loss_fn(batch['y'], y_pred)
+
+        if self.regularization is not None:
+            loss = loss + self.regularization(self.model)
+
+        loss.backward()
+
+        if self.grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+        flat_grad = self.optimizer._gather_flat_grad()
+        return loss, flat_grad
+
+    def _make_closure(self, batch):
+        """Factory closure for Wolfe/Armijo line search.
+
+        Returns a callable with no arguments that recomputes the objective on
+        the *same* batch each call -- hjmshi's LBFGS expects the closure to
+        return a scalar tensor (no backward inside).
+        """
+        def closure():
+            self.optimizer.zero_grad()
+            if self.cfg_loss['USE_GRADIENTS']:
+                X = batch['X'].clone()
+                X.requires_grad = True
+                y_pred = self.model(X)
+                dy_pred = self.compute_gradients_from_energy(X, batch['dX'], y_pred)
+                loss = self.loss_fn(batch['y'], y_pred, batch['dy'], dy_pred)
+            else:
+                y_pred = self.model(batch['X'])
+                loss = self.loss_fn(batch['y'], y_pred)
+            if self.regularization is not None:
+                loss = loss + self.regularization(self.model)
+            return loss
+        return closure
+
+    def train_epoch_multibatch(self, epoch, optimizer):
+        self.model.train()
+        mode = self.cfg_batch['MODE']
+        steps = self.sampler.steps_per_epoch()
+
+        start_time = timeit.default_timer()
+
+        if mode == 'multi_batch':
+            alpha = float(self.cfg_batch['OVERLAP_FRACTION'])
+            damping = bool(self.cfg_batch['DAMPING'])
+            damping_eps = float(self.cfg_batch['DAMPING_EPS'])
+
+            Ok_prev_idx = self.sampler.current_prev_overlap()
+            batch_Ok_prev = self._gather_batch(Ok_prev_idx)
+            _, g_Ok_prev = self._loss_and_flat_grad(batch_Ok_prev)
+
+            last_loss = None
+            for step in range(steps):
+                Ok_idx, Nk_idx = self.sampler.next_step()
+
+                batch_Ok = self._gather_batch(Ok_idx)
+                loss_Ok, g_Ok = self._loss_and_flat_grad(batch_Ok)
+
+                batch_Nk = self._gather_batch(Nk_idx)
+                _, g_Nk = self._loss_and_flat_grad(batch_Nk)
+
+                g_Sk = alpha * (g_Ok_prev + g_Ok) + (1.0 - 2.0 * alpha) * g_Nk
+
+                p = optimizer.two_loop_recursion(-g_Sk)
+                lr_used = optimizer.step(p, g_Ok, g_Sk=g_Sk)
+
+                # Recompute Ok gradient at the new iterate for curvature pair.
+                batch_Ok_new = self._gather_batch(Ok_idx)
+                _, g_Ok_new = self._loss_and_flat_grad(batch_Ok_new)
+                optimizer.curvature_update(g_Ok_new, eps=damping_eps, damping=damping)
+
+                # Shift: this step's Ok becomes next step's "Ok_prev".
+                self.sampler.advance(Ok_idx)
+                g_Ok_prev = g_Ok_new
+                last_loss = loss_Ok.detach()
+
+            logging.info(
+                "Epoch {} multi_batch: {} steps, lr_last={}, loss_Ok_last={:.6e}".format(
+                    epoch, steps, lr_used, float(last_loss) if last_loss is not None else float('nan')
+                )
+            )
+
+        else:  # full_overlap
+            last_loss = None
+            for step in range(steps):
+                (Sk_idx,) = self.sampler.next_step()
+                batch_Sk = self._gather_batch(Sk_idx)
+
+                loss_Sk, g_Sk = self._loss_and_flat_grad(batch_Sk)
+
+                p = optimizer.two_loop_recursion(-g_Sk)
+
+                closure = self._make_closure(batch_Sk)
+                options = {'closure': closure, 'current_loss': loss_Sk}
+                obj, grad_new, t, _, _, _, _, _ = optimizer.step(p, g_Sk, options=options)
+
+                optimizer.curvature_update(grad_new)
+                last_loss = obj.detach() if hasattr(obj, 'detach') else torch.as_tensor(obj)
+
+            logging.info(
+                "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(
+                    epoch, steps, float(last_loss) if last_loss is not None else float('nan')
+                )
+            )
+
+        elapsed = timeit.default_timer() - start_time
+        logging.info("Epoch {} multibatch step time: {:.2f}s".format(epoch, elapsed))
+
+        self.model.eval()
+        with torch.no_grad():
+            if self.cfg_loss['USE_GRADIENTS']:
+                val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
+                val_e_d    = self.loss_fn.descale_energies(self.val.y)
+                val_e_pred = self.loss_fn.descale_energies(val_y_pred)
+                enmin_val = val_e_d.min()
+                w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
+                loss_val = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
+                val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred)**2))
+                natoms = self.train.NATOMS
+                val_dy_flat = self.val.dy.reshape(-1, 3 * natoms)
+                val_g_rmse = torch.sqrt(torch.mean(torch.sum((val_dy_flat - val_dy_pred)**2, dim=1) / (3 * natoms)))
+                logging.info(
+                    "Epoch: {}; (val) WMSE: {:.3f}; (energy) RMSE val: {:.3f} cm-1; (gradient) RMSE val: {:.3f} cm-1/bohr".format(
+                        epoch, loss_val, val_e_rmse, val_g_rmse
+                    )
+                )
+            else:
+                val_y_pred = self.model(self.val.X)
+                loss_val = self.loss_fn(self.val.y, val_y_pred)
+                logging.info("Epoch: {}; loss val: {:.3f} cm-1".format(epoch, loss_val))
+
+        self.loss_val = loss_val
+        current_lr = optimizer.param_groups[0]['lr']
+        self.writer.add_scalar("loss/val", loss_val, epoch)
+        self.writer.add_scalar("lr", current_lr, epoch)
+
+
     def model_eval(self):
         self.test.X = self.test.X.to(DEVICE)
         self.test.y = self.test.y.to(DEVICE)
@@ -2215,7 +2530,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION', 'BATCH')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 

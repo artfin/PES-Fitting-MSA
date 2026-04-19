@@ -40,3 +40,5 @@ H2-H2O/points.dat
 
 CH4-N2/dataset.pt
 H2-H2O/dataset.pt
+
+vendor/pytorch_lbfgs/__pycache__/*
