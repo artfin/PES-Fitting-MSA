@@ -2524,20 +2524,25 @@ class Training:
                         loss = self.loss_fn(batch_Sk['y'], y_pred)
                     if self.regularization is not None:
                         loss = loss + self.regularization(self.model)
-                    loss.backward()
-                    if self.grad_clip_norm is not None:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                    if self.world_size > 1:
-                        loss = reduce_mean(loss.detach())
                     return loss
 
+                # Sync function for distributed: average loss across ranks after backward
+                loss_sync_fn = reduce_mean if self.world_size > 1 else None
+
                 # Pre-compute loss & gradient at the current iterate before the inner loop
+                optimizer.zero_grad()
                 loss = closure()
+                loss.backward()
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                if loss_sync_fn is not None:
+                    loss = loss_sync_fn(loss.detach())
 
                 options = {
                     'closure': closure,
                     'current_loss': loss,
                     'grad_clip_norm': self.grad_clip_norm,
+                    'loss_sync_fn': loss_sync_fn,
                 }
 
                 for inner in range(max_iter):
@@ -2549,7 +2554,13 @@ class Training:
                         break
 
                     # Recompute gradient for next inner iteration
+                    optimizer.zero_grad()
                     loss = closure()
+                    loss.backward()
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    if loss_sync_fn is not None:
+                        loss = loss_sync_fn(loss.detach())
                     options['current_loss'] = loss
 
             self._log(
