@@ -30,7 +30,7 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 # Vendored hjmshi/PyTorch-LBFGS used for multi-batch + full-overlap modes.
 sys.path.insert(0, str(BASEDIR / "vendor"))
-from pytorch_lbfgs import LBFGS as HjmshiLBFGS
+from pytorch_lbfgs import LBFGS as HjmshiLBFGS, FullBatchLBFGS as HjmshiFullBatchLBFGS
 
 from batching import FullOverlapSampler, MultiBatchSampler
 
@@ -1304,8 +1304,23 @@ class Training:
                 # describe the energy-only loss surface and produce degenerate
                 # search directions on the new energy+gradient surface, causing
                 # the Wolfe line search to return t=0 indefinitely.
-                if isinstance(self.optimizer, torch.optim.LBFGS):
-                    self.optimizer.state.clear()
+                if isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS)):
+                    if isinstance(self.optimizer, torch.optim.LBFGS):
+                        self.optimizer.state.clear()
+                    else:
+                        # vendored LBFGS / FullBatchLBFGS
+                        state = self.optimizer.state['global_state']
+                        state['n_iter'] = 0
+                        state['curv_skips'] = 0
+                        state['fail_skips'] = 0
+                        state['H_diag'] = 1
+                        state['fail'] = True
+                        state['old_dirs'] = []
+                        state['old_stps'] = []
+                        if 'rho' in state:
+                            state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
+                        if 'alpha' in state:
+                            state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
                     self._lbfgs_prev_n_iter = 0
                     self._lbfgs_prev_func_evals = 0
                     logging.info("Reset L-BFGS state at gradient inclusion (epoch {})".format(epoch))
@@ -1353,11 +1368,25 @@ class Training:
             )
             if (lbfgs_reset_interval > 0
                     and self.cfg_loss['USE_GRADIENTS']
-                    and isinstance(self.optimizer, torch.optim.LBFGS)
+                    and isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS))
                     and epoch > self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0)
                     and (epoch - self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0))
                         % lbfgs_reset_interval == 0):
-                self.optimizer.state.clear()
+                if isinstance(self.optimizer, torch.optim.LBFGS):
+                    self.optimizer.state.clear()
+                else:
+                    state = self.optimizer.state['global_state']
+                    state['n_iter'] = 0
+                    state['curv_skips'] = 0
+                    state['fail_skips'] = 0
+                    state['H_diag'] = 1
+                    state['fail'] = True
+                    state['old_dirs'] = []
+                    state['old_stps'] = []
+                    if 'rho' in state:
+                        state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
+                    if 'alpha' in state:
+                        state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
                 self._lbfgs_prev_n_iter = 0
                 self._lbfgs_prev_func_evals = 0
                 logging.info("Periodic L-BFGS state reset (epoch {})".format(epoch))
@@ -2204,10 +2233,12 @@ class Training:
 
         if mode == 'multi_batch':
             line_search = 'None'   # fixed steplength; Powell damping handles curvature.
+            opt_cls = HjmshiLBFGS
         else:
             line_search = self.cfg_batch['LINE_SEARCH']
+            opt_cls = HjmshiFullBatchLBFGS
 
-        opt = HjmshiLBFGS(
+        opt = opt_cls(
             self.model.parameters(),
             lr=lr,
             history_size=history_size,
@@ -2357,20 +2388,54 @@ class Training:
 
         else:  # full_overlap
             last_loss = None
+            max_iter = self.cfg_solver['OPTIMIZER'].get('MAX_ITER', 100)
             for step in range(steps):
                 (Sk_idx,) = self.sampler.next_step()
                 batch_Sk = self._gather_batch(Sk_idx)
 
-                loss_Sk, g_Sk = self._loss_and_flat_grad(batch_Sk)
+                def closure():
+                    optimizer.zero_grad()
+                    if self.cfg_loss['USE_GRADIENTS']:
+                        X = batch_Sk['X'].clone()
+                        X.requires_grad = True
+                        y_pred = self.model(X)
+                        dy_pred = self.compute_gradients_from_energy(X, batch_Sk['dX'], y_pred)
+                        loss = self.loss_fn(batch_Sk['y'], y_pred, batch_Sk['dy'], dy_pred)
+                    else:
+                        y_pred = self.model(batch_Sk['X'])
+                        loss = self.loss_fn(batch_Sk['y'], y_pred)
+                    if self.regularization is not None:
+                        loss = loss + self.regularization(self.model)
+                    return loss
 
-                p = optimizer.two_loop_recursion(-g_Sk)
+                # Pre-compute loss & gradient at the current iterate before the inner loop
+                optimizer.zero_grad()
+                loss = closure()
+                loss.backward()
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
-                closure = self._make_closure(batch_Sk)
-                options = {'closure': closure, 'current_loss': loss_Sk}
-                obj, grad_new, t, _, _, _, _, _ = optimizer.step(p, g_Sk, options=options)
+                options = {
+                    'closure': closure,
+                    'current_loss': loss,
+                    'grad_clip_norm': self.grad_clip_norm,
+                }
 
-                optimizer.curvature_update(grad_new)
-                last_loss = obj.detach() if hasattr(obj, 'detach') else torch.as_tensor(obj)
+                for inner in range(max_iter):
+                    obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+                    last_loss = obj.detach() if hasattr(obj, 'detach') else torch.as_tensor(obj)
+
+                    # Stop early if line search failed or step size is zero
+                    if fail or t == 0:
+                        break
+
+                    # Recompute gradient for next inner iteration
+                    optimizer.zero_grad()
+                    loss = closure()
+                    loss.backward()
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    options['current_loss'] = loss
 
             logging.info(
                 "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(

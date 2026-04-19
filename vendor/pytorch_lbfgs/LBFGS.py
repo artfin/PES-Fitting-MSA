@@ -587,6 +587,11 @@ class LBFGS(Optimizer):
                 else:
                     ls_debug = options['ls_debug']
 
+                if 'grad_clip_norm' not in options.keys():
+                    grad_clip_norm = None
+                else:
+                    grad_clip_norm = options['grad_clip_norm']
+
             else:
                 raise(ValueError('Options are not specified; need closure evaluating function.'))
 
@@ -837,6 +842,8 @@ class LBFGS(Optimizer):
                     t = 0
                     F_new = closure()
                     F_new.backward()
+                    if grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
                     g_new = self._gather_flat_grad()
                     closure_eval += 1
                     grad_eval += 1
@@ -869,6 +876,8 @@ class LBFGS(Optimizer):
 
                     # compute gradient
                     F_new.backward()
+                    if grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
                     g_new = self._gather_flat_grad()
                     grad_eval += 1
                     gtd_new = g_new.dot(d)
