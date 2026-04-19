@@ -6,16 +6,99 @@ from copy import deepcopy
 from torch.optim import Optimizer
 
 
+class SyncedLoss:
+    """Wrapper for loss tensor that holds both original (for backward) and synced value (for comparisons).
+
+    In distributed training, each rank computes loss on different data. For line search
+    to make consistent decisions across ranks, we need a synced (averaged) loss value.
+    But we also need the original tensor with grad_fn for backward().
+
+    This class stores both and delegates comparison operations to the synced value
+    while preserving the original for backward().
+    """
+    def __init__(self, loss_tensor, sync_fn=None):
+        self._tensor = loss_tensor
+        if sync_fn is not None:
+            self._synced_value = sync_fn(loss_tensor.detach())
+        else:
+            self._synced_value = loss_tensor.detach()
+
+    def backward(self):
+        self._tensor.backward()
+
+    def item(self):
+        return float(self._synced_value)
+
+    def detach(self):
+        """Return the synced value (already detached)."""
+        return self._synced_value
+
+    def __float__(self):
+        return float(self._synced_value)
+
+    def __gt__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value > other._synced_value
+        return self._synced_value > other
+
+    def __lt__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value < other._synced_value
+        return self._synced_value < other
+
+    def __ge__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value >= other._synced_value
+        return self._synced_value >= other
+
+    def __le__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value <= other._synced_value
+        return self._synced_value <= other
+
+    def __add__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value + other._synced_value
+        return self._synced_value + other
+
+    def __radd__(self, other):
+        return other + self._synced_value
+
+    def __sub__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value - other._synced_value
+        return self._synced_value - other
+
+    def __rsub__(self, other):
+        return other - self._synced_value
+
+    def __mul__(self, other):
+        if isinstance(other, SyncedLoss):
+            return self._synced_value * other._synced_value
+        return self._synced_value * other
+
+    def __rmul__(self, other):
+        return other * self._synced_value
+
+    def __repr__(self):
+        return f"SyncedLoss({float(self._synced_value):.6e})"
+
+    @property
+    def synced_tensor(self):
+        """Return the synced value as a tensor (for is_legal check)."""
+        return self._synced_value
+
+
 def is_legal(v):
     """
     Checks that tensor is not NaN or Inf.
 
     Inputs:
-        v (tensor): tensor to be checked
-
+        v (tensor or SyncedLoss): value to be checked
     """
+    if isinstance(v, SyncedLoss):
+        v = v.synced_tensor
     legal = not torch.isnan(v).any() and not torch.isinf(v)
-
     return legal
 
 
@@ -596,8 +679,20 @@ class LBFGS(Optimizer):
                 else:
                     ls_debug = options['ls_debug']
 
+                # Distributed training: sync loss across ranks after closure
+                loss_sync_fn = options.get('loss_sync_fn', None)
+
             else:
                 raise(ValueError('Options are not specified; need closure evaluating function.'))
+
+            # Wrap closure to return SyncedLoss for distributed training
+            if loss_sync_fn is not None:
+                _original_closure = closure
+                def closure():
+                    return SyncedLoss(_original_closure(), loss_sync_fn)
+                # Also wrap F_k if it was passed in
+                if isinstance(F_k, torch.Tensor):
+                    F_k = SyncedLoss(F_k, loss_sync_fn)
 
             # initialize values
             if interpolate:
@@ -786,8 +881,20 @@ class LBFGS(Optimizer):
                 else:
                     ls_debug = options['ls_debug']
 
+                # Distributed training: sync loss across ranks after closure
+                loss_sync_fn = options.get('loss_sync_fn', None)
+
             else:
                 raise(ValueError('Options are not specified; need closure evaluating function.'))
+
+            # Wrap closure to return SyncedLoss for distributed training
+            if loss_sync_fn is not None:
+                _original_closure = closure
+                def closure():
+                    return SyncedLoss(_original_closure(), loss_sync_fn)
+                # Also wrap F_k if it was passed in
+                if isinstance(F_k, torch.Tensor):
+                    F_k = SyncedLoss(F_k, loss_sync_fn)
 
             # initialize counters
             ls_step = 0
