@@ -98,7 +98,7 @@ def fit_scalers_to_train_dataset(train, cfg):
 
 
 def load_from_checkpoint(chk_path):
-    state = torch.load(chk_path, map_location=torch.device(DEVICE))
+    state = torch.load(chk_path, map_location=torch.device(DEVICE), weights_only=False)
     assert state.get("model", None) is not None, "No 'model' field found in checkpoint loaded from {}".format(chk_path)
     assert state.get("X_mean", None) is not None, "No 'X_mean' field found in checkpoint loaded from {}".format(chk_path)
     assert state.get("X_std", None) is not None, "No 'X_std' field found in checkpoint loaded from {}".format(chk_path)
