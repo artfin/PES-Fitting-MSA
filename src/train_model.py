@@ -2460,21 +2460,50 @@ class Training:
         self.model.eval()
         with torch.no_grad():
             if self.cfg_loss['USE_GRADIENTS']:
+                # Compute predictions for both train and val
+                train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
                 val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
+
+                # Energy metrics
+                train_e_d    = self.loss_fn.descale_energies(self.train.y)
+                train_e_pred = self.loss_fn.descale_energies(train_y_pred)
+                train_e_mae  = torch.mean(torch.abs(train_e_d - train_e_pred))
+                train_e_rmse = torch.sqrt(torch.mean((train_e_d - train_e_pred)**2))
+
                 val_e_d    = self.loss_fn.descale_energies(self.val.y)
                 val_e_pred = self.loss_fn.descale_energies(val_y_pred)
+                val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred))
+                val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred)**2))
+
+                # Gradient metrics
+                natoms = self.train.NATOMS
+                train_dy = self.train.dy.reshape(-1, 3 * natoms)
+                val_dy   = self.val.dy.reshape(-1, 3 * natoms)
+                train_g_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
+                val_g_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
+                train_g_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred)**2, dim=1) / (3 * natoms)))
+                val_g_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred)**2, dim=1) / (3 * natoms)))
+
+                # Weighted MSE for scheduler
+                enmin_train = train_e_d.min()
+                w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
+                loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
+
                 enmin_val = val_e_d.min()
                 w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
-                loss_val = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
-                val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred)**2))
-                natoms = self.train.NATOMS
-                val_dy_flat = self.val.dy.reshape(-1, 3 * natoms)
-                val_g_rmse = torch.sqrt(torch.mean(torch.sum((val_dy_flat - val_dy_pred)**2, dim=1) / (3 * natoms)))
-                logging.info(
-                    "Epoch: {}; (val) WMSE: {:.3f}; (energy) RMSE val: {:.3f} cm-1; (gradient) RMSE val: {:.3f} cm-1/bohr".format(
-                        epoch, loss_val, val_e_rmse, val_g_rmse
-                    )
-                )
+                loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
+
+                logging.info("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
+                                           (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
+                                           (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE val:   {:.3f} cm-1; (gradient) RMSE val:   {:.3f} cm-1/bohr".format(
+                    epoch, loss_train_e, loss_val_e, train_e_mae, train_g_mae, val_e_mae, val_g_mae, train_e_rmse, train_g_rmse, val_e_rmse, val_g_rmse
+                ))
+
+                loss_val = loss_val_e
+
+                self.writer.add_scalar("loss/train", loss_train_e, epoch)
             else:
                 val_y_pred = self.model(self.val.X)
                 loss_val = self.loss_fn(self.val.y, val_y_pred)
