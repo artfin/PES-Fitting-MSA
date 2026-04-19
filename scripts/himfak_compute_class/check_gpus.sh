@@ -28,7 +28,7 @@ printf "%-16s %-28s %-15s %-12s\n" "IP" "GPU Name" "Memory (MiB)" "Driver"
 printf "%-16s %-28s %-15s %-12s\n" "---" "--------" "------------" "------"
 
 for ip in "${NODES[@]}"; do
-    result=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${ip}" \
+    result=$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER}@${ip}" \
         "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo 'N/A,N/A,N/A'" 2>/dev/null || echo "N/A,N/A,N/A")
 
     if [[ -z "$result" ]] || [[ "$result" == "N/A,N/A,N/A" ]]; then
