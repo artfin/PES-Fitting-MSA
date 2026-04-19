@@ -1,0 +1,10 @@
+# Core dependencies for PES-Fitting-MSA
+# Install with: pip install -r requirements-core.txt
+
+scikit-learn>=1.0.2
+matplotlib>=3.5.1
+PyYAML>=6.0
+tensorboard>=2.9.0
+Pillow>=9.1.1
+psutil
+tqdm

@@ -38,7 +38,7 @@ echo ""
 echo "--- Remote nodes ---"
 
 for ip in "${NODES[@]}"; do
-    has_slurm=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${ip}" \
+    has_slurm=$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER}@${ip}" \
         "command -v sbatch && echo YES || echo NO" 2>/dev/null || echo "SSH_FAIL")
 
     has_pbs=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${ip}" \

@@ -91,7 +91,7 @@ else
                 printf "%-16s %-15s %-10s\n" "$ip" "N/A" "localhost"
                 continue
             fi
-            bw=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+            bw=$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "${SSH_USER}@${ip}" \
                 "iperf3 -c ${MASTER_IP} -t 3 --format m 2>/dev/null | grep 'sender' | awk '{print \$7, \$8}'" 2>/dev/null || echo "FAILED")
             printf "%-16s %-15s %-10s\n" "$ip" "$bw" "-> master"
             printf "%-16s %-15s %-10s\n" "$ip" "$bw" "-> master" >> "$REPORT_FILE"

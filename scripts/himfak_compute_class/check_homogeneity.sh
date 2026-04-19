@@ -26,7 +26,7 @@ echo "" >> "$REPORT_FILE"
 remote_cmd() {
     local ip="$1"
     local cmd="$2"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${ip}" "$cmd" 2>/dev/null || echo "ERROR"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER}@${ip}" "$cmd" 2>/dev/null || echo "ERROR"
 }
 
 echo "--- 1. CPU Info ---"

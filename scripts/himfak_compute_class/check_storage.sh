@@ -30,8 +30,8 @@ for ip in "${NODES[@]}"; do
     echo "Node: $ip"
     echo "Node: $ip" >> "$REPORT_FILE"
 
-    mounts=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${SSH_USER}@${ip}" \
-        "findmnt -t nfs,nfs4,ceph,fuse.sshfs -o TARGET,SOURCE,FSTYPE,AVAIL -n 2>/dev/null || true" 2>/dev/null)
+    mounts=$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER}@${ip}" \
+        "findmnt -t nfs,nfs4,ceph,fuse.sshfs -o TARGET,SOURCE,FSTYPE,AVAIL -n 2>/dev/null || true" 2>/dev/null || true)
 
     if [[ -z "$mounts" ]]; then
         echo "  No remote filesystems mounted."
