@@ -928,6 +928,8 @@ class Training:
 
         self.cfg_batch = self._parse_batch_cfg(cfg.get('BATCH', None))
 
+        self.cfg_debug = cfg.get('DEBUG', {})
+
         self.chk_path = chk_path
         self.es = self.build_early_stopper()
         self.meta_info = {
@@ -2507,7 +2509,7 @@ class Training:
         else:  # full_overlap
             last_loss = None
             max_iter = self.cfg_solver['OPTIMIZER'].get('MAX_ITER', 100)
-            debug_timing = self.cfg.get('DEBUG', {}).get('TIMING', False)
+            debug_timing = self.cfg_debug.get('TIMING', False)
 
             # Timing accumulators (only used if debug_timing)
             if debug_timing:
@@ -2849,7 +2851,7 @@ def load_cfg(cfg_path):
         except yaml.YAMLError as exc:
             logging.info(exc)
 
-    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION', 'BATCH')
+    known_groups = ('TYPE', 'DATASET', 'MODEL', 'LOSS', 'TRAINING', 'PRINT_PRECISION', 'PRETRAINED_MODEL_SETTINGS', 'REGULARIZATION', 'BATCH', 'DEBUG')
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
