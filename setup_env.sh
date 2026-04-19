@@ -13,8 +13,7 @@ TORCH_VERSION="2.10.0"
 CUDA_VERSION="cu128"
 
 VENV_PATH=${1:-venv}
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== PES-Fitting-MSA Environment Setup ==="
 echo "Project: $PROJECT_DIR"
