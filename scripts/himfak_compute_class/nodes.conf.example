@@ -1,0 +1,37 @@
+# Cluster node configuration template
+# 
+# Copy this file to nodes.conf and fill in your actual values:
+#   cp nodes.conf.example nodes.conf
+#
+# The nodes.conf file is NOT committed to git (see .gitignore).
+# This template documents the expected format.
+
+# IP of the rank-0 node (master) for PyTorch distributed rendezvous
+MASTER_IP=192.168.49.110
+
+# TCP port for PyTorch distributed rendezvous (default: 29500)
+MASTER_PORT=29500
+
+# List of all compute nodes (including master if it also runs workers)
+# These IPs are used by the check_* scripts and launch scripts.
+NODES=(
+    192.168.49.101
+    192.168.49.102
+    192.168.49.103
+    # ... add remaining nodes
+    # 192.168.49.125
+)
+
+# SSH user for connecting to nodes
+# All scripts assume passwordless SSH is already configured:
+#   ssh-copy-id <user>@<node_ip>
+SSH_USER=admin
+
+# Candidate NFS / shared mount points to probe for storage checks.
+# The check_storage.sh script will verify which of these are actually mounted.
+NFS_MOUNTS=(
+    /mnt/shared
+    /shared
+    /nfs
+    /home
+)

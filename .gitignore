@@ -42,3 +42,10 @@ CH4-N2/dataset.pt
 H2-H2O/dataset.pt
 
 vendor/pytorch_lbfgs/__pycache__/*
+
+# Cluster-specific configuration files (contain IPs, local paths)
+# Commit the .example template, ignore live configs and generated reports.
+scripts/*/nodes.conf
+scripts/*/*report*.txt
+scripts/*/*_*.txt
+scripts/*/.tmp_*
