@@ -1035,6 +1035,9 @@ class Training:
             "[BATCH] OVERLAP_FRACTION must be in (0, 0.5), got {}".format(overlap)
         out['OVERLAP_FRACTION'] = overlap
 
+        assert out['MODE'] != 'multi_batch', \
+            "[BATCH] MODE='multi_batch' is disabled; use 'full_overlap' instead"
+
         if out['MODE'] == 'multi_batch':
             ls = out['LINE_SEARCH']
             assert ls in (None, 'None'), \
@@ -1871,14 +1874,15 @@ class Training:
         Xtr = dataset.X.clone().detach()
         Xtr.requires_grad = True
 
-        y_pred = self.model(Xtr)
-        dEdp = torch.autograd.grad(
-            outputs=y_pred,
-            inputs=Xtr,
-            grad_outputs=torch.ones_like(y_pred),
-            retain_graph=False,
-            create_graph=False
-        )[0]
+        with torch.enable_grad():
+            y_pred = self.model(Xtr)
+            dEdp = torch.autograd.grad(
+                outputs=y_pred,
+                inputs=Xtr,
+                grad_outputs=torch.ones_like(y_pred),
+                retain_graph=False,
+                create_graph=False
+            )[0]
 
         Xtr.requires_grad = False
 
@@ -2312,6 +2316,9 @@ class Training:
             loss = loss + self.regularization(self.model)
 
         loss.backward()
+
+        if self.grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
         flat_grad = self.optimizer._gather_flat_grad()
         return loss, flat_grad
