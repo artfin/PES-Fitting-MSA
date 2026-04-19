@@ -16,10 +16,7 @@ MASTER_PORT=29500
 # These IPs are used by the check_* scripts and launch scripts.
 NODES=(
     192.168.49.101
-    192.168.49.102
-    192.168.49.103
     # ... add remaining nodes
-    # 192.168.49.125
 )
 
 # SSH user for connecting to nodes
