@@ -1239,6 +1239,10 @@ class Training:
     def train_model(self):
         self.model = self.model.to(DEVICE)
 
+        if self.cfg_solver.get('TORCH_COMPILE', False):
+            self.model = torch.compile(self.model, mode='reduce-overhead')
+            logging.info("Model compiled with torch.compile(mode='reduce-overhead')")
+
         multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
 
         if multibatch:
@@ -1449,7 +1453,7 @@ class Training:
 
         # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
         # `torch.einsum` throws a Runtime error without an explicit conversion to Double
-        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
@@ -1483,7 +1487,7 @@ class Training:
         dEdp = torch.div(dEdp, x_scale)
 
         # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
-        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dX_subset.double())
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dX_subset.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
@@ -1891,7 +1895,7 @@ class Training:
         dEdp = torch.div(dEdp, x_scale)
 
         # gradient = dE/dx
-        dEdx = torch.einsum('ij,ijk -> ik', dEdp.double(), dataset.dX.double())
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
 
         # take into account normalization of model energy
         y_scale = torch.from_numpy(self.yscaler.scale_).to(DEVICE)
@@ -2003,7 +2007,7 @@ class Training:
                 X_inf_tr = torch.from_numpy(xscaler.transform(X_inf)).to(DEVICE)
                 q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
                 q_corr   = q_pred - q_inf                               # corrected partial charges
-                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), q_corr)
+                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), q_corr)
 
                 # charge regularization
                 # NOTE: use `mean`
@@ -2161,7 +2165,7 @@ class Training:
                 train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
-                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
@@ -2169,7 +2173,7 @@ class Training:
                 val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
-                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 # value to be passed to EarlyStopping/ReduceLR mechanisms
@@ -2547,7 +2551,7 @@ class Training:
                 train_X_inf_tr = torch.from_numpy(xscaler.transform(train_X_inf)).to(DEVICE)
                 train_q_inf    = self.model(train_X_inf_tr)
                 train_q_corr   = train_q_pred - train_q_inf
-                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.double(), train_q_corr)
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
                 loss_train     = self.loss_fn(self.train.y, dip_pred_train)
 
                 val_q_pred   = self.model(self.val.X)
@@ -2555,7 +2559,7 @@ class Training:
                 val_X_inf_tr = torch.from_numpy(xscaler.transform(val_X_inf)).to(DEVICE)
                 val_q_inf    = self.model(val_X_inf_tr)
                 val_q_corr   = val_q_pred - val_q_inf
-                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.double(), val_q_corr)
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 test_q_pred   = self.model(self.test.X)
@@ -2563,7 +2567,7 @@ class Training:
                 test_X_inf_tr = torch.from_numpy(xscaler.transform(test_X_inf)).to(DEVICE)
                 test_q_inf    = self.model(test_X_inf_tr)
                 test_q_corr   = test_q_pred - test_q_inf
-                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.double(), test_q_corr)
+                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.to(TORCH_FLOAT), test_q_corr)
                 loss_test     = self.loss_fn(self.test.y, dip_pred_test)
 
             logging.info("Model evluation after training:")
