@@ -861,7 +861,24 @@ def count_params(model):
 
 
 class Training:
-    def __init__(self, model_folder, model_name, ckh_path, cfg, train, val, test):
+    def __init__(self, model_folder, model_name, ckh_path, cfg, train, val, test, rank=0, world_size=1, local_rank=0):
+        self.rank = rank
+        self.world_size = world_size
+        self.local_rank = local_rank
+
+        # Data sharding for distributed full-batch training
+        cfg_dataset = cfg.get('DATASET', {})
+        if cfg_dataset.get('SHARDED', False) and self.world_size > 1:
+            from distributed import shard_dataset
+            train, dropped_train = shard_dataset(train, self.rank, self.world_size)
+            val, dropped_val = shard_dataset(val, self.rank, self.world_size)
+            test, dropped_test = shard_dataset(test, self.rank, self.world_size)
+            if is_main_process():
+                logging.info(f"Data sharding enabled: {len(train.y)} train / {len(val.y)} val / {len(test.y)} test per rank")
+                total_dropped = dropped_train + dropped_val + dropped_test
+                if total_dropped > 0:
+                    logging.info(f"Dropped {total_dropped} samples to ensure equal shards")
+
         EVENTDIR = "runs"
         if not os.path.isdir(EVENTDIR):
             os.makedirs(EVENTDIR)
@@ -927,6 +944,13 @@ class Training:
         self.regularization = self.build_regularization()
 
         self.cfg_batch = self._parse_batch_cfg(cfg.get('BATCH', None))
+
+        # Data sharding is only compatible with full-batch L-BFGS
+        if cfg_dataset.get('SHARDED', False) and bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
+            raise ValueError(
+                "DATASET.SHARDED=true is incompatible with BATCH.MULTIBATCH_ENABLED=true. "
+                "Data sharding only works with full-batch L-BFGS."
+            )
 
         self.cfg_debug = cfg.get('DEBUG', {})
 
@@ -1252,8 +1276,6 @@ class Training:
 
 
     def train_model(self):
-        # Setup distributed training (returns defaults for single GPU)
-        self.rank, self.world_size, self.local_rank = setup_distributed()
         try:
 
             # Set device based on mode
@@ -1484,11 +1506,13 @@ class Training:
             checkpoint = torch.load(self.chk_path, map_location=self.device)
             self.model.load_state_dict(checkpoint["model"])
 
-            return self.model
-        finally:
             if is_main_process() and getattr(self, 'writer', None) is not None:
                 self.writer.close()
-            cleanup()
+            return self.model
+        except Exception:
+            if is_main_process() and getattr(self, 'writer', None) is not None:
+                self.writer.close()
+            raise
 
     def compute_gradients(self, dataset):
         Xtr = dataset.X
@@ -2884,6 +2908,7 @@ def load_dataset(cfg_dataset, typ):
         ('PURIFY',        KeywordType.KEYWORD_OPTIONAL, False), # `bool` : use purified basis of PIPs
         ('ATOM_MAPPING',  KeywordType.KEYWORD_OPTIONAL, False), # `list` : mapping atoms->monomer (which atom belongs to which monomer)
         ('VARIABLES' ,    KeywordType.KEYWORD_REQUIRED, None), # `dict` : mapping interatomic distances->polynomial variables 
+        ('SHARDED',       KeywordType.KEYWORD_OPTIONAL, False), # `bool` : enable data sharding for distributed full-batch training
     ]
 
     from operator import itemgetter
@@ -3032,7 +3057,13 @@ if __name__ == "__main__":
         project_name = cfg_dataset['NAME'] + "-" + cfg['TYPE']
         wandb.init(project=project_name)
 
-    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test)
+    rank, world_size, local_rank = setup_distributed()
 
-    t.train_model()
-    t.model_eval()
+    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test,
+                 rank=rank, world_size=world_size, local_rank=local_rank)
+
+    try:
+        t.train_model()
+        t.model_eval()
+    finally:
+        cleanup()

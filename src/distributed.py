@@ -127,3 +127,38 @@ def barrier():
     """Synchronize all processes (no-op if single GPU)."""
     if is_distributed():
         dist.barrier()
+
+
+def shard_dataset(dataset, rank, world_size):
+    """
+    Extract this rank's portion of a dataset, dropping remainder to ensure
+    equal-sized shards across all ranks.
+
+    Args:
+        dataset: object with .X, .y, .dX, .dy, .xyz_ordered, .grm attributes
+        rank: this process's rank
+        world_size: total number of processes
+
+    Returns:
+        tuple: (dataset, dropped_count)
+            - dataset is modified in-place
+            - dropped_count is number of samples dropped from the end
+    """
+    N = len(dataset.y)
+    samples_per_rank = N // world_size
+    usable = samples_per_rank * world_size
+
+    start = rank * samples_per_rank
+    end = start + samples_per_rank
+
+    dataset.X = dataset.X[start:end]
+    dataset.y = dataset.y[start:end]
+    if dataset.dX is not None:
+        dataset.dX = dataset.dX[start:end]
+        dataset.dy = dataset.dy[start:end]
+    if getattr(dataset, 'xyz_ordered', None) is not None:
+        dataset.xyz_ordered = dataset.xyz_ordered[start:end]
+    if getattr(dataset, 'grm', None) is not None:
+        dataset.grm = dataset.grm[start:end]
+
+    return dataset, N - usable
