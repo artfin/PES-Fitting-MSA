@@ -37,7 +37,7 @@ from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverl
 from torch.nn.parallel import DistributedDataParallel as DDP
 from distributed import (
     setup_distributed, cleanup, is_distributed,
-    is_main_process, get_rank, get_world_size, reduce_mean, barrier
+    is_main_process, get_rank, get_world_size, reduce_mean, reduce_min, barrier
 )
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -304,7 +304,8 @@ class WMSELoss_Ratio(torch.nn.Module):
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
 
-        ymin = yd.min()
+        # Sync minimum across ranks for consistent weighting in distributed mode
+        ymin = reduce_min(yd.min())
 
         # Energy-based weight
         w_energy = self.dwt / (self.dwt + yd - ymin)
@@ -370,7 +371,8 @@ class WRMSELoss_Ratio_dipole(torch.nn.Module):
         dip      = yd[:, 1:]
         en       = yd[:, 0]
 
-        en_min = en.min()
+        # Sync minimum across ranks for consistent weighting in distributed mode
+        en_min = reduce_min(en.min())
         w  = self.dwt / (self.dwt + en - en_min)
 
         dd   = dip - dip_pred
@@ -419,7 +421,8 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
         _en      = self.descale_energies(en)
         _en_pred = self.descale_energies(en_pred)
 
-        enmin   = _en.min()
+        # Sync minimum across ranks for consistent weighting in distributed mode
+        enmin   = reduce_min(_en.min())
         w       = self.dwt / (self.dwt + _en - enmin)
         w       = w.view(-1)
         wmse_en = (w * (_en - _en_pred)**2).mean()
@@ -542,7 +545,8 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
 
     def _compute_weights(self, _en, _en_pred):
         """Compute combined energy-based and focal weights."""
-        enmin = _en.min()
+        # Sync minimum across ranks for consistent weighting in distributed mode
+        enmin = reduce_min(_en.min())
         w_energy = self.dwt / (self.dwt + _en - enmin)
         w_energy = w_energy.view(-1)
 
@@ -716,7 +720,8 @@ class WRMSELoss_Ratio(torch.nn.Module):
         yd      = y      * self.y_std + self.y_mean
         yd_pred = y_pred * self.y_std + self.y_mean
 
-        ymin = yd.min()
+        # Sync minimum across ranks for consistent weighting in distributed mode
+        ymin = reduce_min(yd.min())
 
         # Energy-based weight
         w_energy = self.dwt / (self.dwt + yd - ymin)
@@ -2205,11 +2210,12 @@ class Training:
                 )
 
             # Compute weighted loss values for logging (energy component only for scheduler)
-            enmin_train = train_e_d.min()
+            # Sync minimum across ranks for consistent weighting in distributed mode
+            enmin_train = reduce_min(train_e_d.min())
             w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
             loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
 
-            enmin_val = val_e_d.min()
+            enmin_val = reduce_min(val_e_d.min())
             w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
             loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
@@ -2708,11 +2714,12 @@ class Training:
                 val_g_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred)**2, dim=1) / (3 * natoms)))
 
                 # Weighted MSE for scheduler
-                enmin_train = train_e_d.min()
+                # Sync minimum across ranks for consistent weighting in distributed mode
+                enmin_train = reduce_min(train_e_d.min())
                 w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
                 loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
 
-                enmin_val = val_e_d.min()
+                enmin_val = reduce_min(val_e_d.min())
                 w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
                 loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
