@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-NODES="192.168.49.102 192.168.49.103"
+NODES="192.168.49.109 192.168.49.111"
 
 REMOTE_DIR="$HOME/opt/PES-Fitting-MSA"
 
