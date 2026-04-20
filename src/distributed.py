@@ -150,11 +150,16 @@ def sync_gradients(model):
     """
     if not is_distributed():
         return
+    import logging
+    rank = get_rank()
     world_size = get_world_size()
-    for param in model.parameters():
+    logging.debug(f"[rank {rank}] sync_gradients: starting, world_size={world_size}")
+    for i, param in enumerate(model.parameters()):
         if param.grad is not None:
+            logging.debug(f"[rank {rank}] sync_gradients: all_reduce param {i} shape={param.grad.shape}")
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
             param.grad /= world_size
+    logging.debug(f"[rank {rank}] sync_gradients: done")
 
 
 def shard_dataset(dataset, rank, world_size):
