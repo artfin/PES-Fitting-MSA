@@ -87,7 +87,15 @@ def apply_scalers_on_dataset(train, val, test, xscaler, yscaler):
         test.y = torch.empty(1, dtype=TORCH_FLOAT)
 
 
-def fit_scalers_to_train_dataset(train, cfg):
+def fit_scalers_to_train_dataset(train, cfg, X=None, y=None):
+    """Fit scalers to training data.
+
+    Args:
+        train: Training dataset (used if X, y not provided)
+        cfg: Dataset config with NORMALIZE setting
+        X: Optional explicit X data (use for fitting on full data before sharding)
+        y: Optional explicit y data (use for fitting on full data before sharding)
+    """
     if cfg['NORMALIZE'] == 'std':
         xscaler = StandardScaler()
         yscaler = StandardScaler()
@@ -97,8 +105,8 @@ def fit_scalers_to_train_dataset(train, cfg):
     else:
         raise ValueError("unreachable")
 
-    xscaler.fit(train.X)
-    yscaler.fit(train.y)
+    xscaler.fit(X if X is not None else train.X)
+    yscaler.fit(y if y is not None else train.y)
 
     return xscaler, yscaler
 
@@ -866,9 +874,15 @@ class Training:
         self.world_size = world_size
         self.local_rank = local_rank
 
-        # Data sharding for distributed full-batch training
         cfg_dataset = cfg.get('DATASET', {})
-        if cfg_dataset.get('SHARDED', False) and self.world_size > 1:
+        sharding_enabled = cfg_dataset.get('SHARDED', False) and self.world_size > 1
+
+        # Save full training data for scaler fitting BEFORE sharding
+        full_train_X = train.X
+        full_train_y = train.y
+
+        # Data sharding for distributed full-batch training
+        if sharding_enabled:
             from distributed import shard_dataset
             train, dropped_train = shard_dataset(train, self.rank, self.world_size)
             val, dropped_val = shard_dataset(val, self.rank, self.world_size)
@@ -919,8 +933,8 @@ class Training:
             else:
                 assert False, "unreachable"
 
-            logging.info("Fitting scalers to training dataset...\n")
-            self.xscaler, self.yscaler = fit_scalers_to_train_dataset(train, cfg['DATASET'])
+            logging.info("Fitting scalers to full training dataset (before sharding)...\n")
+            self.xscaler, self.yscaler = fit_scalers_to_train_dataset(train, cfg['DATASET'], X=full_train_X, y=full_train_y)
             apply_scalers_on_dataset(self.train, self.val, self.test, self.xscaler, self.yscaler)
 
         logging.info("Using the NN model structured as {}".format(self.model))
