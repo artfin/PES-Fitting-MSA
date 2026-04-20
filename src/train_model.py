@@ -2242,16 +2242,23 @@ class Training:
         if isinstance(optimizer, HjmshiFullBatchLBFGS):
             # Vendored FullBatchLBFGS for distributed training.
             # Pre-compute loss & gradient at the current iterate.
+            logging.debug(f"[rank {self.rank}] vendored LBFGS: zero_grad")
             optimizer.zero_grad()
+            logging.debug(f"[rank {self.rank}] vendored LBFGS: closure_no_backward")
             loss = closure_no_backward()
+            logging.debug(f"[rank {self.rank}] vendored LBFGS: backward (loss={loss.item():.4f})")
             loss.backward()
             # Explicit gradient sync - don't rely on DDP's implicit async sync
             if self.world_size > 1:
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients START")
                 sync_gradients(self.model)
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients DONE")
             if self.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
             if self.world_size > 1:
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean START")
                 loss = reduce_mean(loss.detach())
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean DONE")
             # Build grad_sync closure that captures self.model
             def _grad_sync():
                 sync_gradients(self.model)
