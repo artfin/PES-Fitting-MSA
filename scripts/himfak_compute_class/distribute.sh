@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 NODES="192.168.49.109 192.168.49.111"
 
 REMOTE_DIR="$HOME/opt/PES-Fitting-MSA"
@@ -15,16 +18,16 @@ for NODE in $NODES; do
 
     ssh "$NODE" "mkdir -p $REMOTE_DIR/$(dirname $CONFIG) $REMOTE_DIR/$(dirname $DATASET) $REMOTE_DIR/$BASIS_DIR"
 
-    scp "$CONFIG" "$NODE:$REMOTE_DIR/$CONFIG"
+    scp "$PROJECT_ROOT/$CONFIG" "$NODE:$REMOTE_DIR/$CONFIG"
 
-    scp "$DATASET" "$NODE:$REMOTE_DIR/$DATASET"
+    scp "$PROJECT_ROOT/$DATASET" "$NODE:$REMOTE_DIR/$DATASET"
 
-    scp "$BASIS_DIR"/c_basis_${PIP_BASIS}.cc "$NODE:$REMOTE_DIR/$BASIS_DIR/"
-    scp "$BASIS_DIR"/c_basis_${PIP_BASIS}.h "$NODE:$REMOTE_DIR/$BASIS_DIR/"
-    scp "$BASIS_DIR"/c_jac_${PIP_BASIS}.cc  "$NODE:$REMOTE_DIR/$BASIS_DIR/"
-    scp "$BASIS_DIR"/c_jac_${PIP_BASIS}.h  "$NODE:$REMOTE_DIR/$BASIS_DIR/"
+    scp "$PROJECT_ROOT/$BASIS_DIR"/c_basis_${PIP_BASIS}.cc "$NODE:$REMOTE_DIR/$BASIS_DIR/"
+    scp "$PROJECT_ROOT/$BASIS_DIR"/c_basis_${PIP_BASIS}.h "$NODE:$REMOTE_DIR/$BASIS_DIR/"
+    scp "$PROJECT_ROOT/$BASIS_DIR"/c_jac_${PIP_BASIS}.cc  "$NODE:$REMOTE_DIR/$BASIS_DIR/"
+    scp "$PROJECT_ROOT/$BASIS_DIR"/c_jac_${PIP_BASIS}.h  "$NODE:$REMOTE_DIR/$BASIS_DIR/"
 
-    scp "$BASIS_DIR"/${PIP_BASIS}.MOL "$NODE:$REMOTE_DIR/$BASIS_DIR/${PIP_BASIS}.BAS"
+    scp "$PROJECT_ROOT/$BASIS_DIR"/${PIP_BASIS}.MOL "$NODE:$REMOTE_DIR/$BASIS_DIR/${PIP_BASIS}.BAS"
 done
 
 echo "Done."
