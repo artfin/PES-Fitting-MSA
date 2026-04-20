@@ -1209,6 +1209,9 @@ class FullBatchLBFGS(LBFGS):
 
         """
         
+        if options is None:
+            options = {}
+        
         # load options for damping and eps
         if 'damping' not in options.keys():
             damping = False
@@ -1220,16 +1223,66 @@ class FullBatchLBFGS(LBFGS):
         else:
             eps = options['eps']
         
-        # gather gradient
-        grad = self._gather_flat_grad()
+        # Inner-loop options matching torch.optim.LBFGS defaults so that
+        # scheduler / early-stopping hyperparameters have the same meaning
+        # irrespective of which LBFGS backend is used.
+        max_iter = options.get('max_iter', 100)
+        max_eval = options.get('max_eval', max_iter * 5 // 4)
+        tolerance_grad = options.get('tolerance_grad', 1e-14)
+        tolerance_change = options.get('tolerance_change', 1e-14)
         
-        # update curvature if after 1st iteration
-        state = self.state['global_state']
-        if state['n_iter'] > 0:
-            self.curvature_update(grad, eps, damping)
-
-        # compute search direction
-        p = self.two_loop_recursion(-grad)
-
-        # take step
-        return self._step(p, grad, options=options)
+        total_evals = 0
+        total_ls_step = 0
+        total_grad_eval = 0
+        prev_loss_val = None
+        
+        # Local mutable copy so we can feed the accepted loss back as
+        # current_loss for the next inner iteration.
+        opts = dict(options)
+        
+        for n_iter in range(max_iter):
+            # gather gradient
+            grad = self._gather_flat_grad()
+            
+            # update curvature if after 1st iteration
+            state = self.state['global_state']
+            if state['n_iter'] > 0:
+                self.curvature_update(grad, eps, damping)
+            
+            # compute search direction
+            p = self.two_loop_recursion(-grad)
+            
+            # take step
+            obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = self._step(p, grad, options=opts)
+            total_evals += closure_eval
+            total_ls_step += ls_step
+            total_grad_eval += grad_eval
+            
+            if fail or t == 0 or not desc_dir:
+                break
+            
+            flat_grad = self._gather_flat_grad()
+            opt_cond = flat_grad.abs().max() <= tolerance_grad
+            if opt_cond:
+                break
+            
+            d = state.get('d')
+            if d is not None and t is not None:
+                if d.mul(t).abs().max() <= tolerance_change:
+                    break
+            
+            loss_val = float(obj)
+            if prev_loss_val is not None and abs(loss_val - prev_loss_val) < tolerance_change:
+                break
+            prev_loss_val = loss_val
+            
+            if total_evals >= max_eval:
+                break
+            
+            # Prepare for next inner iteration: obj is the loss at the
+            # accepted point (already synced if distributed) and .grad already
+            # contains the gradient at that point from the line search's last
+            # backward.
+            opts['current_loss'] = obj
+        
+        return obj, grad_new, t, total_ls_step, total_evals, total_grad_eval, desc_dir, fail
