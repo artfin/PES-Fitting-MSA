@@ -37,7 +37,8 @@ from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverl
 from torch.nn.parallel import DistributedDataParallel as DDP
 from distributed import (
     setup_distributed, cleanup, is_distributed,
-    is_main_process, get_rank, get_world_size, reduce_mean, reduce_min, barrier
+    is_main_process, get_rank, get_world_size, reduce_mean, reduce_min, barrier,
+    sync_gradients
 )
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1011,6 +1012,13 @@ class Training:
         self._lbfgs_diag_initialized = False
         self._lbfgs_prev_n_iter = 0
         self._lbfgs_prev_func_evals = 0
+        self._last_vendored_closure_eval = 0
+
+        # Distributed per-rank diagnostics (local metrics before averaging)
+        self._dist_diag_path = os.path.join(
+            self.model_folder, "{}.distributed_diagnostics.csv".format(model_name)
+        )
+        self._dist_diag_initialized = False
 
     def _log(self, msg):
         """Rank-0 only logging helper."""
@@ -1123,12 +1131,27 @@ class Training:
     def build_optimizer(self, cfg_optimizer):
         if cfg_optimizer['NAME'] == 'LBFGS':
             lr               = cfg_optimizer.get('LR', 1.0)
-            tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
-            tolerance_change = cfg_optimizer.get('TOLERANCE_CHANGE', 1e-14)
-            max_iter         = cfg_optimizer.get('MAX_ITER', 100)
+            if self.world_size > 1:
+                # Use vendored FullBatchLBFGS for distributed training.
+                # torch.optim.LBFGS is not DDP-safe because its line search
+                # resets parameters after trial evaluations, which breaks DDP's
+                # asynchronous gradient reduction invariants.
+                history_size = cfg_optimizer.get('HISTORY_SIZE', 100)
+                optimizer = HjmshiFullBatchLBFGS(
+                    self.model.parameters(),
+                    lr=lr,
+                    history_size=history_size,
+                    line_search='Wolfe',
+                )
+                logging.info("Build optimizer: {} (distributed-aware, vendored FullBatchLBFGS)".format(optimizer))
+            else:
+                tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
+                tolerance_change = cfg_optimizer.get('TOLERANCE_CHANGE', 1e-14)
+                max_iter         = cfg_optimizer.get('MAX_ITER', 100)
 
-            optimizer        = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
-                                                 tolerance_change=tolerance_change, max_iter=max_iter)
+                optimizer        = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
+                                                     tolerance_change=tolerance_change, max_iter=max_iter)
+                logging.info("Build optimizer: {}".format(optimizer))
         elif cfg_optimizer['NAME'] == 'Adam':
             lr           = cfg_optimizer.get('LR', 1e-3)
             optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -1310,11 +1333,16 @@ class Training:
                 if is_main_process():
                     logging.info("Model compiled with torch.compile(mode='reduce-overhead')")
 
-            # Wrap with DDP for distributed training
-            if self.world_size > 1:
+            # Wrap with DDP for distributed training (except for LBFGS which uses
+            # explicit gradient sync to avoid race conditions with line search)
+            opt_name = self.cfg_solver['OPTIMIZER']['NAME']
+            if self.world_size > 1 and opt_name != 'LBFGS':
                 self.model = DDP(self.model, device_ids=[self.local_rank])
                 if is_main_process():
-                    logging.info(f"Distributed training enabled: {self.world_size} GPUs")
+                    logging.info(f"Distributed training enabled: {self.world_size} GPUs (DDP)")
+            elif self.world_size > 1:
+                if is_main_process():
+                    logging.info(f"Distributed training enabled: {self.world_size} GPUs (explicit gradient sync, no DDP)")
 
             # Initialize TensorBoard only on rank 0 to avoid event-file corruption.
             if is_main_process():
@@ -1875,72 +1903,114 @@ class Training:
     def log_lbfgs_diagnostics(self, epoch, optimizer):
         """L-BFGS line-search telemetry, dumped per epoch.
 
-        Pulls inner state from torch.optim.LBFGS:
+        Pulls inner state from torch.optim.LBFGS or vendored FullBatchLBFGS:
           - this-step iteration / closure-call counts (deltas from cumulative)
           - last accepted step length t
           - initial Hessian diag scaling H_diag = (s . y) / (y . y)
-          - curvature pair stats: <s_k, y_k> = 1 / ro_k -- min/max/last/mean
+          - curvature pair stats: <s_k, y_k> -- min/max/last/mean
             over the stored history (small or absent => degenerate curvature)
           - flat gradient norm at the last accepted iterate
         """
-        if not isinstance(optimizer, torch.optim.LBFGS):
-            return
+        if isinstance(optimizer, torch.optim.LBFGS):
+            params = optimizer.param_groups[0]['params']
+            if not params:
+                return
+            state = optimizer.state.get(params[0], {})
+            if not state:
+                return
 
-        params = optimizer.param_groups[0]['params']
-        if not params:
-            return
-        state = optimizer.state.get(params[0], {})
-        if not state:
-            return
+            cum_n_iter     = int(state.get('n_iter', 0))
+            cum_func_evals = int(state.get('func_evals', 0))
+            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
+            evals_this_step = cum_func_evals - self._lbfgs_prev_func_evals
+            self._lbfgs_prev_n_iter = cum_n_iter
+            self._lbfgs_prev_func_evals = cum_func_evals
 
-        cum_n_iter     = int(state.get('n_iter', 0))
-        cum_func_evals = int(state.get('func_evals', 0))
-        iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
-        evals_this_step = cum_func_evals - self._lbfgs_prev_func_evals
-        self._lbfgs_prev_n_iter = cum_n_iter
-        self._lbfgs_prev_func_evals = cum_func_evals
+            t_val = state.get('t', None)
+            try:
+                t_val = float(t_val) if t_val is not None else float('nan')
+            except (TypeError, ValueError):
+                t_val = float('nan')
 
-        t_val = state.get('t', None)
-        try:
-            t_val = float(t_val) if t_val is not None else float('nan')
-        except (TypeError, ValueError):
-            t_val = float('nan')
+            H_diag = state.get('H_diag', None)
+            try:
+                H_diag = float(H_diag) if H_diag is not None else float('nan')
+            except (TypeError, ValueError):
+                H_diag = float('nan')
 
-        H_diag = state.get('H_diag', None)
-        try:
-            H_diag = float(H_diag) if H_diag is not None else float('nan')
-        except (TypeError, ValueError):
-            H_diag = float('nan')
-
-        ro = state.get('ro', []) or []
-        n_pairs = len(ro)
-        if n_pairs > 0:
-            sy_vals = []
-            for r in ro:
-                try:
-                    rv = float(r)
-                    if rv != 0.0:
-                        sy_vals.append(1.0 / rv)
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
-            if sy_vals:
-                sy_min  = min(sy_vals)
-                sy_max  = max(sy_vals)
-                sy_last = sy_vals[-1]
-                sy_mean = sum(sy_vals) / len(sy_vals)
+            ro = state.get('ro', []) or []
+            n_pairs = len(ro)
+            if n_pairs > 0:
+                sy_vals = []
+                for r in ro:
+                    try:
+                        rv = float(r)
+                        if rv != 0.0:
+                            sy_vals.append(1.0 / rv)
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        pass
+                if sy_vals:
+                    sy_min  = min(sy_vals)
+                    sy_max  = max(sy_vals)
+                    sy_last = sy_vals[-1]
+                    sy_mean = sum(sy_vals) / len(sy_vals)
+                else:
+                    sy_min = sy_max = sy_last = sy_mean = float('nan')
             else:
                 sy_min = sy_max = sy_last = sy_mean = float('nan')
-        else:
-            sy_min = sy_max = sy_last = sy_mean = float('nan')
 
-        prev_flat_grad = state.get('prev_flat_grad', None)
-        if prev_flat_grad is not None:
-            try:
-                grad_norm = float(prev_flat_grad.norm().item())
-            except (RuntimeError, AttributeError):
+            prev_flat_grad = state.get('prev_flat_grad', None)
+            if prev_flat_grad is not None:
+                try:
+                    grad_norm = float(prev_flat_grad.norm().item())
+                except (RuntimeError, AttributeError):
+                    grad_norm = float('nan')
+            else:
+                grad_norm = float('nan')
+
+        elif isinstance(optimizer, HjmshiFullBatchLBFGS):
+            state = optimizer.state['global_state']
+            cum_n_iter = int(state.get('n_iter', 0))
+            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
+            self._lbfgs_prev_n_iter = cum_n_iter
+            # Closure evals are captured in train_epoch for vendored LBFGS
+            evals_this_step = getattr(self, '_last_vendored_closure_eval', float('nan'))
+
+            t_val = float(state.get('t', float('nan')))
+            H_diag = float(state.get('H_diag', float('nan')))
+
+            old_dirs = state.get('old_dirs', [])
+            old_stps = state.get('old_stps', [])
+            n_pairs = len(old_dirs)
+            if n_pairs > 0:
+                sy_vals = []
+                for s, y in zip(old_stps, old_dirs):
+                    try:
+                        sy = float(s.dot(y).item())
+                        if sy != 0.0:
+                            sy_vals.append(sy)
+                    except (TypeError, ValueError):
+                        pass
+                if sy_vals:
+                    sy_min  = min(sy_vals)
+                    sy_max  = max(sy_vals)
+                    sy_last = sy_vals[-1]
+                    sy_mean = sum(sy_vals) / len(sy_vals)
+                else:
+                    sy_min = sy_max = sy_last = sy_mean = float('nan')
+            else:
+                sy_min = sy_max = sy_last = sy_mean = float('nan')
+
+            prev_flat_grad = state.get('prev_flat_grad', None)
+            if prev_flat_grad is not None:
+                try:
+                    grad_norm = float(prev_flat_grad.norm().item())
+                except (RuntimeError, AttributeError):
+                    grad_norm = float('nan')
+            else:
                 grad_norm = float('nan')
         else:
-            grad_norm = float('nan')
+            return
 
         if not self._lbfgs_diag_initialized:
             try:
@@ -1968,6 +2038,30 @@ class Training:
                     n_pairs, grad_norm, sy_last, sy_min, sy_max,
                 )
             )
+
+    def log_distributed_diagnostics(self, epoch, loss_train_local, loss_val_local, grad_norm_local=None):
+        """Log per-rank local metrics before averaging for distributed training.
+
+        This makes it possible to detect rank drift: if local losses diverge,
+        the models have already desynchronized.
+        """
+        if self.world_size <= 1:
+            return
+        if not self._dist_diag_initialized:
+            try:
+                with open(self._dist_diag_path, "w") as f:
+                    f.write("epoch,rank,loss_train_local,loss_val_local,grad_norm_local\n")
+                self._dist_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize distributed diag CSV: {}".format(e))
+        try:
+            with open(self._dist_diag_path, "a") as f:
+                gn = float(grad_norm_local) if grad_norm_local is not None else float('nan')
+                f.write("{},{},{:.6e},{:.6e},{:.6e}\n".format(
+                    epoch, self.rank, float(loss_train_local), float(loss_val_local), gn
+                ))
+        except OSError as e:
+            logging.warning("Could not append to distributed diag CSV: {}".format(e))
 
     def compute_gradients_eval(self, dataset):
         """
@@ -2060,12 +2154,7 @@ class Training:
                     epoch, trust_mask, energy_errors, gradient_weights
                 )
 
-        def closure():
-            nonlocal CLOSURE_CALL_COUNT
-            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
-
-            optimizer.zero_grad()
-
+        def _compute_loss():
             if self.cfg_loss['USE_GRADIENTS']:
                 if use_trust_region:
                     if n_in_trust > 0:
@@ -2089,32 +2178,20 @@ class Training:
                     loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLE':
-                # y_pred:    [(d, a1), (d, a2), (d, a3)] -- scalar products with anchor vectors 
-                # dip_pred:  g @ y_pred                  -- Cartesian components of the predicted dipole
-
                 y_pred = self.model(self.train.X)
                 dip_pred = torch.einsum('ijk,ik->ij', self.train.grm, y_pred)
-
                 loss = self.loss_fn(self.train.y, dip_pred)
 
             elif self.cfg['TYPE'] == 'DIPOLEQ':
-                # y_pred: [q1, ... q7]      -- partial charges on atoms
-                # dip_pred: sum(q_i * r_i)  -- Cartesian components of the predicted dipole [need to descale in the loss function]
-                # additional term to `reqularize` the sum of partial charges
-
                 q_pred   = self.model(self.train.X)
-                X_inf    = torch.zeros_like(self.train.X).cpu()         # polynomials at infinite separation
+                X_inf    = torch.zeros_like(self.train.X).cpu()
                 X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf)).to(self.device)
-                q_inf    = self.model(X_inf_tr)                         # partial charges at infinite separation
-                q_corr   = q_pred - q_inf                               # corrected partial charges
+                q_inf    = self.model(X_inf_tr)
+                q_corr   = q_pred - q_inf
                 dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), q_corr)
-
-                # charge regularization
-                # NOTE: use `mean`
                 qsum     = torch.sum(q_corr, dim=1)
                 qreg     = self.cfg_loss['LAMBDA_Q'] * torch.mean(qsum * qsum)
                 loss     = self.loss_fn(self.train.y, dip_pred)
-
                 loss = loss + qreg
 
             elif self.cfg['TYPE'] == 'DIPOLEC':
@@ -2130,16 +2207,27 @@ class Training:
 
             if self.regularization is not None:
                 loss = loss + self.regularization(self.model)
+            return loss
 
+        def closure():
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+            loss = _compute_loss()
             loss.backward()
-
             if self.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-
             # Synchronize loss across ranks so L-BFGS line search makes
             # identical decisions on every process.
             if self.world_size > 1:
                 loss = reduce_mean(loss.detach())
+            return loss
+
+        def closure_no_backward():
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+            loss = _compute_loss()
             return loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
@@ -2151,17 +2239,46 @@ class Training:
             self.loss_fn.reset_error_scale_flag()
 
         start_time = timeit.default_timer()
-        optimizer.step(closure)
-        elapsed = timeit.default_timer() - start_time
-        self._log("Optimizer makes step in {:.2f}s".format(elapsed))
-        self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+        if isinstance(optimizer, HjmshiFullBatchLBFGS):
+            # Vendored FullBatchLBFGS for distributed training.
+            # Pre-compute loss & gradient at the current iterate.
+            optimizer.zero_grad()
+            loss = closure_no_backward()
+            loss.backward()
+            # Explicit gradient sync - don't rely on DDP's implicit async sync
+            if self.world_size > 1:
+                sync_gradients(self.model)
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+            if self.world_size > 1:
+                loss = reduce_mean(loss.detach())
+            # Build grad_sync closure that captures self.model
+            def _grad_sync():
+                sync_gradients(self.model)
+            options = {
+                'closure': closure_no_backward,
+                'current_loss': loss,
+                'grad_clip_norm': self.grad_clip_norm,
+                'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
+                'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
+            }
+            obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+            self._last_vendored_closure_eval = closure_eval + 1  # +1 for the initial evaluation above
+            CLOSURE_CALL_COUNT = self._last_vendored_closure_eval
+            elapsed = timeit.default_timer() - start_time
+            self._log("Optimizer makes step in {:.2f}s".format(elapsed))
+            self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+        else:
+            optimizer.step(closure)
+            elapsed = timeit.default_timer() - start_time
+            self._log("Optimizer makes step in {:.2f}s".format(elapsed))
+            self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
 
         current_lr = optimizer.param_groups[0]['lr']
         self._log("(optimizer) current lr: {}".format(current_lr))
 
         # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
-        if self.cfg_loss['USE_GRADIENTS']:
-            self.log_lbfgs_diagnostics(epoch, optimizer)
+        self.log_lbfgs_diagnostics(epoch, optimizer)
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
@@ -2267,6 +2384,7 @@ class Training:
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 if self.world_size > 1:
+                    self.log_distributed_diagnostics(epoch, loss_train, loss_val)
                     loss_train = reduce_mean(loss_train)
                     loss_val   = reduce_mean(loss_val)
 
@@ -2724,6 +2842,7 @@ class Training:
                 loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
                 if self.world_size > 1:
+                    self.log_distributed_diagnostics(epoch, loss_train_e, loss_val_e)
                     train_e_mae  = reduce_mean(train_e_mae)
                     train_e_rmse = reduce_mean(train_e_rmse)
                     val_e_mae    = reduce_mean(val_e_mae)

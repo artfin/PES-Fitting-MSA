@@ -884,6 +884,11 @@ class LBFGS(Optimizer):
                 # Distributed training: sync loss across ranks after closure
                 loss_sync_fn = options.get('loss_sync_fn', None)
 
+                # Distributed training: sync gradients across ranks after backward.
+                # This ensures all ranks have identical gradients for the L-BFGS
+                # curvature update, avoiding the implicit DDP sync race condition.
+                grad_sync_fn = options.get('grad_sync_fn', None)
+
             else:
                 raise(ValueError('Options are not specified; need closure evaluating function.'))
 
@@ -953,6 +958,8 @@ class LBFGS(Optimizer):
                     t = 0
                     F_new = closure()
                     F_new.backward()
+                    if grad_sync_fn is not None:
+                        grad_sync_fn()
                     if grad_clip_norm is not None:
                         torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
                     g_new = self._gather_flat_grad()
@@ -987,6 +994,8 @@ class LBFGS(Optimizer):
 
                     # compute gradient
                     F_new.backward()
+                    if grad_sync_fn is not None:
+                        grad_sync_fn()
                     if grad_clip_norm is not None:
                         torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
                     g_new = self._gather_flat_grad()

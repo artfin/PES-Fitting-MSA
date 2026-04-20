@@ -138,6 +138,25 @@ def barrier():
         dist.barrier()
 
 
+def sync_gradients(model):
+    """Average gradients across all processes (no-op if single GPU).
+
+    Call this after backward() to ensure all ranks have identical gradients.
+    Unlike DDP's implicit sync (which can race with gradient reads), this is
+    explicit and synchronous.
+
+    Args:
+        model: nn.Module whose .grad tensors to synchronize
+    """
+    if not is_distributed():
+        return
+    world_size = get_world_size()
+    for param in model.parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad /= world_size
+
+
 def shard_dataset(dataset, rank, world_size):
     """
     Extract this rank's portion of a dataset, dropping remainder to ensure
