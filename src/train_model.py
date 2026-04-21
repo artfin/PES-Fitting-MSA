@@ -34,11 +34,12 @@ from pytorch_lbfgs import LBFGS as HjmshiLBFGS, FullBatchLBFGS as HjmshiFullBatc
 
 from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverlapSampler
 
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from distributed import (
     setup_distributed, cleanup, is_distributed,
     is_main_process, get_rank, get_world_size, reduce_mean, reduce_min, barrier,
-    sync_gradients
+    sync_gradients, reduce_rmse, reduce_mae, reduce_sum, all_gather_scalar
 )
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1683,20 +1684,19 @@ class Training:
         gradient errors than configs that STAYED, the optimizer is plausibly
         gaming the boundary by pushing hard configs out.
         """
-        N = trust_mask.numel()
+        N_local = trust_mask.numel()
         cur = trust_mask.detach()
-        n_in = int(cur.sum().item())
-        frac = n_in / max(N, 1)
+        n_in_local = int(cur.sum().item())
 
         # Initialize trackers lazily on the first call.
         if self._trust_flip_count is None:
-            self._trust_flip_count = torch.zeros(N, dtype=torch.long, device=DEVICE)
+            self._trust_flip_count = torch.zeros(N_local, dtype=torch.long, device=DEVICE)
 
         if self._prev_trust_mask is None:
-            entered = n_in
-            left = 0
-            stable_in = n_in
-            stable_out = N - n_in
+            entered_local = n_in_local
+            left_local = 0
+            stable_in_local = n_in_local
+            stable_out_local = N_local - n_in_local
             mean_err_left = float('nan')
             mean_err_stayed = float('nan')
             med_err_left = float('nan')
@@ -1707,10 +1707,10 @@ class Training:
             left_mask    = (~cur) & prev
             stable_in_mask  = cur & prev
             stable_out_mask = (~cur) & (~prev)
-            entered = int(entered_mask.sum().item())
-            left = int(left_mask.sum().item())
-            stable_in = int(stable_in_mask.sum().item())
-            stable_out = int(stable_out_mask.sum().item())
+            entered_local = int(entered_mask.sum().item())
+            left_local = int(left_mask.sum().item())
+            stable_in_local = int(stable_in_mask.sum().item())
+            stable_out_local = int(stable_out_mask.sum().item())
 
             # Update cumulative flip count.
             flips = entered_mask | left_mask
@@ -1718,15 +1718,15 @@ class Training:
 
             # Eviction signal: compare prev-epoch gradient errors of left vs stayed.
             if (self._prev_train_gradient_errors is not None
-                    and self._prev_train_gradient_errors.numel() == N):
+                    and self._prev_train_gradient_errors.numel() == N_local):
                 pfe = self._prev_train_gradient_errors
-                if left > 0:
+                if left_local > 0:
                     mean_err_left = float(pfe[left_mask].mean().item())
                     med_err_left  = float(pfe[left_mask].median().item())
                 else:
                     mean_err_left = float('nan')
                     med_err_left  = float('nan')
-                if stable_in > 0:
+                if stable_in_local > 0:
                     mean_err_stayed = float(pfe[stable_in_mask].mean().item())
                     med_err_stayed  = float(pfe[stable_in_mask].median().item())
                 else:
@@ -1749,9 +1749,18 @@ class Training:
             phi_min = float('nan')
 
         max_flips = int(self._trust_flip_count.max().item())
-        ever_in = int((self._trust_flip_count > 0).sum().item()) + stable_in
-        # Configs that have never flipped AND are currently out: never-trusted.
-        # (Approximate -- exact count requires another tracker; we don't bother.)
+        ever_in = int((self._trust_flip_count > 0).sum().item()) + stable_in_local
+
+        # Aggregate counts across ranks for logging
+        if self.world_size > 1:
+            counts = torch.tensor([N_local, n_in_local, entered_local, left_local, stable_in_local],
+                                  dtype=torch.float32, device=DEVICE)
+            counts = reduce_sum(counts)
+            N, n_in, entered, left, stable_in = [int(c.item()) for c in counts]
+            frac = n_in / max(N, 1)
+        else:
+            N, n_in, entered, left, stable_in = N_local, n_in_local, entered_local, left_local, stable_in_local
+            frac = n_in / max(N, 1)
 
         if is_main_process():
             logging.info(
@@ -1764,27 +1773,29 @@ class Training:
                 )
             )
 
-        # Append CSV row for post-hoc plotting.
-        if not self._trust_history_initialized:
+        # Append CSV row for post-hoc plotting (only on main process).
+        stable_out = N - n_in  # Compute from aggregated values
+        if is_main_process():
+            if not self._trust_history_initialized:
+                try:
+                    with open(self._trust_history_path, "w") as f:
+                        f.write("epoch,N,n_in,frac,entered,left,stable_in,stable_out,"
+                                "mean_err_left,mean_err_stayed,med_err_left,med_err_stayed,"
+                                "phi_sum,phi_mean,phi_min,max_flips\n")
+                    self._trust_history_initialized = True
+                except OSError as e:
+                    logging.warning("Could not initialize trust history CSV: {}".format(e))
             try:
-                with open(self._trust_history_path, "w") as f:
-                    f.write("epoch,N,n_in,frac,entered,left,stable_in,stable_out,"
-                            "mean_err_left,mean_err_stayed,med_err_left,med_err_stayed,"
-                            "phi_sum,phi_mean,phi_min,max_flips\n")
-                self._trust_history_initialized = True
+                with open(self._trust_history_path, "a") as f:
+                    f.write("{},{},{},{:.6f},{},{},{},{},"
+                            "{:.6f},{:.6f},{:.6f},{:.6f},"
+                            "{:.6f},{:.6f},{:.6f},{}\n".format(
+                        epoch, N, n_in, frac, entered, left, stable_in, stable_out,
+                        mean_err_left, mean_err_stayed, med_err_left, med_err_stayed,
+                        phi_sum, phi_mean, phi_min, max_flips
+                    ))
             except OSError as e:
-                logging.warning("Could not initialize trust history CSV: {}".format(e))
-        try:
-            with open(self._trust_history_path, "a") as f:
-                f.write("{},{},{},{:.6f},{},{},{},{},"
-                        "{:.6f},{:.6f},{:.6f},{:.6f},"
-                        "{:.6f},{:.6f},{:.6f},{}\n".format(
-                    epoch, N, n_in, frac, entered, left, stable_in, stable_out,
-                    mean_err_left, mean_err_stayed, med_err_left, med_err_stayed,
-                    phi_sum, phi_mean, phi_min, max_flips
-                ))
-        except OSError as e:
-            logging.warning("Could not append to trust history CSV: {}".format(e))
+                logging.warning("Could not append to trust history CSV: {}".format(e))
 
         # Snapshot current mask for next-epoch comparison.
         self._prev_trust_mask = cur.clone()
@@ -2039,29 +2050,71 @@ class Training:
                 )
             )
 
-    def log_distributed_diagnostics(self, epoch, loss_train_local, loss_val_local, grad_norm_local=None):
-        """Log per-rank local metrics before averaging for distributed training.
+    def log_distributed_diagnostics(self, epoch, loss_local, e_rmse_local, n_trust_local, n_total_local):
+        """Log verbose per-rank metrics for distributed training.
 
-        This makes it possible to detect rank drift: if local losses diverge,
-        the models have already desynchronized.
+        Shows per-rank values + global aggregates to diagnose imbalanced shards,
+        rank drift, or trust region distribution issues.
+
+        Args:
+            epoch: current epoch
+            loss_local: local weighted MSE (before reduce_mean)
+            e_rmse_local: local energy RMSE in cm-1 (before reduce)
+            n_trust_local: number of configs in trust region on this rank
+            n_total_local: total configs on this rank
         """
         if self.world_size <= 1:
             return
+
+        # Gather values from all ranks
+        losses = all_gather_scalar(float(loss_local), device=DEVICE)
+        rmses = all_gather_scalar(float(e_rmse_local), device=DEVICE)
+        trusts = all_gather_scalar(int(n_trust_local), device=DEVICE)
+        totals = all_gather_scalar(int(n_total_local), device=DEVICE)
+
+        # Log verbose multi-line format on rank 0
+        if is_main_process():
+            lines = [f"[dist-diag] epoch={epoch}"]
+            for r in range(self.world_size):
+                trust_pct = 100.0 * trusts[r] / max(totals[r], 1)
+                lines.append(
+                    f"  rank {r}: E-RMSE={rmses[r]:.2f} cm-1  "
+                    f"trust={int(trusts[r])}/{int(totals[r])} ({trust_pct:.1f}%)  "
+                    f"loss={losses[r]:.3f}"
+                )
+            # Global summary
+            total_trust = sum(trusts)
+            total_n = sum(totals)
+            global_trust_pct = 100.0 * total_trust / max(total_n, 1)
+            avg_loss = sum(losses) / len(losses)
+            lines.append(
+                f"  global: E-RMSE=<aggregated above>  "
+                f"trust={int(total_trust)}/{int(total_n)} ({global_trust_pct:.1f}%)  "
+                f"loss={avg_loss:.3f}"
+            )
+            logging.info("\n".join(lines))
+
+        # Write CSV for post-hoc analysis (all ranks write their own row)
         if not self._dist_diag_initialized:
-            try:
-                with open(self._dist_diag_path, "w") as f:
-                    f.write("epoch,rank,loss_train_local,loss_val_local,grad_norm_local\n")
-                self._dist_diag_initialized = True
-            except OSError as e:
-                logging.warning("Could not initialize distributed diag CSV: {}".format(e))
+            if is_main_process():
+                try:
+                    with open(self._dist_diag_path, "w") as f:
+                        f.write("epoch,rank,loss_local,e_rmse_local,n_trust,n_total\n")
+                    self._dist_diag_initialized = True
+                except OSError as e:
+                    logging.warning("Could not initialize distributed diag CSV: {}".format(e))
+            barrier()  # Ensure header is written before other ranks append
+            self._dist_diag_initialized = True
+
         try:
             with open(self._dist_diag_path, "a") as f:
-                gn = float(grad_norm_local) if grad_norm_local is not None else float('nan')
-                f.write("{},{},{:.6e},{:.6e},{:.6e}\n".format(
-                    epoch, self.rank, float(loss_train_local), float(loss_val_local), gn
+                f.write("{},{},{:.6e},{:.6e},{},{}\n".format(
+                    epoch, self.rank, float(loss_local), float(e_rmse_local),
+                    int(n_trust_local), int(n_total_local)
                 ))
         except OSError as e:
-            logging.warning("Could not append to distributed diag CSV: {}".format(e))
+            if is_main_process():
+                logging.warning("Could not append to distributed diag CSV: {}".format(e))
 
     def compute_gradients_eval(self, dataset):
         """
@@ -2129,24 +2182,43 @@ class Training:
                     train_dy_subset = self.train.dy[trust_indices]
 
                 soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
+                # Aggregate trust region stats across ranks for correct logging
+                n_in_trust_t = torch.tensor(n_in_trust, dtype=torch.float32, device=DEVICE)
+                n_total_t = torch.tensor(len(self.train.X), dtype=torch.float32, device=DEVICE)
+                err_min_t = energy_errors.min()
+                err_max_t = energy_errors.max()
+                if self.world_size > 1:
+                    n_in_trust_global = int(reduce_sum(n_in_trust_t).item())
+                    n_total_global = int(reduce_sum(n_total_t).item())
+                    err_min_global = reduce_min(err_min_t).item()
+                    err_max_global = torch.tensor(err_max_t.item(), device=DEVICE)
+                    dist.all_reduce(err_max_global, op=dist.ReduceOp.MAX)
+                    err_max_global = err_max_global.item()
+                else:
+                    n_in_trust_global = n_in_trust
+                    n_total_global = len(self.train.X)
+                    err_min_global = err_min_t.item()
+                    err_max_global = err_max_t.item()
+                frac_global = 100.0 * n_in_trust_global / max(n_total_global, 1)
+
                 if soft_boundary and gradient_weights is not None and n_in_trust > 0:
+                    phi_sum_t = gradient_weights.sum()
+                    phi_sum_global = reduce_sum(phi_sum_t).item() if self.world_size > 1 else phi_sum_t.item()
                     self._log(
                         "Trust region (soft): {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
                         "phi: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
-                            n_in_trust, len(self.train.X),
-                            100.0 * n_in_trust / len(self.train.X),
-                            energy_errors.min().item(), energy_errors.max().item(),
+                            n_in_trust_global, n_total_global, frac_global,
+                            err_min_global, err_max_global,
                             energy_errors.median().item(),
                             gradient_weights.min().item(), gradient_weights.mean().item(),
-                            gradient_weights.sum().item()))
+                            phi_sum_global))
                 else:
                     self._log(
                         "Trust region: {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
-                            n_in_trust, len(self.train.X),
-                            100.0 * n_in_trust / len(self.train.X),
-                            energy_errors.min().item(), energy_errors.max().item(),
+                            n_in_trust_global, n_total_global, frac_global,
+                            err_min_global, err_max_global,
                             energy_errors.median().item()))
 
                 # Run trust-region diagnostics (churn + eviction signal).
@@ -2297,24 +2369,31 @@ class Training:
             val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
 
             # Compute energy metrics directly (works with any loss function)
+            # Compute local values first, then aggregate via reduce_rmse/reduce_mae
             train_e_d    = self.loss_fn.descale_energies(self.train.y)
             train_e_pred = self.loss_fn.descale_energies(train_y_pred)
-            train_e_mae  = torch.mean(torch.abs(train_e_d - train_e_pred))
-            train_e_rmse = torch.sqrt(torch.mean((train_e_d - train_e_pred)*(train_e_d - train_e_pred)))
+            train_e_errors = (train_e_d - train_e_pred).view(-1)
+            train_e_rmse_local = torch.sqrt(torch.mean(train_e_errors ** 2)).item()
+            train_e_mae  = reduce_mae(train_e_errors)
+            train_e_rmse = reduce_rmse(train_e_errors)
 
             val_e_d    = self.loss_fn.descale_energies(self.val.y)
             val_e_pred = self.loss_fn.descale_energies(val_y_pred)
-            val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred))
-            val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred) * (val_e_d - val_e_pred)))
+            val_e_errors = (val_e_d - val_e_pred).view(-1)
+            val_e_rmse_local = torch.sqrt(torch.mean(val_e_errors ** 2)).item()
+            val_e_mae  = reduce_mae(val_e_errors)
+            val_e_rmse = reduce_rmse(val_e_errors)
 
-            # Compute gradient metrics directly
+            # Compute gradient metrics directly (per-component errors for RMSE/MAE)
             natoms   = self.train.NATOMS
             train_dy = self.train.dy.reshape(-1, 3 * natoms)
             val_dy   = self.val.dy.reshape(-1, 3 * natoms)
-            train_g_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
-            val_g_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
-            train_g_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred) * (train_dy - train_dy_pred), dim=1) / (3 * natoms)))
-            val_g_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred) * (val_dy - val_dy_pred), dim=1) / (3 * natoms)))
+            train_g_errors = (train_dy - train_dy_pred).view(-1)
+            val_g_errors   = (val_dy - val_dy_pred).view(-1)
+            train_g_mae  = reduce_mae(train_g_errors)
+            val_g_mae    = reduce_mae(val_g_errors)
+            train_g_rmse = reduce_rmse(train_g_errors)
+            val_g_rmse   = reduce_rmse(val_g_errors)
 
             # Snapshot per-config train gradient RMSE for next-epoch trust-region
             # diagnostics (eviction signal: do "left" configs have higher
@@ -2343,16 +2422,19 @@ class Training:
             w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
             loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
-            # Reduce metrics across ranks for consistent scheduler / early stopping.
+            # Log verbose per-rank diagnostics before reducing
             if self.world_size > 1:
-                train_e_mae  = reduce_mean(train_e_mae)
-                train_e_rmse = reduce_mean(train_e_rmse)
-                val_e_mae    = reduce_mean(val_e_mae)
-                val_e_rmse   = reduce_mean(val_e_rmse)
-                train_g_mae  = reduce_mean(train_g_mae)
-                train_g_rmse = reduce_mean(train_g_rmse)
-                val_g_mae    = reduce_mean(val_g_mae)
-                val_g_rmse   = reduce_mean(val_g_rmse)
+                self.log_distributed_diagnostics(
+                    epoch,
+                    loss_local=loss_val_e.item(),
+                    e_rmse_local=val_e_rmse_local,
+                    n_trust_local=n_in_trust,
+                    n_total_local=len(self.train.X)
+                )
+
+            # Reduce weighted losses across ranks for scheduler / early stopping.
+            # (MAE/RMSE already aggregated via reduce_mae/reduce_rmse above)
+            if self.world_size > 1:
                 loss_train_e = reduce_mean(loss_train_e)
                 loss_val_e   = reduce_mean(loss_val_e)
 
@@ -2391,7 +2473,14 @@ class Training:
                 loss_val     = self.loss_fn(self.val.y, dip_pred_val)
 
                 if self.world_size > 1:
-                    self.log_distributed_diagnostics(epoch, loss_train, loss_val)
+                    # DIPOLE mode: use loss as proxy for RMSE, no trust region
+                    self.log_distributed_diagnostics(
+                        epoch,
+                        loss_local=loss_val.item(),
+                        e_rmse_local=loss_val.item(),  # Use loss as proxy
+                        n_trust_local=len(self.train.X),
+                        n_total_local=len(self.train.X)
+                    )
                     loss_train = reduce_mean(loss_train)
                     loss_val   = reduce_mean(loss_val)
 
@@ -2818,25 +2907,31 @@ class Training:
                 train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
                 val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
 
-                # Energy metrics
+                # Energy metrics - use reduce_rmse/reduce_mae for correct distributed aggregation
                 train_e_d    = self.loss_fn.descale_energies(self.train.y)
                 train_e_pred = self.loss_fn.descale_energies(train_y_pred)
-                train_e_mae  = torch.mean(torch.abs(train_e_d - train_e_pred))
-                train_e_rmse = torch.sqrt(torch.mean((train_e_d - train_e_pred)**2))
+                train_e_errors = (train_e_d - train_e_pred).view(-1)
+                val_e_rmse_local = torch.sqrt(torch.mean(train_e_errors ** 2)).item()
+                train_e_mae  = reduce_mae(train_e_errors)
+                train_e_rmse = reduce_rmse(train_e_errors)
 
                 val_e_d    = self.loss_fn.descale_energies(self.val.y)
                 val_e_pred = self.loss_fn.descale_energies(val_y_pred)
-                val_e_mae  = torch.mean(torch.abs(val_e_d - val_e_pred))
-                val_e_rmse = torch.sqrt(torch.mean((val_e_d - val_e_pred)**2))
+                val_e_errors = (val_e_d - val_e_pred).view(-1)
+                val_e_rmse_local = torch.sqrt(torch.mean(val_e_errors ** 2)).item()
+                val_e_mae  = reduce_mae(val_e_errors)
+                val_e_rmse = reduce_rmse(val_e_errors)
 
-                # Gradient metrics
+                # Gradient metrics (per-component errors)
                 natoms = self.train.NATOMS
                 train_dy = self.train.dy.reshape(-1, 3 * natoms)
                 val_dy   = self.val.dy.reshape(-1, 3 * natoms)
-                train_g_mae  = torch.mean(torch.sum(torch.abs(train_dy - train_dy_pred), dim=1) / (3 * natoms))
-                val_g_mae    = torch.mean(torch.sum(torch.abs(val_dy - val_dy_pred), dim=1) / (3 * natoms))
-                train_g_rmse = torch.sqrt(torch.mean(torch.sum((train_dy - train_dy_pred)**2, dim=1) / (3 * natoms)))
-                val_g_rmse   = torch.sqrt(torch.mean(torch.sum((val_dy - val_dy_pred)**2, dim=1) / (3 * natoms)))
+                train_g_errors = (train_dy - train_dy_pred).view(-1)
+                val_g_errors   = (val_dy - val_dy_pred).view(-1)
+                train_g_mae  = reduce_mae(train_g_errors)
+                val_g_mae    = reduce_mae(val_g_errors)
+                train_g_rmse = reduce_rmse(train_g_errors)
+                val_g_rmse   = reduce_rmse(val_g_errors)
 
                 # Weighted MSE for scheduler
                 # Sync minimum across ranks for consistent weighting in distributed mode
@@ -2849,15 +2944,15 @@ class Training:
                 loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
 
                 if self.world_size > 1:
-                    self.log_distributed_diagnostics(epoch, loss_train_e, loss_val_e)
-                    train_e_mae  = reduce_mean(train_e_mae)
-                    train_e_rmse = reduce_mean(train_e_rmse)
-                    val_e_mae    = reduce_mean(val_e_mae)
-                    val_e_rmse   = reduce_mean(val_e_rmse)
-                    train_g_mae  = reduce_mean(train_g_mae)
-                    train_g_rmse = reduce_mean(train_g_rmse)
-                    val_g_mae    = reduce_mean(val_g_mae)
-                    val_g_rmse   = reduce_mean(val_g_rmse)
+                    # Multi-batch mode doesn't use trust region, pass 0
+                    self.log_distributed_diagnostics(
+                        epoch,
+                        loss_local=loss_val_e.item(),
+                        e_rmse_local=val_e_rmse_local,
+                        n_trust_local=len(self.train.X),  # All samples (no trust region)
+                        n_total_local=len(self.train.X)
+                    )
+                    # MAE/RMSE already aggregated above via reduce_mae/reduce_rmse
                     loss_train_e = reduce_mean(loss_train_e)
                     loss_val_e   = reduce_mean(loss_val_e)
 

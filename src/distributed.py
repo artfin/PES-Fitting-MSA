@@ -115,6 +115,49 @@ def reduce_sum(tensor):
     return rt
 
 
+def reduce_rmse(errors):
+    """Compute global RMSE from local error tensors across all processes.
+
+    Unlike reduce_mean(local_rmse), this correctly computes:
+        sqrt(sum_all_squared_errors / total_count)
+
+    Args:
+        errors: 1-D tensor of (pred - true) errors on this rank's shard
+
+    Returns:
+        Scalar tensor with the global RMSE
+    """
+    local_sse = torch.sum(errors ** 2)
+    local_count = torch.tensor(errors.numel(), dtype=torch.float32, device=errors.device)
+
+    if not is_distributed():
+        return torch.sqrt(local_sse / local_count)
+
+    total_sse = reduce_sum(local_sse)
+    total_count = reduce_sum(local_count)
+    return torch.sqrt(total_sse / total_count)
+
+
+def reduce_mae(errors):
+    """Compute global MAE from local error tensors across all processes.
+
+    Args:
+        errors: 1-D tensor of (pred - true) errors on this rank's shard
+
+    Returns:
+        Scalar tensor with the global MAE
+    """
+    local_sum = torch.sum(torch.abs(errors))
+    local_count = torch.tensor(errors.numel(), dtype=torch.float32, device=errors.device)
+
+    if not is_distributed():
+        return local_sum / local_count
+
+    total_sum = reduce_sum(local_sum)
+    total_count = reduce_sum(local_count)
+    return total_sum / total_count
+
+
 def reduce_min(tensor):
     """Min tensor across all processes (no-op if single GPU)."""
     if not is_distributed():
@@ -130,6 +173,29 @@ def broadcast(tensor, src=0):
         return tensor
     dist.broadcast(tensor, src=src)
     return tensor
+
+
+def all_gather_scalar(value, device=None):
+    """Gather a scalar value from all ranks into a list.
+
+    Args:
+        value: Python scalar or 0-d tensor
+        device: torch device (defaults to cuda if available)
+
+    Returns:
+        List of values from all ranks (on rank 0), or [value] if single GPU
+    """
+    if not is_distributed():
+        return [value]
+
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    world_size = get_world_size()
+    tensor = torch.tensor(value, dtype=torch.float32, device=device)
+    gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(gathered, tensor)
+    return [t.item() for t in gathered]
 
 
 def barrier():
