@@ -4,6 +4,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+CONFIG_ONLY=false
+
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        --config-only|-c)
+            CONFIG_ONLY=true
+            shift
+            ;;
+    esac
+done
+
 NODES="192.168.49.109 192.168.49.111"
 
 REMOTE_DIR="$HOME/opt/PES-Fitting-MSA"
@@ -15,6 +27,12 @@ BASIS_DIR="datasets/external/h2o-h2o"
 
 for NODE in $NODES; do
     echo "==> $NODE"
+
+    if [ "$CONFIG_ONLY" = true ]; then
+        ssh "$NODE" "mkdir -p $REMOTE_DIR/$(dirname $CONFIG)"
+        scp "$PROJECT_ROOT/$CONFIG" "$NODE:$REMOTE_DIR/$CONFIG"
+        continue
+    fi
 
     ssh "$NODE" "mkdir -p $REMOTE_DIR/$(dirname $CONFIG) $REMOTE_DIR/$(dirname $DATASET) $REMOTE_DIR/$BASIS_DIR"
 
