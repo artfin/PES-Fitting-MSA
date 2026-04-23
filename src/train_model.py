@@ -1138,11 +1138,14 @@ class Training:
                 # resets parameters after trial evaluations, which breaks DDP's
                 # asynchronous gradient reduction invariants.
                 history_size = cfg_optimizer.get('HISTORY_SIZE', 100)
+                line_search = cfg_optimizer.get('LINE_SEARCH', 'Wolfe')
+                if line_search not in ['Armijo', 'Wolfe', 'None']:
+                    raise ValueError(f"Invalid LINE_SEARCH: {line_search}. Must be 'Armijo', 'Wolfe', or 'None'")
                 optimizer = HjmshiFullBatchLBFGS(
                     self.model.parameters(),
                     lr=lr,
                     history_size=history_size,
-                    line_search='Wolfe',
+                    line_search=line_search,
                 )
                 logging.info("Build optimizer: {} (distributed-aware, vendored FullBatchLBFGS)".format(optimizer))
             else:
