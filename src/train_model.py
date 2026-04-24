@@ -484,7 +484,7 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
     def __init__(self, natoms, dwt=1.0, g_lambda=1.0, trust_threshold=100.0,
                  soft_boundary=False, soft_scale=None,
                  focal_gamma=0.0, focal_ema_decay=0.95,
-                 huber_delta=None):
+                 huber_delta=None, gradient_trust_threshold=None):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
@@ -498,6 +498,10 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         # Pseudo-Huber cutoff on per-component gradient residuals (cm^-1/Bohr).
         # None = pure MSE on gradients (backward-compatible).
         self.huber_delta = huber_delta
+        # Gradient-based trust threshold (cm^-1/bohr RMSE). Configs exceeding
+        # this are excluded from gradient loss even if energy error is small.
+        # None = no gradient-based exclusion (backward-compatible).
+        self.gradient_trust_threshold = gradient_trust_threshold
 
         self.en_mean = None
         self.en_std = None
@@ -516,11 +520,11 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         return ("WMSELoss_TrustRegion_wgradients(natoms={}, dwt={}, g_lambda={}, "
                 "trust_threshold={}, soft_boundary={}, soft_scale={}, "
                 "focal_gamma={}, focal_ema_decay={}, "
-                "huber_delta={})").format(
+                "huber_delta={}, gradient_trust_threshold={})").format(
             self.natoms, self.dwt, self.g_lambda, self.trust_threshold,
             self.soft_boundary, self.soft_scale,
             self.focal_gamma, self.focal_ema_decay,
-            self.huber_delta)
+            self.huber_delta, self.gradient_trust_threshold)
 
     @staticmethod
     def soft_phi(energy_errors, trust_threshold, soft_scale=None):
@@ -647,6 +651,16 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
                 )
             else:
                 per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
+
+            # Optional: gradient-based trust exclusion (zero out configs with
+            # per-config gradient RMSE exceeding threshold)
+            if self.gradient_trust_threshold is not None:
+                per_config_rmse = torch.sqrt(per_config_sq / (3.0 * self.natoms))
+                grad_mask = (per_config_rmse <= self.gradient_trust_threshold).float()
+                w_trusted = w_trusted * grad_mask
+                if gradient_weights is not None:
+                    gradient_weights = gradient_weights * grad_mask
+
             contrib = w_trusted * per_config_sq               # (n_in_trust,)
             sq = contrib.sum()
 
@@ -1179,7 +1193,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT', 'HUBER_DELTA', 'GRADIENT_TRUST_THRESHOLD')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -1245,21 +1259,31 @@ class Training:
                 use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
                 huber_delta = None
                 if use_huber:
-                    mad = getattr(self.train, 'mad_grad_components', None)
-                    assert mad is not None and mad > 0, (
-                        "USE_HUBER_GRADIENT requires train.mad_grad_components; "
-                        "available only for gradient-loaded datasets.")
-                    # Huber 95%-efficiency constant at the normal is k = 1.345*sigma.
-                    # For Gaussian, sigma ~= 1.4826 * MAD, so k ~= 1.994 * MAD.
-                    huber_delta = 2.0 * float(mad)
-                    logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
+                    # Check for explicit override first
+                    huber_delta = self.cfg_loss.get('HUBER_DELTA', None)
+                    if huber_delta is not None:
+                        logging.info("Huber delta (explicit) = {:.6e}".format(huber_delta))
+                    else:
+                        mad = getattr(self.train, 'mad_grad_components', None)
+                        assert mad is not None and mad > 0, (
+                            "USE_HUBER_GRADIENT requires train.mad_grad_components; "
+                            "available only for gradient-loaded datasets.")
+                        # Huber 95%-efficiency constant at the normal is k = 1.345*sigma.
+                        # For Gaussian, sigma ~= 1.4826 * MAD, so k ~= 1.994 * MAD.
+                        huber_delta = 2.0 * float(mad)
+                        logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
+                # Gradient-based trust threshold (excludes configs with high gradient RMSE)
+                gradient_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
+                if gradient_trust_threshold is not None:
+                    logging.info("Gradient trust threshold = {:.6e} cm-1/bohr".format(gradient_trust_threshold))
                 loss_fn = WMSELoss_TrustRegion_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
                                                        trust_threshold=trust_threshold,
                                                        soft_boundary=soft_boundary,
                                                        soft_scale=soft_scale,
                                                        focal_gamma=focal_gamma,
                                                        focal_ema_decay=focal_ema_decay,
-                                                       huber_delta=huber_delta)
+                                                       huber_delta=huber_delta,
+                                                       gradient_trust_threshold=gradient_trust_threshold)
             else:
                 loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda)
 
