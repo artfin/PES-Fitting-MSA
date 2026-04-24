@@ -1235,54 +1235,104 @@ class FullBatchLBFGS(LBFGS):
         total_ls_step = 0
         total_grad_eval = 0
         prev_loss_val = None
-        
+
+        # Initialize return values in case loop doesn't execute
+        obj = options.get('current_loss')
+        grad_new = self._gather_flat_grad()
+        t = 0
+        desc_dir = True
+        fail = False
+
         # Local mutable copy so we can feed the accepted loss back as
         # current_loss for the next inner iteration.
         opts = dict(options)
-        
+
+        group = self.param_groups[0]
+        line_search = group['line_search']
+
         for n_iter in range(max_iter):
             # gather gradient
             grad = self._gather_flat_grad()
-            
+
             # update curvature if after 1st iteration
             state = self.state['global_state']
             if state['n_iter'] > 0:
                 self.curvature_update(grad, eps, damping)
-            
+
             # compute search direction
             p = self.two_loop_recursion(-grad)
-            
-            # take step
-            obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = self._step(p, grad, options=opts)
+
+            # take step - return values depend on line search type
+            if line_search == 'Wolfe':
+                obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = self._step(p, grad, options=opts)
+            elif line_search == 'Armijo':
+                obj, t, ls_step, closure_eval, desc_dir, fail = self._step(p, grad, options=opts)
+                # Armijo doesn't return gradient, compute it if step succeeded
+                grad_eval = 0
+                if not fail and t > 0:
+                    obj.backward()
+                    grad_sync_fn = opts.get('grad_sync_fn', None)
+                    if grad_sync_fn is not None:
+                        grad_sync_fn()
+                    grad_clip_norm = opts.get('grad_clip_norm', None)
+                    if grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
+                    grad_new = self._gather_flat_grad()
+                    grad_eval = 1
+                else:
+                    grad_new = grad
+            else:  # 'None'
+                t = self._step(p, grad, options=opts)
+                closure = opts.get('closure')
+                loss_sync_fn = opts.get('loss_sync_fn', None)
+                raw_obj = closure()
+                if loss_sync_fn is not None:
+                    obj = SyncedLoss(raw_obj, loss_sync_fn)
+                else:
+                    obj = raw_obj
+                ls_step = 0
+                closure_eval = 1
+                grad_eval = 1
+                desc_dir = True
+                fail = False
+                obj.backward()
+                grad_sync_fn = opts.get('grad_sync_fn', None)
+                if grad_sync_fn is not None:
+                    grad_sync_fn()
+                grad_clip_norm = opts.get('grad_clip_norm', None)
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self._params, grad_clip_norm)
+                grad_new = self._gather_flat_grad()
+
             total_evals += closure_eval
             total_ls_step += ls_step
             total_grad_eval += grad_eval
-            
+
             if fail or t == 0 or not desc_dir:
                 break
-            
+
             flat_grad = self._gather_flat_grad()
             opt_cond = flat_grad.abs().max() <= tolerance_grad
             if opt_cond:
                 break
-            
+
             d = state.get('d')
             if d is not None and t is not None:
                 if d.mul(t).abs().max() <= tolerance_change:
                     break
-            
+
             loss_val = float(obj)
             if prev_loss_val is not None and abs(loss_val - prev_loss_val) < tolerance_change:
                 break
             prev_loss_val = loss_val
-            
+
             if total_evals >= max_eval:
                 break
-            
+
             # Prepare for next inner iteration: obj is the loss at the
             # accepted point (already synced if distributed) and .grad already
             # contains the gradient at that point from the line search's last
             # backward.
             opts['current_loss'] = obj
-        
+
         return obj, grad_new, t, total_ls_step, total_evals, total_grad_eval, desc_dir, fail
