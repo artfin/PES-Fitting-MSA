@@ -1141,6 +1141,18 @@ class Training:
                 line_search = cfg_optimizer.get('LINE_SEARCH', 'Wolfe')
                 if line_search not in ['Armijo', 'Wolfe', 'None']:
                     raise ValueError(f"Invalid LINE_SEARCH: {line_search}. Must be 'Armijo', 'Wolfe', or 'None'")
+
+                # Line search parameters (stored for passing to step())
+                self._lbfgs_ls_options = {
+                    'max_ls': cfg_optimizer.get('MAX_LS', 10),
+                    'c1': cfg_optimizer.get('C1', 1e-4),
+                    'c2': cfg_optimizer.get('C2', 0.9),
+                    'eta': cfg_optimizer.get('ETA', 2.0),
+                    'interpolate': cfg_optimizer.get('INTERPOLATE', True),
+                    'ls_debug': cfg_optimizer.get('LS_DEBUG', False),
+                }
+                logging.info(f"Line search options: {self._lbfgs_ls_options}")
+
                 optimizer = HjmshiFullBatchLBFGS(
                     self.model.parameters(),
                     lr=lr,
@@ -2344,6 +2356,9 @@ class Training:
                 'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
                 'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
             }
+            # Add line search options from config
+            if hasattr(self, '_lbfgs_ls_options'):
+                options.update(self._lbfgs_ls_options)
             obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
             self._last_vendored_closure_eval = closure_eval + 1  # +1 for the initial evaluation above
             CLOSURE_CALL_COUNT = self._last_vendored_closure_eval
