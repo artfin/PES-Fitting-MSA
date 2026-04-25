@@ -444,64 +444,49 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
 class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
     """
     Memory-efficient trust region loss for gradient training with optional focal
-    weighting and an optional soft boundary.
+    weighting and smooth (soft) trust boundaries.
 
     Gradients are pre-filtered before being passed to this loss (computed only
     for configs in the trust / active set). This avoids OOM by never computing
     gradients for configs outside the active set.
 
-    Two modes (selected by `soft_boundary`):
+    Trust region uses soft boundaries with sigmoid weighting:
+        phi(e_i) = sigmoid((trust_threshold - e_i) / soft_scale) in [0, 1]
+    smoothly decaying with energy error. Gradient loss is normalized by the
+    SUM of weights, so downweighting actually reduces a config's contribution
+    rather than redistributing it.
 
-      Hard mask (default; backward-compatible):
-        Membership in the trust set is binary (energy error < trust_threshold).
-        Gradient loss is normalized by n_in_trust.
+    The "active set" passed in is the subset of configs whose phi exceeds
+    soft_cutoff (a memory optimization only -- configs outside the active set
+    contribute negligibly).
 
-      Soft boundary (soft_boundary=True):
-        Each config carries a per-config weight
-            phi(e_i) = sigmoid((trust_threshold - e_i) / soft_scale) in [0, 1]
-        smoothly decaying with energy error. Gradient loss is normalized by the
-        SUM of weights, so downweighting actually reduces a config's
-        contribution rather than redistributing it.
-
-        The "active set" passed in is the subset of configs whose phi exceeds
-        soft_cutoff (a memory optimization only -- configs outside the
-        active set contribute negligibly).
-
-        Soft mode removes the discontinuous "evasion" incentive of the hard
-        mask, where pushing a config across `tau` discretely zeroed its
-        gradient loss.
+    Soft boundaries avoid the discontinuous "evasion" incentive of hard masks,
+    where pushing a config across the threshold would discretely zero its
+    gradient loss, breaking L-BFGS convergence.
 
     Focal weighting (when focal_gamma > 0) up-weights hard-to-fit configs.
 
     Expected inputs:
-    - en, en_pred:        full energy tensors (all configs)
+    - en, en_pred:           full energy tensors (all configs)
     - gradients_subset:      reference gradients for active-set configs
     - gradients_pred_subset: predicted gradients for active-set configs
-    - trust_indices:      indices of active-set configs
-    - gradient_weights:      optional per-config soft phi values for the active
-                          set; when None we are in hard-mask mode.
+    - trust_indices:         indices of active-set configs
+    - gradient_weights:      per-config soft weights for the active set
     """
     def __init__(self, natoms, dwt=1.0, g_lambda=1.0, trust_threshold=100.0,
-                 soft_boundary=False, soft_scale=None,
-                 focal_gamma=0.0, focal_ema_decay=0.95,
-                 huber_delta=None, gradient_trust_threshold=None):
+                 soft_scale=None, focal_gamma=0.0, focal_ema_decay=0.95,
+                 huber_delta=None):
         super().__init__()
         self.natoms = natoms
         self.dwt = torch.tensor(dwt).to(DEVICE)
         self.g_lambda = torch.tensor(g_lambda).to(DEVICE)
         self.trust_threshold = trust_threshold
-        # Soft boundary parameters (False = hard mask, backward-compatible)
-        self.soft_boundary = soft_boundary
         self.soft_scale = soft_scale  # cm^-1; defaults to trust_threshold/4
         self.focal_gamma = focal_gamma
         self.focal_ema_decay = focal_ema_decay
         # Pseudo-Huber cutoff on per-component gradient residuals (cm^-1/Bohr).
         # None = pure MSE on gradients (backward-compatible).
         self.huber_delta = huber_delta
-        # Gradient-based trust threshold (cm^-1/bohr RMSE). Configs exceeding
-        # this are excluded from gradient loss even if energy error is small.
-        # None = no gradient-based exclusion (backward-compatible).
-        self.gradient_trust_threshold = gradient_trust_threshold
 
         self.en_mean = None
         self.en_std = None
@@ -518,13 +503,12 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
 
     def __repr__(self):
         return ("WMSELoss_TrustRegion_wgradients(natoms={}, dwt={}, g_lambda={}, "
-                "trust_threshold={}, soft_boundary={}, soft_scale={}, "
+                "trust_threshold={}, soft_scale={}, "
                 "focal_gamma={}, focal_ema_decay={}, "
-                "huber_delta={}, gradient_trust_threshold={})").format(
+                "huber_delta={})").format(
             self.natoms, self.dwt, self.g_lambda, self.trust_threshold,
-            self.soft_boundary, self.soft_scale,
-            self.focal_gamma, self.focal_ema_decay,
-            self.huber_delta, self.gradient_trust_threshold)
+            self.soft_scale, self.focal_gamma, self.focal_ema_decay,
+            self.huber_delta)
 
     @staticmethod
     def soft_phi(energy_errors, trust_threshold, soft_scale=None):
@@ -587,17 +571,15 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         return w
 
     def forward(self, en, en_pred, gradients_subset, gradients_pred_subset,
-                trust_indices, gradient_weights=None):
+                trust_indices, gradient_weights):
         """
         Compute combined energy + gradient loss.
         Energy loss is computed on ALL configs, gradient loss only on the
         active (trust) subset.
 
-        gradient_weights: optional 1-D tensor of soft phi values for the
-        active subset (same length as trust_indices). If provided we are
-        in soft-boundary mode and the gradient loss is normalized by the
-        SUM of these weights; if None we are in hard-mask mode (count
-        normalization, weights effectively 1.0).
+        gradient_weights: 1-D tensor of soft phi values for the active subset
+        (same length as trust_indices). Gradient loss is normalized by the SUM
+        of these weights.
         """
         wmse_en, wmse_gradients = self.forward_separate(
             en, en_pred, gradients_subset, gradients_pred_subset,
@@ -606,7 +588,7 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         return wmse_en + wmse_gradients
 
     def forward_separate(self, en, en_pred, gradients_subset, gradients_pred_subset,
-                         trust_indices, gradient_weights=None):
+                         trust_indices, gradient_weights):
         assert self.en_mean is not None
         assert self.en_std is not None
 
@@ -626,11 +608,8 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
         n_in_trust = len(trust_indices)
         if n_in_trust > 0:
             # Combined per-config weight on the active subset:
-            #   hard mask: w_trusted = w_energy * w_focal
-            #   soft mask: w_trusted = w_energy * w_focal * phi(e_i)
-            w_trusted = w[trust_indices]
-            if gradient_weights is not None:
-                w_trusted = w_trusted * gradient_weights
+            # w_trusted = w_energy * w_focal * phi(e_i)
+            w_trusted = w[trust_indices] * gradient_weights
 
             # Reshape gradients
             gradients_subset = gradients_subset.reshape(n_in_trust, self.natoms, 3)
@@ -652,26 +631,12 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
             else:
                 per_config_sq = torch.sum(df ** 2, dim=(1, 2))  # (n_in_trust,)
 
-            # Optional: gradient-based trust exclusion (zero out configs with
-            # per-config gradient RMSE exceeding threshold)
-            if self.gradient_trust_threshold is not None:
-                per_config_rmse = torch.sqrt(per_config_sq / (3.0 * self.natoms))
-                grad_mask = (per_config_rmse <= self.gradient_trust_threshold).float()
-                w_trusted = w_trusted * grad_mask
-                if gradient_weights is not None:
-                    gradient_weights = gradient_weights * grad_mask
-
             contrib = w_trusted * per_config_sq               # (n_in_trust,)
             sq = contrib.sum()
 
-            if gradient_weights is not None:
-                # Soft mode: normalize by sum of soft weights so that
-                # downweighting a config genuinely shrinks its contribution.
-                denom = (gradient_weights.sum().clamp(min=1.0)
-                         * 3.0 * self.natoms)
-            else:
-                # Hard mode: original count-based normalization.
-                denom = 3.0 * self.natoms * n_in_trust
+            # Normalize by sum of soft weights so that downweighting a config
+            # genuinely shrinks its contribution.
+            denom = gradient_weights.sum().clamp(min=1.0) * 3.0 * self.natoms
 
             wmse_gradients = self.g_lambda * sq / denom
         else:
@@ -1193,7 +1158,7 @@ class Training:
         return optimizer
 
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_BOUNDARY', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT', 'HUBER_DELTA', 'GRADIENT_TRUST_THRESHOLD')
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'GRADIENT_TRUST_THRESHOLD', 'GRADIENT_TRUST_SOFT_SCALE', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT', 'HUBER_DELTA')
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
@@ -1203,9 +1168,10 @@ class Training:
         self.cfg_loss.setdefault('USE_GRADIENTS', False)
         self.cfg_loss.setdefault('G_LAMBDA_RAMP_EPOCHS', 0)
         self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
-        self.cfg_loss.setdefault('TRUST_SOFT_BOUNDARY', False)
         self.cfg_loss.setdefault('TRUST_SOFT_SCALE', None)
         self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
+        self.cfg_loss.setdefault('GRADIENT_TRUST_THRESHOLD', None)
+        self.cfg_loss.setdefault('GRADIENT_TRUST_SOFT_SCALE', None)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
         self.cfg_loss.setdefault('USE_HUBER_GRADIENT', False)
@@ -1253,8 +1219,7 @@ class Training:
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             if trust_threshold is not None:
-                # Use memory-efficient trust region loss that expects pre-filtered gradients
-                soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
+                # Use memory-efficient trust region loss with soft boundaries
                 soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
                 use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
                 huber_delta = None
@@ -1272,18 +1237,18 @@ class Training:
                         # For Gaussian, sigma ~= 1.4826 * MAD, so k ~= 1.994 * MAD.
                         huber_delta = 2.0 * float(mad)
                         logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
-                # Gradient-based trust threshold (excludes configs with high gradient RMSE)
-                gradient_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
-                if gradient_trust_threshold is not None:
-                    logging.info("Gradient trust threshold = {:.6e} cm-1/bohr".format(gradient_trust_threshold))
                 loss_fn = WMSELoss_TrustRegion_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
                                                        trust_threshold=trust_threshold,
-                                                       soft_boundary=soft_boundary,
                                                        soft_scale=soft_scale,
                                                        focal_gamma=focal_gamma,
                                                        focal_ema_decay=focal_ema_decay,
-                                                       huber_delta=huber_delta,
-                                                       gradient_trust_threshold=gradient_trust_threshold)
+                                                       huber_delta=huber_delta)
+                # Log gradient trust settings (applied in compute_trust_mask)
+                grad_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
+                if grad_trust_threshold is not None:
+                    grad_trust_soft_scale = self.cfg_loss.get('GRADIENT_TRUST_SOFT_SCALE', None)
+                    logging.info("Gradient trust threshold = {:.2f} cm-1/bohr (soft_scale={})".format(
+                        grad_trust_threshold, grad_trust_soft_scale))
             else:
                 loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda)
 
@@ -1662,27 +1627,33 @@ class Training:
 
     def compute_trust_mask(self, dataset):
         """
-        Compute trust region active set based on energy prediction errors.
+        Compute trust region active set based on energy prediction errors
+        and optionally gradient errors from the previous epoch.
 
-        In hard-mask mode (default): active set = {i : e_i < trust_threshold}.
-        In soft-boundary mode (TRUST_SOFT_BOUNDARY=True): active set =
-            {i : phi(e_i) > soft_cutoff}, where phi is the sigmoid soft
-            trust factor; the per-config phi values are returned as well.
+        Uses soft boundaries with sigmoid weighting:
+            phi(e_i) = sigmoid((threshold - error) / soft_scale) in [0, 1]
+        Active set = {i : phi(e_i) > soft_cutoff} (memory optimization).
+
+        When GRADIENT_TRUST_THRESHOLD is set, configs with large gradient
+        errors (from previous epoch) are down-weighted using a soft sigmoid.
+        This is combined multiplicatively with energy-based weights.
 
         Returns:
           trust_indices : 1-D LongTensor of active-set config indices
           trust_mask    : 1-D BoolTensor of shape (N,) indicating membership
           energy_errors : 1-D float tensor of |E_pred - E_true| (cm^-1)
-          gradient_weights : 1-D float tensor of phi(e_i) for the active set
-                          in soft-boundary mode, or None in hard-mask mode
+          gradient_weights : 1-D float tensor of combined weights for the active set
         """
         trust_threshold = getattr(self, 'current_trust_threshold', None)
         if trust_threshold is None:
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
 
-        soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
         soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
         soft_cutoff = self.cfg_loss.get('TRUST_SOFT_CUTOFF', 0.01)
+
+        # Gradient trust: filter by previous epoch's gradient errors
+        grad_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
+        grad_trust_soft_scale = self.cfg_loss.get('GRADIENT_TRUST_SOFT_SCALE', None)
 
         with torch.no_grad():
             y_pred = self.model(dataset.X)
@@ -1696,17 +1667,26 @@ class Training:
 
             energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
 
-            if soft_boundary:
-                phi = WMSELoss_TrustRegion_wgradients.soft_phi(
-                    energy_errors, trust_threshold, soft_scale=soft_scale
+            # Always use soft boundary with sigmoid weighting
+            phi_energy = WMSELoss_TrustRegion_wgradients.soft_phi(
+                energy_errors, trust_threshold, soft_scale=soft_scale
+            )
+            trust_mask = phi_energy > soft_cutoff
+            trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+            gradient_weights = phi_energy[trust_indices]
+
+            # Apply gradient trust filtering (uses previous epoch's gradient errors)
+            if (grad_trust_threshold is not None
+                    and self._prev_train_gradient_errors is not None
+                    and self._prev_train_gradient_errors.numel() == energy_errors.numel()):
+                # Compute soft phi for gradient errors (same sigmoid as energy)
+                phi_grad = WMSELoss_TrustRegion_wgradients.soft_phi(
+                    self._prev_train_gradient_errors,
+                    grad_trust_threshold,
+                    soft_scale=grad_trust_soft_scale
                 )
-                trust_mask = phi > soft_cutoff
-                trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
-                gradient_weights = phi[trust_indices]
-            else:
-                trust_mask = energy_errors < trust_threshold
-                trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
-                gradient_weights = None
+                # Multiply energy weights by gradient weights
+                gradient_weights = gradient_weights * phi_grad[trust_indices]
 
         return trust_indices, trust_mask, energy_errors, gradient_weights
 
@@ -1777,8 +1757,7 @@ class Training:
                 med_err_left = float('nan')
                 med_err_stayed = float('nan')
 
-        # Soft-mode phi statistics (None in hard mode).
-        if gradient_weights is not None and gradient_weights.numel() > 0:
+        if gradient_weights.numel() > 0:
             phi_sum = float(gradient_weights.sum().item())
             phi_mean = float(gradient_weights.mean().item())
             phi_min = float(gradient_weights.min().item())
@@ -1847,8 +1826,6 @@ class Training:
         Contribution mirrors the loss term per config:
             c_i = phi_i * w_energy_i * w_focal_i * ||f_i - f_i_pred||^2 / (3 N_atoms)
         (un-normalized; we want raw share, not the loss value itself.)
-
-        In hard-mask mode phi is treated as 1; phi columns are NaN.
         """
         if trust_indices is None or trust_indices.numel() == 0:
             return
@@ -1874,10 +1851,7 @@ class Training:
             else:
                 w_act = torch.ones(n_active, device=DEVICE)
 
-            if gradient_weights is not None:
-                phi_act = gradient_weights.view(-1).to(f_sq.dtype)
-            else:
-                phi_act = torch.ones(n_active, device=DEVICE, dtype=f_sq.dtype)
+            phi_act = gradient_weights.view(-1).to(f_sq.dtype)
 
             contrib = (phi_act * w_act * f_sq).detach().cpu()
             phi_cpu = phi_act.detach().cpu()
@@ -1897,17 +1871,13 @@ class Training:
             top5  = _tail_share(0.05)
             top10 = _tail_share(0.10)
 
-            if gradient_weights is not None:
-                pq = torch.quantile(phi_cpu, qs[:5].to(phi_cpu.dtype)).tolist()
-                # Bin phi into membership categories.
-                bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
-                # counts per bin
-                idx = torch.bucketize(phi_cpu, bins) - 1
-                idx = idx.clamp(0, 4)
-                bin_counts = [int((idx == b).sum().item()) for b in range(5)]
-            else:
-                pq = [float('nan')] * 5
-                bin_counts = [0] * 5  # all entries are phi=1, hard mode N/A
+            pq = torch.quantile(phi_cpu, qs[:5].to(phi_cpu.dtype)).tolist()
+            # Bin phi into membership categories.
+            bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
+            # counts per bin
+            idx = torch.bucketize(phi_cpu, bins) - 1
+            idx = idx.clamp(0, 4)
+            bin_counts = [int((idx == b).sum().item()) for b in range(5)]
 
         if not self._gradient_diag_initialized:
             try:
@@ -2220,7 +2190,6 @@ class Training:
                     dX_subset = self.train.dX[trust_indices]
                     train_dy_subset = self.train.dy[trust_indices]
 
-                soft_boundary = self.cfg_loss.get('TRUST_SOFT_BOUNDARY', False)
                 # Aggregate trust region stats across ranks for correct logging
                 n_in_trust_t = torch.tensor(n_in_trust, dtype=torch.float32, device=DEVICE)
                 n_total_t = torch.tensor(len(self.train.X), dtype=torch.float32, device=DEVICE)
@@ -2240,13 +2209,16 @@ class Training:
                     err_max_global = err_max_t.item()
                 frac_global = 100.0 * n_in_trust_global / max(n_total_global, 1)
 
-                if soft_boundary and gradient_weights is not None and n_in_trust > 0:
+                if n_in_trust > 0:
                     phi_sum_t = gradient_weights.sum()
                     phi_sum_global = reduce_sum(phi_sum_t).item() if self.world_size > 1 else phi_sum_t.item()
+                    grad_trust_enabled = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD') is not None
+                    label = "soft+grad" if grad_trust_enabled else "soft"
                     self._log(
-                        "Trust region (soft): {}/{} configs ({:.1f}%) | "
+                        "Trust region ({}): {}/{} configs ({:.1f}%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
-                        "phi: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
+                        "weights: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
+                            label,
                             n_in_trust_global, n_total_global, frac_global,
                             err_min_global, err_max_global,
                             energy_errors.median().item(),
@@ -2254,9 +2226,9 @@ class Training:
                             phi_sum_global))
                 else:
                     self._log(
-                        "Trust region: {}/{} configs ({:.1f}%) | "
+                        "Trust region: 0/{} configs (0.0%) | "
                         "energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
-                            n_in_trust_global, n_total_global, frac_global,
+                            n_total_global,
                             err_min_global, err_max_global,
                             energy_errors.median().item()))
 
