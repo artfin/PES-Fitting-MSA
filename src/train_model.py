@@ -465,7 +465,8 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
 
     def forward(self, en, en_pred, gradients, gradients_pred):
         wmse_en, wmse_gradients = self.forward_separate(en, en_pred, gradients, gradients_pred)
-        return wmse_en + wmse_gradients
+        # Apply g_lambda weighting for backward compatibility (non-MGDA path)
+        return wmse_en + self.g_lambda * wmse_gradients
 
     def descale_energies(self, en):
         return en * self.en_std + self.en_mean
@@ -494,7 +495,9 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
 
         df = gradients - gradients_pred
         wdf = torch.einsum('ijk,i->ijk', df, w)
-        wmse_gradients = self.g_lambda * torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
+        # Return raw gradient loss (g_lambda applied in forward() for non-MGDA,
+        # or MGDA computes its own optimal weighting)
+        wmse_gradients = torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
 
         return wmse_en, wmse_gradients
 
@@ -643,7 +646,8 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
             en, en_pred, gradients_subset, gradients_pred_subset,
             trust_indices, gradient_weights
         )
-        return wmse_en + wmse_gradients
+        # Apply g_lambda weighting for backward compatibility (non-MGDA path)
+        return wmse_en + self.g_lambda * wmse_gradients
 
     def forward_separate(self, en, en_pred, gradients_subset, gradients_pred_subset,
                          trust_indices, gradient_weights):
@@ -696,7 +700,9 @@ class WMSELoss_TrustRegion_wgradients(torch.nn.Module):
             # genuinely shrinks its contribution.
             denom = gradient_weights.sum().clamp(min=1.0) * 3.0 * self.natoms
 
-            wmse_gradients = self.g_lambda * sq / denom
+            # Return raw gradient loss (g_lambda applied in forward() for non-MGDA,
+            # or MGDA computes its own optimal weighting)
+            wmse_gradients = sq / denom
         else:
             wmse_gradients = torch.tensor(0.0, device=DEVICE)
 
