@@ -57,6 +57,64 @@ def seed_torch(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
 
+
+# ---------------------------------------------------------------------------
+# MGDA (Multiple Gradient Descent Algorithm) helpers
+# ---------------------------------------------------------------------------
+
+def flatten_gradients(model):
+    """Flatten all parameter gradients into a single 1D tensor."""
+    grads = []
+    for p in model.parameters():
+        if p.grad is not None:
+            grads.append(p.grad.view(-1))
+        else:
+            grads.append(torch.zeros_like(p).view(-1))
+    return torch.cat(grads)
+
+
+def set_gradients(model, flat_grad):
+    """Set model parameter gradients from a flattened 1D tensor."""
+    offset = 0
+    for p in model.parameters():
+        numel = p.numel()
+        p.grad = flat_grad[offset:offset + numel].view_as(p)
+        offset += numel
+
+
+def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0):
+    """
+    Compute optimal convex combination weight for two-objective MGDA.
+
+    Given gradients g_e (energy) and g_g (gradient loss), find alpha in [0,1]
+    that minimizes ||alpha * g_e + (1-alpha) * g_g||^2 while ensuring descent
+    on both objectives when possible.
+
+    Returns:
+        alpha: optimal weight for energy gradient (1-alpha for gradient loss)
+        cos_sim: cosine similarity between the two gradients (for diagnostics)
+    """
+    dot_ee = torch.dot(g_energy, g_energy)
+    dot_gg = torch.dot(g_gradient, g_gradient)
+    dot_eg = torch.dot(g_energy, g_gradient)
+
+    # Cosine similarity for diagnostics
+    norm_e = torch.sqrt(dot_ee + 1e-12)
+    norm_g = torch.sqrt(dot_gg + 1e-12)
+    cos_sim = dot_eg / (norm_e * norm_g)
+
+    # Closed-form solution for optimal alpha
+    denom = dot_ee + dot_gg - 2 * dot_eg
+    if denom < 1e-10:
+        # Gradients nearly parallel - use equal weighting
+        alpha = torch.tensor(0.5, device=g_energy.device)
+    else:
+        alpha = (dot_gg - dot_eg) / denom
+        alpha = torch.clamp(alpha, alpha_min, alpha_max)
+
+    return alpha, cos_sim
+
+
 class IdentityScaler:
     def __init__(self):
         pass
@@ -1000,6 +1058,13 @@ class Training:
         )
         self._dist_diag_initialized = False
 
+        # MGDA (Multi-objective Gradient Descent Algorithm) state
+        self._mgda_alpha_ema = None  # EMA-smoothed alpha value
+        self._mgda_diag_path = os.path.join(
+            self.model_folder, "{}.mgda_diagnostics.csv".format(model_name)
+        )
+        self._mgda_diag_initialized = False
+
     def _log(self, msg):
         """Rank-0 only logging helper."""
         if is_main_process():
@@ -1520,6 +1585,14 @@ class Training:
                     self._lbfgs_prev_n_iter = 0
                     self._lbfgs_prev_func_evals = 0
                     self._log("Periodic L-BFGS state reset (epoch {})".format(epoch))
+
+                    # Optionally reset LR to initial value on L-BFGS reset
+                    if self.cfg_solver['OPTIMIZER'].get('LR_RESET_ON_LBFGS_RESET', False):
+                        initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
+                        for pg in self.optimizer.param_groups:
+                            pg['lr'] = initial_lr
+                        self.scheduler = self.build_scheduler()
+                        self._log("Reset LR to {} and rebuilt scheduler".format(initial_lr))
 
                 self._log("loss function: {}".format(self.loss_fn))
 
@@ -2059,6 +2132,34 @@ class Training:
                 )
             )
 
+    def log_mgda_diagnostics(self, epoch, alpha, alpha_raw, cos_sim):
+        """Log MGDA (Multi-objective Gradient Descent Algorithm) diagnostics.
+
+        Args:
+            epoch: current epoch
+            alpha: EMA-smoothed MGDA weight for energy objective
+            alpha_raw: raw (unsmoothed) MGDA weight
+            cos_sim: cosine similarity between energy and gradient gradients
+        """
+        if not is_main_process():
+            return
+
+        if not self._mgda_diag_initialized:
+            try:
+                with open(self._mgda_diag_path, "w") as f:
+                    f.write("epoch,alpha,alpha_raw,cos_sim\n")
+                self._mgda_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize MGDA diag CSV: {}".format(e))
+
+        try:
+            with open(self._mgda_diag_path, "a") as f:
+                f.write("{},{:.6f},{:.6f},{:.6f}\n".format(
+                    epoch, alpha, alpha_raw, cos_sim
+                ))
+        except OSError as e:
+            logging.warning("Could not append to MGDA diag CSV: {}".format(e))
+
     def log_distributed_diagnostics(self, epoch, loss_local, e_rmse_local, n_trust_local, n_total_local):
         """Log verbose per-rank metrics for distributed training.
 
@@ -2237,7 +2338,14 @@ class Training:
                     epoch, trust_mask, energy_errors, gradient_weights
                 )
 
-        def _compute_loss():
+        def _compute_loss(separate=False):
+            """Compute training loss.
+
+            Args:
+                separate: If True and using gradients with trust region,
+                         return (energy_loss, gradient_loss) tuple for MGDA.
+                         Otherwise return combined loss.
+            """
             if self.cfg_loss['USE_GRADIENTS']:
                 if use_trust_region:
                     if n_in_trust > 0:
@@ -2246,15 +2354,30 @@ class Training:
                             X_subset, dX_subset, y_pred_subset
                         )
                         train_y_pred = self.model(self.train.X)
-                        loss = self.loss_fn(
-                            self.train.y, train_y_pred,
-                            train_dy_subset, train_dy_pred_subset,
-                            trust_indices, gradient_weights
-                        )
+                        if separate:
+                            energy_loss, gradient_loss = self.loss_fn.forward_separate(
+                                self.train.y, train_y_pred,
+                                train_dy_subset, train_dy_pred_subset,
+                                trust_indices, gradient_weights
+                            )
+                            # Add regularization to energy loss (it's model complexity, not gradient fitting)
+                            if self.regularization is not None:
+                                energy_loss = energy_loss + self.regularization(self.model)
+                            return energy_loss, gradient_loss
+                        else:
+                            loss = self.loss_fn(
+                                self.train.y, train_y_pred,
+                                train_dy_subset, train_dy_pred_subset,
+                                trust_indices, gradient_weights
+                            )
                     else:
                         # No configs in trust region yet - energy only
                         train_y_pred = self.model(self.train.X)
                         loss = self.loss_fn.forward_energy_only(self.train.y, train_y_pred)
+                        if separate:
+                            if self.regularization is not None:
+                                loss = loss + self.regularization(self.model)
+                            return loss, torch.tensor(0.0, device=DEVICE)
                 else:
                     # Original approach: compute gradients for ALL configs
                     train_y_pred, train_dy_pred = self.compute_gradients(self.train)
@@ -2313,6 +2436,88 @@ class Training:
             loss = _compute_loss()
             return loss
 
+        # MGDA (Multi-objective Gradient Descent Algorithm) closure
+        # Computes optimal combination of energy and gradient loss gradients
+        use_mgda = (self.cfg_loss.get('USE_MGDA', False)
+                    and self.cfg_loss['USE_GRADIENTS']
+                    and use_trust_region
+                    and n_in_trust > 0)
+        mgda_alpha_min = self.cfg_loss.get('MGDA_ALPHA_MIN', 0.1)
+        mgda_alpha_max = self.cfg_loss.get('MGDA_ALPHA_MAX', 0.9)
+        mgda_ema_decay = self.cfg_loss.get('MGDA_EMA_DECAY', 0.9)
+        _mgda_alpha_raw = [None]  # Mutable container for closure
+        _mgda_alpha = [None]
+        _mgda_cos_sim = [None]
+
+        def closure_mgda():
+            """MGDA closure: compute optimal gradient combination."""
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+
+            # Compute separate losses
+            energy_loss, gradient_loss = _compute_loss(separate=True)
+
+            # Backward pass for energy gradient
+            energy_loss.backward(retain_graph=True)
+            g_energy = flatten_gradients(self.model)
+
+            # Backward pass for gradient loss gradient
+            optimizer.zero_grad()
+            gradient_loss.backward()
+            g_gradient = flatten_gradients(self.model)
+
+            # Sync gradients across ranks before computing MGDA weights
+            if self.world_size > 1:
+                # All-reduce gradient vectors so all ranks have same MGDA alpha
+                dist.all_reduce(g_energy, op=dist.ReduceOp.SUM)
+                g_energy = g_energy / self.world_size
+                dist.all_reduce(g_gradient, op=dist.ReduceOp.SUM)
+                g_gradient = g_gradient / self.world_size
+
+            # Compute MGDA optimal weights
+            alpha_raw, cos_sim = compute_mgda_alpha(g_energy, g_gradient, mgda_alpha_min, mgda_alpha_max)
+
+            # EMA smoothing to prevent oscillation
+            if self._mgda_alpha_ema is None:
+                alpha = alpha_raw
+                self._mgda_alpha_ema = alpha.item()
+            else:
+                alpha = mgda_ema_decay * self._mgda_alpha_ema + (1 - mgda_ema_decay) * alpha_raw.item()
+                self._mgda_alpha_ema = alpha
+                alpha = torch.tensor(alpha, device=g_energy.device)
+
+            # Store for diagnostics
+            _mgda_alpha_raw[0] = alpha_raw.item()
+            _mgda_alpha[0] = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
+            _mgda_cos_sim[0] = cos_sim.item()
+
+            # Combine gradients with MGDA weights
+            combined_grad = alpha * g_energy + (1 - alpha) * g_gradient
+            set_gradients(self.model, combined_grad)
+
+            # Gradient clipping on combined gradient
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+            # Return combined loss for L-BFGS line search
+            # Use same alpha for consistency
+            combined_loss = alpha * energy_loss.detach() + (1 - alpha) * gradient_loss.detach()
+            if self.world_size > 1:
+                combined_loss = reduce_mean(combined_loss)
+            return combined_loss
+
+        def closure_mgda_no_backward():
+            """MGDA closure for line search (no backward needed)."""
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+            energy_loss, gradient_loss = _compute_loss(separate=True)
+            # Use current EMA alpha for consistent loss evaluation
+            alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
+            combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
+            return combined_loss
+
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
         self.model.train()
 
@@ -2324,34 +2529,51 @@ class Training:
         start_time = timeit.default_timer()
         if isinstance(optimizer, HjmshiFullBatchLBFGS):
             # Vendored FullBatchLBFGS for distributed training.
-            # Pre-compute loss & gradient at the current iterate.
-            logging.debug(f"[rank {self.rank}] vendored LBFGS: zero_grad")
-            optimizer.zero_grad()
-            logging.debug(f"[rank {self.rank}] vendored LBFGS: closure_no_backward")
-            loss = closure_no_backward()
-            logging.debug(f"[rank {self.rank}] vendored LBFGS: backward (loss={loss.item():.4f})")
-            loss.backward()
-            # Explicit gradient sync - don't rely on DDP's implicit async sync
-            if self.world_size > 1:
-                logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients START")
-                sync_gradients(self.model)
-                logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients DONE")
-            if self.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-            if self.world_size > 1:
-                logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean START")
-                loss = reduce_mean(loss.detach())
-                logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean DONE")
-            # Build grad_sync closure that captures self.model
-            def _grad_sync():
-                sync_gradients(self.model)
-            options = {
-                'closure': closure_no_backward,
-                'current_loss': loss,
-                'grad_clip_norm': self.grad_clip_norm,
-                'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
-                'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
-            }
+            if use_mgda:
+                # MGDA mode: use MGDA closures that compute optimal gradient combination
+                logging.debug(f"[rank {self.rank}] vendored LBFGS (MGDA): initial closure_mgda")
+                loss = closure_mgda()  # This sets gradients via MGDA
+                # Note: closure_mgda already syncs gradients and applies clipping
+                # Build grad_sync closure that captures self.model
+                def _grad_sync():
+                    sync_gradients(self.model)
+                options = {
+                    'closure': closure_mgda_no_backward,
+                    'current_loss': loss,
+                    'grad_clip_norm': None,  # Already applied in closure_mgda
+                    'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
+                    'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
+                }
+            else:
+                # Standard mode
+                # Pre-compute loss & gradient at the current iterate.
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: zero_grad")
+                optimizer.zero_grad()
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: closure_no_backward")
+                loss = closure_no_backward()
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: backward (loss={loss.item():.4f})")
+                loss.backward()
+                # Explicit gradient sync - don't rely on DDP's implicit async sync
+                if self.world_size > 1:
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients START")
+                    sync_gradients(self.model)
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients DONE")
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                if self.world_size > 1:
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean START")
+                    loss = reduce_mean(loss.detach())
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean DONE")
+                # Build grad_sync closure that captures self.model
+                def _grad_sync():
+                    sync_gradients(self.model)
+                options = {
+                    'closure': closure_no_backward,
+                    'current_loss': loss,
+                    'grad_clip_norm': self.grad_clip_norm,
+                    'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
+                    'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
+                }
             # Add line search options from config
             if hasattr(self, '_lbfgs_ls_options'):
                 options.update(self._lbfgs_ls_options)
@@ -2362,7 +2584,11 @@ class Training:
             self._log("Optimizer makes step in {:.2f}s".format(elapsed))
             self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
         else:
-            optimizer.step(closure)
+            # Non-vendored optimizer (e.g., torch.optim.LBFGS)
+            if use_mgda:
+                optimizer.step(closure_mgda)
+            else:
+                optimizer.step(closure)
             elapsed = timeit.default_timer() - start_time
             self._log("Optimizer makes step in {:.2f}s".format(elapsed))
             self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
@@ -2372,6 +2598,12 @@ class Training:
 
         # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
         self.log_lbfgs_diagnostics(epoch, optimizer)
+
+        # MGDA diagnostics logging
+        if use_mgda and _mgda_alpha[0] is not None:
+            self._log("(MGDA) alpha={:.4f} (raw={:.4f}), cos_sim={:.4f}".format(
+                _mgda_alpha[0], _mgda_alpha_raw[0], _mgda_cos_sim[0]))
+            self.log_mgda_diagnostics(epoch, _mgda_alpha[0], _mgda_alpha_raw[0], _mgda_cos_sim[0])
 
         # Calling model.eval() will change the behavior of some layers, 
         # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
