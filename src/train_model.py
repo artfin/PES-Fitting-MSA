@@ -82,37 +82,75 @@ def set_gradients(model, flat_grad):
         offset += numel
 
 
-def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0):
+def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
+                       energy_loss=None, gradient_loss=None,
+                       ema_energy_loss=None, ema_gradient_loss=None):
     """
-    Compute optimal convex combination weight for two-objective MGDA.
+    Compute optimal convex combination weight using GradNorm principles.
 
-    Given gradients g_e (energy) and g_g (gradient loss), find alpha in [0,1]
-    that minimizes ||alpha * g_e + (1-alpha) * g_g||^2 while ensuring descent
-    on both objectives when possible.
+    Combines two key ideas:
+    1. Normalize gradients to unit vectors (removes magnitude bias that
+       caused alpha to pin at alpha_min in pure MGDA)
+    2. Adaptive alpha based on loss ratios - tasks falling behind get
+       more weight to balance training rates
+
+    Args:
+        g_energy: flattened gradient vector for energy loss
+        g_gradient: flattened gradient vector for gradient loss
+        alpha_min: minimum weight for energy objective
+        alpha_max: maximum weight for energy objective
+        energy_loss: current energy loss value (for adaptive alpha)
+        gradient_loss: current gradient loss value (for adaptive alpha)
+        ema_energy_loss: EMA of energy loss (for relative comparison)
+        ema_gradient_loss: EMA of gradient loss (for relative comparison)
 
     Returns:
-        alpha: optimal weight for energy gradient (1-alpha for gradient loss)
-        cos_sim: cosine similarity between the two gradients (for diagnostics)
+        alpha: weight for energy gradient (1-alpha for gradient loss)
+        cos_sim: cosine similarity between normalized gradients
+        g_combined: combined gradient vector (using normalized gradients)
     """
-    dot_ee = torch.dot(g_energy, g_energy)
-    dot_gg = torch.dot(g_gradient, g_gradient)
-    dot_eg = torch.dot(g_energy, g_gradient)
+    eps = 1e-12
 
-    # Cosine similarity for diagnostics
-    norm_e = torch.sqrt(dot_ee + 1e-12)
-    norm_g = torch.sqrt(dot_gg + 1e-12)
-    cos_sim = dot_eg / (norm_e * norm_g)
+    # Normalize gradients to unit vectors (GradNorm key idea #1)
+    norm_e = torch.norm(g_energy) + eps
+    norm_g = torch.norm(g_gradient) + eps
+    g_energy_norm = g_energy / norm_e
+    g_gradient_norm = g_gradient / norm_g
 
-    # Closed-form solution for optimal alpha
-    denom = dot_ee + dot_gg - 2 * dot_eg
-    if denom < 1e-10:
-        # Gradients nearly parallel - use equal weighting
-        alpha = torch.tensor(0.5, device=g_energy.device)
+    # Cosine similarity between normalized gradients
+    cos_sim = torch.dot(g_energy_norm, g_gradient_norm)
+
+    # Adaptive alpha based on loss ratios (GradNorm key idea #2)
+    # Task with higher relative loss (falling behind) gets more weight
+    if (energy_loss is not None and gradient_loss is not None and
+        ema_energy_loss is not None and ema_gradient_loss is not None and
+        ema_energy_loss > eps and ema_gradient_loss > eps):
+
+        # Relative loss: current / EMA (>1 means task is falling behind)
+        rel_energy = energy_loss / ema_energy_loss
+        rel_gradient = gradient_loss / ema_gradient_loss
+
+        # Convert to tensors if needed
+        if not isinstance(rel_energy, torch.Tensor):
+            rel_energy = torch.tensor(rel_energy, device=g_energy.device)
+        if not isinstance(rel_gradient, torch.Tensor):
+            rel_gradient = torch.tensor(rel_gradient, device=g_energy.device)
+
+        # alpha = rel_gradient / (rel_energy + rel_gradient)
+        # If gradient loss is falling behind: rel_gradient > rel_energy -> alpha < 0.5
+        # This gives more weight to gradient objective (1 - alpha)
+        alpha = rel_gradient / (rel_energy + rel_gradient + eps)
     else:
-        alpha = (dot_gg - dot_eg) / denom
-        alpha = torch.clamp(alpha, alpha_min, alpha_max)
+        # Fallback: equal weighting when no loss history available
+        alpha = torch.tensor(0.5, device=g_energy.device)
 
-    return alpha, cos_sim
+    # Clamp to bounds
+    alpha = torch.clamp(alpha, alpha_min, alpha_max)
+
+    # Combine NORMALIZED gradients (key difference from original MGDA)
+    g_combined = alpha * g_energy_norm + (1 - alpha) * g_gradient_norm
+
+    return alpha, cos_sim, g_combined
 
 
 class IdentityScaler:
@@ -1065,7 +1103,10 @@ class Training:
         self._dist_diag_initialized = False
 
         # MGDA (Multi-objective Gradient Descent Algorithm) state
+        # Now uses GradNorm: normalized gradients + adaptive alpha from loss ratios
         self._mgda_alpha_ema = None  # EMA-smoothed alpha value
+        self._mgda_energy_loss_ema = None  # EMA of energy loss for adaptive alpha
+        self._mgda_gradient_loss_ema = None  # EMA of gradient loss for adaptive alpha
         self._mgda_diag_path = os.path.join(
             self.model_folder, "{}.mgda_diagnostics.csv".format(model_name)
         )
@@ -2139,29 +2180,33 @@ class Training:
             )
 
     def log_mgda_diagnostics(self, epoch, alpha, alpha_raw, cos_sim):
-        """Log MGDA (Multi-objective Gradient Descent Algorithm) diagnostics.
+        """Log MGDA+GradNorm diagnostics.
 
         Args:
             epoch: current epoch
-            alpha: EMA-smoothed MGDA weight for energy objective
-            alpha_raw: raw (unsmoothed) MGDA weight
-            cos_sim: cosine similarity between energy and gradient gradients
+            alpha: EMA-smoothed weight for energy objective
+            alpha_raw: raw (unsmoothed) weight from loss-ratio computation
+            cos_sim: cosine similarity between normalized gradients
         """
         if not is_main_process():
             return
 
+        # Get loss EMAs for logging
+        e_loss_ema = self._mgda_energy_loss_ema if self._mgda_energy_loss_ema is not None else 0.0
+        g_loss_ema = self._mgda_gradient_loss_ema if self._mgda_gradient_loss_ema is not None else 0.0
+
         if not self._mgda_diag_initialized:
             try:
                 with open(self._mgda_diag_path, "w") as f:
-                    f.write("epoch,alpha,alpha_raw,cos_sim\n")
+                    f.write("epoch,alpha,alpha_raw,cos_sim,e_loss_ema,g_loss_ema\n")
                 self._mgda_diag_initialized = True
             except OSError as e:
                 logging.warning("Could not initialize MGDA diag CSV: {}".format(e))
 
         try:
             with open(self._mgda_diag_path, "a") as f:
-                f.write("{},{:.6f},{:.6f},{:.6f}\n".format(
-                    epoch, alpha, alpha_raw, cos_sim
+                f.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}\n".format(
+                    epoch, alpha, alpha_raw, cos_sim, e_loss_ema, g_loss_ema
                 ))
         except OSError as e:
             logging.warning("Could not append to MGDA diag CSV: {}".format(e))
@@ -2456,13 +2501,26 @@ class Training:
         _mgda_cos_sim = [None]
 
         def closure_mgda():
-            """MGDA closure: compute optimal gradient combination."""
+            """MGDA+GradNorm closure: normalized gradients + adaptive alpha from loss ratios."""
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
             optimizer.zero_grad()
 
             # Compute separate losses
             energy_loss, gradient_loss = _compute_loss(separate=True)
+
+            # Update loss EMAs for adaptive alpha computation
+            energy_loss_val = energy_loss.detach().item()
+            gradient_loss_val = gradient_loss.detach().item()
+
+            if self._mgda_energy_loss_ema is None:
+                self._mgda_energy_loss_ema = energy_loss_val
+                self._mgda_gradient_loss_ema = gradient_loss_val
+            else:
+                self._mgda_energy_loss_ema = (mgda_ema_decay * self._mgda_energy_loss_ema +
+                                              (1 - mgda_ema_decay) * energy_loss_val)
+                self._mgda_gradient_loss_ema = (mgda_ema_decay * self._mgda_gradient_loss_ema +
+                                                (1 - mgda_ema_decay) * gradient_loss_val)
 
             # Backward pass for energy gradient
             energy_loss.backward(retain_graph=True)
@@ -2473,18 +2531,24 @@ class Training:
             gradient_loss.backward()
             g_gradient = flatten_gradients(self.model)
 
-            # Sync gradients across ranks before computing MGDA weights
+            # Sync gradients across ranks before computing weights
             if self.world_size > 1:
-                # All-reduce gradient vectors so all ranks have same MGDA alpha
                 dist.all_reduce(g_energy, op=dist.ReduceOp.SUM)
                 g_energy = g_energy / self.world_size
                 dist.all_reduce(g_gradient, op=dist.ReduceOp.SUM)
                 g_gradient = g_gradient / self.world_size
 
-            # Compute MGDA optimal weights
-            alpha_raw, cos_sim = compute_mgda_alpha(g_energy, g_gradient, mgda_alpha_min, mgda_alpha_max)
+            # Compute GradNorm weights: normalized gradients + adaptive alpha from loss ratios
+            alpha_raw, cos_sim, combined_grad = compute_mgda_alpha(
+                g_energy, g_gradient,
+                mgda_alpha_min, mgda_alpha_max,
+                energy_loss=energy_loss_val,
+                gradient_loss=gradient_loss_val,
+                ema_energy_loss=self._mgda_energy_loss_ema,
+                ema_gradient_loss=self._mgda_gradient_loss_ema
+            )
 
-            # EMA smoothing to prevent oscillation
+            # EMA smoothing of alpha to prevent oscillation
             if self._mgda_alpha_ema is None:
                 alpha = alpha_raw
                 self._mgda_alpha_ema = alpha.item()
@@ -2498,8 +2562,7 @@ class Training:
             _mgda_alpha[0] = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
             _mgda_cos_sim[0] = cos_sim.item()
 
-            # Combine gradients with MGDA weights
-            combined_grad = alpha * g_energy + (1 - alpha) * g_gradient
+            # Set the combined normalized gradient
             set_gradients(self.model, combined_grad)
 
             # Gradient clipping on combined gradient
@@ -2507,7 +2570,6 @@ class Training:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
             # Return combined loss for L-BFGS line search
-            # Use same alpha for consistency
             combined_loss = alpha * energy_loss.detach() + (1 - alpha) * gradient_loss.detach()
             if self.world_size > 1:
                 combined_loss = reduce_mean(combined_loss)
