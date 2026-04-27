@@ -627,7 +627,10 @@ class TrainingLoopMixin:
             energy_loss, gradient_loss = _compute_loss(separate=True)
             # Use current EMA alpha for consistent loss evaluation
             alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
-            combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
+            combined_loss = alpha * energy_loss.detach() + (1 - alpha) * gradient_loss.detach()
+            # Sync loss across ranks for consistent line search
+            if self.world_size > 1:
+                combined_loss = reduce_mean(combined_loss)
             return combined_loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
