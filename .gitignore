@@ -41,6 +41,7 @@ H2-H2O/points.dat
 CH4-N2/dataset.pt
 H2-H2O/dataset.pt
 
+src/__pycache__/*
 src/trainer/__pycache__/*
 vendor/pytorch_lbfgs/__pycache__/*
 
