@@ -620,17 +620,14 @@ class TrainingLoopMixin:
             return combined_loss
 
         def closure_mgda_no_backward():
-            """MGDA closure for line search (no backward needed)."""
+            """MGDA closure for line search (backward may be called by vendored LBFGS)."""
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
             optimizer.zero_grad()
             energy_loss, gradient_loss = _compute_loss(separate=True)
             # Use current EMA alpha for consistent loss evaluation
             alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
-            combined_loss = alpha * energy_loss.detach() + (1 - alpha) * gradient_loss.detach()
-            # Sync loss across ranks for consistent line search
-            if self.world_size > 1:
-                combined_loss = reduce_mean(combined_loss)
+            combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
             return combined_loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
