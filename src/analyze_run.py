@@ -175,8 +175,8 @@ def plot_training_metrics(axes, df):
 
 
 def plot_trust_region(axes, df, df_log):
-    """Row 2: trust frac, churn, eviction signal."""
-    ax_frac, ax_churn, ax_evict = axes
+    """Row 2: trust frac, churn, MGDA (placeholder for 3rd panel)."""
+    ax_frac, ax_churn, ax_mgda = axes
 
     # Fraction
     ax_frac.plot(df["epoch"], df["frac"], lw=1, color="tab:blue")
@@ -186,7 +186,7 @@ def plot_trust_region(axes, df, df_log):
     _gradient_start_line(ax_frac, df_log)
 
     # Phi mean on twin axis (if available)
-    if df["phi_mean"].notna().any():
+    if "phi_mean" in df.columns and df["phi_mean"].notna().any():
         ax_phi = ax_frac.twinx()
         ax_phi.plot(df["epoch"], df["phi_mean"], lw=0.8, color="tab:orange", alpha=0.7)
         ax_phi.set_ylabel("φ mean", color="tab:orange")
@@ -200,68 +200,56 @@ def plot_trust_region(axes, df, df_log):
     ax_churn.legend(fontsize=7)
     _gradient_start_line(ax_churn, df_log)
 
-    # Eviction signal
-    valid = df.dropna(subset=["mean_err_left", "mean_err_stayed"])
-    if not valid.empty:
-        ax_evict.plot(valid["epoch"], valid["mean_err_left"], label="left (mean)", lw=1, color="tab:red")
-        ax_evict.plot(valid["epoch"], valid["mean_err_stayed"], label="stayed (mean)", lw=1, color="tab:green")
-        ax_evict.plot(valid["epoch"], valid["med_err_left"], label="left (med)", lw=0.7, ls="--", color="tab:red", alpha=0.6)
-        ax_evict.plot(valid["epoch"], valid["med_err_stayed"], label="stayed (med)", lw=0.7, ls="--", color="tab:green", alpha=0.6)
-        ax_evict.legend(fontsize=6)
-    ax_evict.set_ylabel("Gradient RMSE (cm⁻¹/bohr)")
-    ax_evict.set_title("Eviction signal")
-    ax_evict.set_yscale("symlog", linthresh=1.0)
-    _gradient_start_line(ax_evict, df_log)
+    # MGDA panel is filled by plot_mgda_diagnostics if data exists
+    ax_mgda.set_title("MGDA alpha + cos_sim")
+    ax_mgda.set_ylabel("alpha")
+    _gradient_start_line(ax_mgda, df_log)
 
 
-def plot_gradient_diagnostics(axes, df, df_log):
-    """Row 3: contribution quantiles, top-k share, phi histogram."""
-    ax_cq, ax_topk, ax_phi = axes
+def plot_mgda_diagnostics(ax, df, df_log):
+    """Plot MGDA alpha and cosine similarity on the given axis."""
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "No MGDA data", ha='center', va='center', transform=ax.transAxes,
+                fontsize=10, color='gray')
+        return
 
-    # Contribution quantiles (log scale)
-    for col, label, alpha in [
-        ("contrib_q50", "q50", 1.0),
-        ("contrib_q90", "q90", 0.8),
-        ("contrib_q95", "q95", 0.7),
-        ("contrib_q99", "q99", 0.6),
-        ("contrib_max", "max", 0.4),
-    ]:
-        ax_cq.plot(df["epoch"], df[col], label=label, lw=1, alpha=alpha)
-    ax_cq.set_yscale("log")
-    ax_cq.set_ylabel("Contribution")
-    ax_cq.set_title("Per-config gradient-loss contribution")
-    ax_cq.legend(fontsize=6, ncol=2)
-    _gradient_start_line(ax_cq, df_log)
+    # Alpha (EMA-smoothed)
+    ax.plot(df["epoch"], df["alpha"], lw=1, color="tab:blue", label="alpha (EMA)")
+    if "alpha_raw" in df.columns:
+        ax.plot(df["epoch"], df["alpha_raw"], lw=0.5, color="tab:blue", alpha=0.3, label="alpha (raw)")
+    ax.set_ylabel("alpha", color="tab:blue")
+    ax.tick_params(axis="y", labelcolor="tab:blue")
+    ax.set_ylim(-0.05, 1.05)
+    ax.legend(loc="upper left", fontsize=6)
 
+    # Cosine similarity on twin axis
+    if "cos_sim" in df.columns:
+        ax2 = ax.twinx()
+        ax2.plot(df["epoch"], df["cos_sim"], lw=1, color="tab:orange", alpha=0.8)
+        ax2.set_ylabel("cos_sim", color="tab:orange")
+        ax2.tick_params(axis="y", labelcolor="tab:orange")
+        ax2.set_ylim(-1.1, 1.1)
+        ax2.axhline(0, color="tab:orange", ls=":", lw=0.5, alpha=0.5)
+
+    _gradient_start_line(ax, df_log)
+
+
+def plot_gradient_diagnostics(ax, df, df_log):
+    """Plot top-k tail share on the given axis."""
     # Top-k tail shares
-    ax_topk.plot(df["epoch"], df["top1pct_share"] * 100, label="top 1%", lw=1.2)
-    ax_topk.plot(df["epoch"], df["top5pct_share"] * 100, label="top 5%", lw=1)
-    ax_topk.plot(df["epoch"], df["top10pct_share"] * 100, label="top 10%", lw=0.8)
-    ax_topk.set_ylabel("% of total gradient loss")
-    ax_topk.set_ylim(0, 105)
-    ax_topk.set_title("Tail concentration")
-    ax_topk.legend(fontsize=7)
-    _gradient_start_line(ax_topk, df_log)
-
-    # Phi distribution (stacked area)
-    phi_cols = ["phi_lt_25", "phi_25_50", "phi_50_75", "phi_75_90", "phi_ge_90"]
-    if all(c in df.columns for c in phi_cols):
-        totals = df[phi_cols].sum(axis=1).replace(0, 1)
-        fracs = df[phi_cols].div(totals, axis=0) * 100
-        labels = ["φ<0.25", "0.25-0.50", "0.50-0.75", "0.75-0.90", "φ≥0.90"]
-        colors = ["#d62728", "#ff7f0e", "#bcbd22", "#2ca02c", "#1f77b4"]
-        ax_phi.stackplot(df["epoch"], *[fracs[c] for c in phi_cols],
-                         labels=labels, colors=colors, alpha=0.8)
-        ax_phi.set_ylabel("% of active set")
-        ax_phi.set_ylim(0, 100)
-        ax_phi.set_title("φ distribution")
-        ax_phi.legend(fontsize=6, loc="center left")
-    _gradient_start_line(ax_phi, df_log)
+    ax.plot(df["epoch"], df["top1pct_share"] * 100, label="top 1%", lw=1.2)
+    ax.plot(df["epoch"], df["top5pct_share"] * 100, label="top 5%", lw=1)
+    ax.plot(df["epoch"], df["top10pct_share"] * 100, label="top 10%", lw=0.8)
+    ax.set_ylabel("% of total gradient loss")
+    ax.set_ylim(0, 105)
+    ax.set_title("Tail concentration")
+    ax.legend(fontsize=7)
+    _gradient_start_line(ax, df_log)
 
 
 def plot_lbfgs_diagnostics(axes, df, df_log):
-    """Row 4: step length, curvature, grad norm + iters."""
-    ax_t, ax_sy, ax_grad = axes
+    """Row 3 panels 2-3: step length + H_diag, curvature pairs."""
+    ax_t, ax_sy = axes
 
     # Step length + H_diag (both log scale)
     ax_t.plot(df["epoch"], df["t"].replace(0, np.nan), lw=1, color="tab:blue", label="step t")
@@ -293,29 +281,6 @@ def plot_lbfgs_diagnostics(axes, df, df_log):
     ax_sy.legend(fontsize=6)
     _gradient_start_line(ax_sy, df_log)
 
-    # Grad norm + iters
-    ax_grad.plot(df["epoch"], df["grad_norm"], lw=1, color="tab:red", label="grad norm")
-    ax_grad.set_ylabel("Gradient norm", color="tab:red")
-    ax_grad.set_yscale("log")
-    ax_grad.tick_params(axis="y", labelcolor="tab:red")
-    ax_grad.set_title("Grad norm + iters/step")
-    _gradient_start_line(ax_grad, df_log)
-
-    # Reference line for grad clip if constant
-    gn = df["grad_norm"].dropna()
-    if not gn.empty:
-        clip_val = gn.mode().iloc[0] if not gn.mode().empty else None
-        if clip_val is not None and (gn == clip_val).mean() > 0.5:
-            ax_grad.axhline(clip_val, color="tab:red", ls=":", lw=0.7, alpha=0.5)
-            ax_grad.annotate(f"clip={clip_val:.0f}",
-                             xy=(df["epoch"].iloc[0], clip_val), fontsize=6,
-                             color="tab:red", alpha=0.7)
-
-    ax_it = ax_grad.twinx()
-    ax_it.plot(df["epoch"], df["iters_this_step"], lw=0.8, color="tab:purple", alpha=0.7)
-    ax_it.set_ylabel("Iters / step", color="tab:purple")
-    ax_it.tick_params(axis="y", labelcolor="tab:purple")
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -335,6 +300,7 @@ def main():
     trust_path = base + ".trust_history.csv"
     gradient_path = base + ".gradient_diagnostics.csv"
     lbfgs_path = base + ".lbfgs_diagnostics.csv"
+    mgda_path = base + ".mgda_diagnostics.csv"
 
     if not os.path.exists(log_path):
         print(f"Log file not found: {log_path}", file=sys.stderr)
@@ -346,10 +312,12 @@ def main():
     has_trust = os.path.exists(trust_path)
     has_gradient = os.path.exists(gradient_path)
     has_lbfgs = os.path.exists(lbfgs_path)
+    has_mgda = os.path.exists(mgda_path)
 
     df_trust = pd.read_csv(trust_path) if has_trust else None
     df_gradient = pd.read_csv(gradient_path) if has_gradient else None
     df_lbfgs = pd.read_csv(lbfgs_path) if has_lbfgs else None
+    df_mgda = pd.read_csv(mgda_path) if has_mgda else None
 
     if df_trust is not None:
         print(f"Trust history: {len(df_trust)} rows, epochs {df_trust['epoch'].iloc[0]}-{df_trust['epoch'].iloc[-1]}")
@@ -357,14 +325,17 @@ def main():
         print(f"Gradient diagnostics: {len(df_gradient)} rows")
     if df_lbfgs is not None:
         print(f"LBFGS diagnostics: {len(df_lbfgs)} rows")
+    if df_mgda is not None:
+        print(f"MGDA diagnostics: {len(df_mgda)} rows")
 
-    # Determine layout
+    # Layout: 3 rows x 3 columns
+    # Row 1: Energy RMSE, Gradient RMSE, LR + WMSE val
+    # Row 2: Trust fraction, Trust churn, MGDA alpha + cos_sim
+    # Row 3: Top-k tail share, L-BFGS step + H_diag, Curvature pairs
     n_rows = 1  # always have training metrics
-    if has_trust:
+    if has_trust or has_mgda:
         n_rows += 1
-    if has_gradient:
-        n_rows += 1
-    if has_lbfgs:
+    if has_gradient or has_lbfgs:
         n_rows += 1
 
     fig, all_axes = plt.subplots(n_rows, 3, figsize=(16, 3.8 * n_rows))
@@ -372,19 +343,46 @@ def main():
         all_axes = all_axes[np.newaxis, :]
 
     row = 0
+
+    # Row 1: Training metrics
     plot_training_metrics(all_axes[row], df_log)
     row += 1
 
-    if has_trust:
-        plot_trust_region(all_axes[row], df_trust, df_log)
+    # Row 2: Trust region + MGDA
+    if has_trust or has_mgda:
+        if has_trust:
+            plot_trust_region(all_axes[row], df_trust, df_log)
+        else:
+            # No trust data - leave first two panels empty
+            all_axes[row, 0].set_title("Trust set fraction")
+            all_axes[row, 0].text(0.5, 0.5, "No trust data", ha='center', va='center',
+                                   transform=all_axes[row, 0].transAxes, fontsize=10, color='gray')
+            all_axes[row, 1].set_title("Trust set churn")
+            all_axes[row, 1].text(0.5, 0.5, "No trust data", ha='center', va='center',
+                                   transform=all_axes[row, 1].transAxes, fontsize=10, color='gray')
+
+        # MGDA panel (3rd in row 2)
+        plot_mgda_diagnostics(all_axes[row, 2], df_mgda, df_log)
         row += 1
 
-    if has_gradient:
-        plot_gradient_diagnostics(all_axes[row], df_gradient, df_log)
-        row += 1
+    # Row 3: Gradient diagnostics + L-BFGS
+    if has_gradient or has_lbfgs:
+        if has_gradient:
+            plot_gradient_diagnostics(all_axes[row, 0], df_gradient, df_log)
+        else:
+            all_axes[row, 0].set_title("Tail concentration")
+            all_axes[row, 0].text(0.5, 0.5, "No gradient diagnostics", ha='center', va='center',
+                                   transform=all_axes[row, 0].transAxes, fontsize=10, color='gray')
 
-    if has_lbfgs:
-        plot_lbfgs_diagnostics(all_axes[row], df_lbfgs, df_log)
+        if has_lbfgs:
+            plot_lbfgs_diagnostics(all_axes[row, 1:], df_lbfgs, df_log)
+        else:
+            all_axes[row, 1].set_title("L-BFGS step length + H_diag")
+            all_axes[row, 1].text(0.5, 0.5, "No L-BFGS data", ha='center', va='center',
+                                   transform=all_axes[row, 1].transAxes, fontsize=10, color='gray')
+            all_axes[row, 2].set_title("Curvature pairs")
+            all_axes[row, 2].text(0.5, 0.5, "No L-BFGS data", ha='center', va='center',
+                                   transform=all_axes[row, 2].transAxes, fontsize=10, color='gray')
         row += 1
 
     for ax_row in all_axes:
