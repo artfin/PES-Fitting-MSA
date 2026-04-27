@@ -534,9 +534,9 @@ class TrainingLoopMixin:
 
         # MGDA (Multi-objective Gradient Descent Algorithm) closure
         # Computes optimal combination of energy and gradient loss gradients
-        use_mgda = self.cfg_loss.get('USE_MGDA', False)
-        assert not use_mgda or self.cfg_loss['USE_GRADIENTS'], \
-            "USE_MGDA requires USE_GRADIENTS to be enabled"
+        # MGDA is only active when gradients are currently being used
+        use_mgda = (self.cfg_loss.get('USE_MGDA', False)
+                    and self.cfg_loss['USE_GRADIENTS'])
         mgda_alpha_min = self.cfg_loss.get('MGDA_ALPHA_MIN', 0.1)
         mgda_alpha_max = self.cfg_loss.get('MGDA_ALPHA_MAX', 0.9)
         mgda_ema_decay = self.cfg_loss.get('MGDA_EMA_DECAY', 0.9)

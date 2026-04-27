@@ -167,6 +167,13 @@ class TrainingOptimizationMixin:
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
         self.cfg_loss.setdefault('USE_HUBER_GRADIENT', False)
 
+        # Validate MGDA configuration
+        if self.cfg_loss.get('USE_MGDA', False):
+            gradients_enabled = (self.cfg_loss['USE_GRADIENTS'] or
+                                 self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None)
+            assert gradients_enabled, \
+                "USE_MGDA requires USE_GRADIENTS or USE_GRADIENTS_AFTER_EPOCH to be enabled"
+
         if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
             dwt = self.cfg_loss.get('dwt', 1.0)
             loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
