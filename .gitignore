@@ -41,6 +41,7 @@ H2-H2O/points.dat
 CH4-N2/dataset.pt
 H2-H2O/dataset.pt
 
+src/trainer/__pycache__/*
 vendor/pytorch_lbfgs/__pycache__/*
 
 # Cluster-specific configuration files (contain IPs, local paths)

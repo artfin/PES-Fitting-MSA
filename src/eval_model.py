@@ -25,7 +25,7 @@ from build_model import build_network, QModel
 from config import TORCH_FLOAT
 from dataset import PolyDataset
 from genpip import cmdstat, cl
-from train_model import load_dataset, load_cfg
+from data_io import load_dataset, load_cfg
 from make_dataset import prepare_qmodel_structure
 
 import pathlib

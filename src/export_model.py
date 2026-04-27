@@ -11,7 +11,7 @@ import yaml
 from build_model import build_network, QModel
 from dataset import PolyDataset
 from genpip import cl
-from train_model import load_dataset, load_cfg
+from data_io import load_dataset, load_cfg
 from eval_model import str2bool
 
 import pathlib
