@@ -9,7 +9,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from distributed import is_main_process, reduce_mean, sync_gradients
+from distributed import is_main_process, reduce_mean, reduce_mae, reduce_rmse, reduce_min, reduce_sum, sync_gradients
 from data_io import save_checkpoint
 from losses import WMSELoss_TrustRegion_wgradients
 
