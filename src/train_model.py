@@ -496,11 +496,12 @@ class WRMSELoss_Ratio_dipole(torch.nn.Module):
 
 
 class WMSELoss_Ratio_wgradients(torch.nn.Module):
-    def __init__(self, natoms, dwt=1.0, g_lambda=1.0):
+    def __init__(self, natoms, dwt=1.0, g_lambda=1.0, huber_delta=None):
         super().__init__()
         self.natoms = natoms
         self.dwt    = torch.tensor(dwt).to(DEVICE)
         self.g_lambda = torch.tensor(g_lambda).to(DEVICE)
+        self.huber_delta = huber_delta
 
         self.en_mean = None
         self.en_std  = None
@@ -510,7 +511,8 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
         self.en_std  = torch.from_numpy(en_std).to(DEVICE)
 
     def __repr__(self):
-        return "WMSELoss_Ratio_wgradients(natoms={}, dwt={}, g_lambda={})".format(self.natoms, self.dwt, self.g_lambda)
+        return "WMSELoss_Ratio_wgradients(natoms={}, dwt={}, g_lambda={}, huber_delta={})".format(
+            self.natoms, self.dwt, self.g_lambda, self.huber_delta)
 
     def forward(self, en, en_pred, gradients, gradients_pred):
         wmse_en, wmse_gradients = self.forward_separate(en, en_pred, gradients, gradients_pred)
@@ -543,10 +545,17 @@ class WMSELoss_Ratio_wgradients(torch.nn.Module):
         gradients    = gradients.reshape(nconfigs, self.natoms, 3)
 
         df = gradients - gradients_pred
-        wdf = torch.einsum('ijk,i->ijk', df, w)
-        # Return raw gradient loss (g_lambda applied in forward() for non-MGDA,
-        # or MGDA computes its own optimal weighting)
-        wmse_gradients = torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
+
+        if self.huber_delta is not None:
+            d = self.huber_delta
+            per_config_loss = torch.sum(
+                d * d * (torch.sqrt(1.0 + (df / d) ** 2) - 1.0),
+                dim=(1, 2),
+            )
+            wmse_gradients = (w * per_config_loss).sum() / (3.0 * self.natoms) / nconfigs
+        else:
+            wdf = torch.einsum('ijk,i->ijk', df, w)
+            wmse_gradients = torch.einsum('ijk,ijk->', wdf, df) / (3.0 * self.natoms) / nconfigs
 
         return wmse_en, wmse_gradients
 
@@ -1373,7 +1382,21 @@ class Training:
                     logging.info("Gradient trust threshold = {:.2f} cm-1/bohr (soft_scale={})".format(
                         grad_trust_threshold, grad_trust_soft_scale))
             else:
-                loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda)
+                use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
+                huber_delta = None
+                if use_huber:
+                    huber_delta = self.cfg_loss.get('HUBER_DELTA', None)
+                    if huber_delta is not None:
+                        logging.info("Huber delta (explicit) = {:.6e}".format(huber_delta))
+                    else:
+                        mad = getattr(self.train, 'mad_grad_components', None)
+                        assert mad is not None and mad > 0, (
+                            "USE_HUBER_GRADIENT requires train.mad_grad_components; "
+                            "available only for gradient-loaded datasets.")
+                        huber_delta = 2.0 * float(mad)
+                        logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
+                loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
+                                                   huber_delta=huber_delta)
 
         else:
             print(self.cfg_loss)
