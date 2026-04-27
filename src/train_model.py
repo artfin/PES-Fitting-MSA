@@ -155,7 +155,11 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
     # L-BFGS Hessian to become degenerate. Scale to average of original norms.
     combined_norm = torch.norm(g_combined) + eps
     target_norm = 0.5 * (norm_e + norm_g)  # Average of original gradient norms
-    g_combined = g_combined * (target_norm / combined_norm)
+
+    # Cap the rescaling factor to prevent Inf/NaN when gradients nearly cancel
+    # Max rescale of 10x prevents numerical instability
+    rescale_factor = torch.clamp(target_norm / combined_norm, max=10.0)
+    g_combined = g_combined * rescale_factor
 
     return alpha, cos_sim, g_combined
 
