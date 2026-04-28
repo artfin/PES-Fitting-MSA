@@ -52,13 +52,12 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
     """
     eps = 1e-12
 
-    # Normalize gradients to unit vectors (GradNorm key idea #1)
     norm_e = torch.norm(g_energy) + eps
     norm_g = torch.norm(g_gradient) + eps
     g_energy_norm = g_energy / norm_e
     g_gradient_norm = g_gradient / norm_g
 
-    # Cosine similarity between normalized gradients
+    # cosine similarity between normalized gradients
     cos_sim = torch.dot(g_energy_norm, g_gradient_norm)
 
     # Adaptive alpha based on loss ratios (GradNorm key idea #2)
@@ -66,11 +65,9 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
         ema_energy_loss is not None and ema_gradient_loss is not None and
         ema_energy_loss > eps and ema_gradient_loss > eps):
 
-        # Relative loss: current / EMA (>1 means task is falling behind)
         rel_energy = energy_loss / ema_energy_loss
         rel_gradient = gradient_loss / ema_gradient_loss
 
-        # Convert to tensors if needed
         if not isinstance(rel_energy, torch.Tensor):
             rel_energy = torch.tensor(rel_energy, device=g_energy.device)
         if not isinstance(rel_gradient, torch.Tensor):
@@ -78,20 +75,16 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
 
         alpha = rel_gradient / (rel_energy + rel_gradient + eps)
     else:
-        # Fallback: equal weighting when no loss history available
         alpha = torch.tensor(0.5, device=g_energy.device)
 
-    # Clamp to bounds
     alpha = torch.clamp(alpha, alpha_min, alpha_max)
 
-    # Combine NORMALIZED gradients (key difference from original MGDA)
     g_combined = alpha * g_energy_norm + (1 - alpha) * g_gradient_norm
 
-    # CRITICAL: Rescale combined gradient to prevent near-cancellation
+    # rescale combined gradient to prevent near-cancellation
     combined_norm = torch.norm(g_combined) + eps
-    target_norm = 0.5 * (norm_e + norm_g)  # Average of original gradient norms
+    target_norm = 0.5 * (norm_e + norm_g)
 
-    # Cap the rescaling factor to prevent Inf/NaN when gradients nearly cancel
     rescale_factor = torch.clamp(target_norm / combined_norm, max=10.0)
     g_combined = g_combined * rescale_factor
 
@@ -100,7 +93,6 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
 class TrainingLoopMixin:
     def train_model(self):
         try:
-
             # Set device based on mode
             if self.world_size > 1:
                 self.device = torch.device(f"cuda:{self.local_rank}")
@@ -349,6 +341,8 @@ class TrainingLoopMixin:
             if is_main_process() and getattr(self, 'writer', None) is not None:
                 self.writer.close()
             raise
+
+
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
         debug_closure = self.cfg_debug.get('CLOSURE', False)
@@ -640,14 +634,14 @@ class TrainingLoopMixin:
             """MGDA closure for line search (backward may be called by vendored LBFGS)."""
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
-            if debug_closure and CLOSURE_CALL_COUNT <= 5:
+            if debug_closure: 
                 logging.info(f"[rank {self.rank}] closure_mgda_no_backward: call #{CLOSURE_CALL_COUNT}")
             optimizer.zero_grad()
             energy_loss, gradient_loss = _compute_loss(separate=True)
             # Use current EMA alpha for consistent loss evaluation
             alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
             combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
-            if debug_closure and CLOSURE_CALL_COUNT <= 5:
+            if debug_closure:
                 logging.info(f"[rank {self.rank}] closure_mgda_no_backward: done, loss={combined_loss.item():.4f}")
             return combined_loss
 
@@ -672,7 +666,11 @@ class TrainingLoopMixin:
                 # Note: closure_mgda already syncs gradients and applies clipping
                 # Build grad_sync closure that captures self.model
                 def _grad_sync():
+                    if debug_closure:
+                        logging.info(f"[rank {self.rank}] _grad_sync: START")
                     sync_gradients(self.model)
+                    if debug_closure:
+                        logging.info(f"[rank {self.rank}] _grad_sync: DONE")
                 options = {
                     'closure': closure_mgda_no_backward,
                     'current_loss': loss,
