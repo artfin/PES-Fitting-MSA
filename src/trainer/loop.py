@@ -351,6 +351,7 @@ class TrainingLoopMixin:
             raise
     def train_epoch(self, epoch, optimizer):
         CLOSURE_CALL_COUNT = 0
+        debug_closure = self.cfg_debug.get('CLOSURE', False)
 
         # Precompute trust-region mask once per epoch so that the objective
         # stays fixed during the LBFGS step. Recomputing it inside the closure
@@ -551,11 +552,15 @@ class TrainingLoopMixin:
             optimizer.zero_grad()
 
             # Compute separate losses
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: computing separate losses")
             energy_loss, gradient_loss = _compute_loss(separate=True)
 
             # Update loss EMAs for adaptive alpha computation
             energy_loss_val = energy_loss.detach().item()
             gradient_loss_val = gradient_loss.detach().item()
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: e_loss={energy_loss_val:.4f}, g_loss={gradient_loss_val:.4f}")
 
             if self._mgda_energy_loss_ema is None:
                 self._mgda_energy_loss_ema = energy_loss_val
@@ -567,20 +572,32 @@ class TrainingLoopMixin:
                                                 (1 - mgda_ema_decay) * gradient_loss_val)
 
             # Backward pass for energy gradient
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: energy backward START")
             energy_loss.backward(retain_graph=True)
             g_energy = flatten_gradients(self.model)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: energy backward DONE, g_energy norm={g_energy.norm().item():.4f}")
 
             # Backward pass for gradient loss gradient
             optimizer.zero_grad()
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: gradient backward START")
             gradient_loss.backward()
             g_gradient = flatten_gradients(self.model)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: gradient backward DONE, g_gradient norm={g_gradient.norm().item():.4f}")
 
             # Sync gradients across ranks before computing weights
             if self.world_size > 1:
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] closure_mgda: all_reduce START")
                 dist.all_reduce(g_energy, op=dist.ReduceOp.SUM)
                 g_energy = g_energy / self.world_size
                 dist.all_reduce(g_gradient, op=dist.ReduceOp.SUM)
                 g_gradient = g_gradient / self.world_size
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] closure_mgda: all_reduce DONE")
 
             # Compute GradNorm weights: normalized gradients + adaptive alpha from loss ratios
             alpha_raw, cos_sim, combined_grad = compute_mgda_alpha(
@@ -643,8 +660,11 @@ class TrainingLoopMixin:
             # Vendored FullBatchLBFGS for distributed training.
             if use_mgda:
                 # MGDA mode: use MGDA closures that compute optimal gradient combination
-                logging.debug(f"[rank {self.rank}] vendored LBFGS (MGDA): initial closure_mgda")
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] vendored LBFGS (MGDA): about to call initial closure_mgda")
                 loss = closure_mgda()  # This sets gradients via MGDA
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] vendored LBFGS (MGDA): initial closure_mgda done, loss={loss.item():.4f}")
                 # Note: closure_mgda already syncs gradients and applies clipping
                 # Build grad_sync closure that captures self.model
                 def _grad_sync():
