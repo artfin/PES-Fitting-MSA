@@ -5,6 +5,8 @@ from functools import reduce
 from copy import deepcopy
 from torch.optim import Optimizer
 
+from distributed import reduce_max
+
 
 class SyncedLoss:
     """Wrapper for loss tensor that holds both original (for backward) and synced value (for comparisons).
@@ -1312,13 +1314,19 @@ class FullBatchLBFGS(LBFGS):
                 break
 
             flat_grad = self._gather_flat_grad()
-            opt_cond = flat_grad.abs().max() <= tolerance_grad
+            # Sync gradient norm across ranks to ensure consistent termination
+            grad_max = flat_grad.abs().max().clone()
+            grad_max = reduce_max(grad_max)
+            opt_cond = grad_max <= tolerance_grad
             if opt_cond:
                 break
 
             d = state.get('d')
             if d is not None and t is not None:
-                if d.mul(t).abs().max() <= tolerance_change:
+                # Sync parameter change norm across ranks to ensure consistent termination
+                change_max = d.mul(t).abs().max().clone()
+                change_max = reduce_max(change_max)
+                if change_max <= tolerance_change:
                     break
 
             loss_val = float(obj)

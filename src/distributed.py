@@ -167,6 +167,15 @@ def reduce_min(tensor):
     return rt
 
 
+def reduce_max(tensor):
+    """Max tensor across all processes (no-op if single GPU)."""
+    if not is_distributed():
+        return tensor
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.MAX)
+    return rt
+
+
 def broadcast(tensor, src=0):
     """Broadcast tensor from src rank to all others (no-op if single GPU)."""
     if not is_distributed():
