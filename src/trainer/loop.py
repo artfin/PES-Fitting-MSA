@@ -640,11 +640,15 @@ class TrainingLoopMixin:
             """MGDA closure for line search (backward may be called by vendored LBFGS)."""
             nonlocal CLOSURE_CALL_COUNT
             CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            if debug_closure and CLOSURE_CALL_COUNT <= 5:
+                logging.info(f"[rank {self.rank}] closure_mgda_no_backward: call #{CLOSURE_CALL_COUNT}")
             optimizer.zero_grad()
             energy_loss, gradient_loss = _compute_loss(separate=True)
             # Use current EMA alpha for consistent loss evaluation
             alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
             combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
+            if debug_closure and CLOSURE_CALL_COUNT <= 5:
+                logging.info(f"[rank {self.rank}] closure_mgda_no_backward: done, loss={combined_loss.item():.4f}")
             return combined_loss
 
         # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
@@ -709,7 +713,11 @@ class TrainingLoopMixin:
             # Add line search options from config
             if hasattr(self, '_lbfgs_ls_options'):
                 options.update(self._lbfgs_ls_options)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] vendored LBFGS: calling optimizer.step()")
             obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] vendored LBFGS: optimizer.step() done, evals={closure_eval}")
             self._last_vendored_closure_eval = closure_eval + 1  # +1 for the initial evaluation above
             CLOSURE_CALL_COUNT = self._last_vendored_closure_eval
             elapsed = timeit.default_timer() - start_time
