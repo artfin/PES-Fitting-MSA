@@ -6,12 +6,13 @@ from build_model import build_network
 from losses import WMSELoss_Ratio, WRMSELoss_Ratio, WMSELoss_Boltzmann, WRMSELoss_Boltzmann, WMSELoss_PS, WRMSELoss_PS
 from distributed import reduce_mean, is_main_process
 from .base import BaseTrainer, DEVICE, PRINT_PRECISION, USE_WANDB
+from .multibatch import MultibatchMixin
 
 if USE_WANDB:
     import wandb
 
 
-class EnergyTrainer(BaseTrainer):
+class EnergyTrainer(MultibatchMixin, BaseTrainer):
     """Energy-only trainer. Simplest case - no gradients, no dipoles."""
 
     def build_model(self):
