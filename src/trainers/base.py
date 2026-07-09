@@ -13,8 +13,15 @@ from torch.utils.tensorboard import SummaryWriter
 from config import TORCH_FLOAT
 from build_model import build_network, QModel
 from data_io import fit_scalers_to_train_dataset, apply_scalers_on_dataset, load_from_checkpoint, save_checkpoint
-from losses import EarlyStopping, WMSELoss_TrustRegion_wgradients
+from losses import (
+    EarlyStopping,
+    WMSELoss_Ratio, WRMSELoss_Ratio, WRMSELoss_Ratio_dipole,
+    WMSELoss_Boltzmann, WRMSELoss_Boltzmann,
+    WMSELoss_PS, WRMSELoss_PS,
+    WMSELoss_Ratio_wgradients, WMSELoss_TrustRegion_wgradients,
+)
 from regularization import L1Regularization, L2Regularization
+from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverlapSampler
 from distributed import (
     is_main_process, shard_dataset, cleanup,
     reduce_mean, reduce_mae, reduce_rmse, reduce_min, reduce_sum, sync_gradients, all_gather_scalar, barrier
@@ -305,9 +312,15 @@ class BaseTrainer:
                 val_indices   = torch.arange(len(self.val.y), device=self.device)
                 test_indices  = torch.arange(len(self.test.y), device=self.device)
 
-                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
-                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
-                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices)
+                # Full-dataset final eval: every config is "in trust" with uniform
+                # soft weight 1.0 (forward_separate requires per-config gradient_weights).
+                train_w = torch.ones(len(train_indices), device=self.device)
+                val_w   = torch.ones(len(val_indices), device=self.device)
+                test_w  = torch.ones(len(test_indices), device=self.device)
+
+                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices, train_w)
+                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices, val_w)
+                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices, test_w)
             else:
                 loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
                 loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)

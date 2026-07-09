@@ -38,6 +38,11 @@ class EnergyTrainer(BaseTrainer):
         for option in self.cfg_loss.keys():
             assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
 
+        # base.__init__ and base.train_epoch read these unconditionally, but the
+        # gradient-specific keys are absent from pure-energy configs. Mirror the
+        # defaults that base.build_loss sets so EnergyTrainer configs don't KeyError.
+        self.cfg_loss.setdefault('USE_GRADIENTS', False)
+        self.cfg_loss.setdefault('USE_GRADIENTS_AFTER_EPOCH', None)
         self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
         self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
 
