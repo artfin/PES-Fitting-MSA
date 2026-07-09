@@ -6,7 +6,7 @@ import sys
 import torch
 
 from data_io import load_cfg, load_dataset, seed_torch
-from trainer import Training
+from trainers import get_trainer
 from distributed import setup_distributed, cleanup
 
 import pathlib
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name",    required=True, type=str, help="the name of the YAML configuration file without extension")
     parser.add_argument("--log_name",      required=False, type=str, default=None, help="name of the logging file without extension")
     parser.add_argument("--chk_name",      required=False, type=str, default=None, help="name of the general checkpoint without extension")
-
+    
     args = parser.parse_args()
 
     MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
@@ -95,11 +95,11 @@ if __name__ == "__main__":
 
     rank, world_size, local_rank = setup_distributed()
 
-    t = Training(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test,
-                 rank=rank, world_size=world_size, local_rank=local_rank)
+    trainer = get_trainer(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test,
+                          rank=rank, world_size=world_size, local_rank=local_rank)
 
     try:
-        t.train_model()
-        t.model_eval()
+        trainer.train_model()
+        trainer.model_eval()
     finally:
         cleanup()

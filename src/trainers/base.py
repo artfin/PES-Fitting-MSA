@@ -1,0 +1,2597 @@
+import logging
+import os
+import random
+import time
+import timeit
+
+import numpy as np
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
+
+from config import TORCH_FLOAT
+from build_model import build_network, QModel
+from data_io import fit_scalers_to_train_dataset, apply_scalers_on_dataset, load_from_checkpoint, save_checkpoint
+from losses import EarlyStopping, WMSELoss_TrustRegion_wgradients
+from regularization import L1Regularization, L2Regularization
+from distributed import (
+    is_main_process, shard_dataset, cleanup,
+    reduce_mean, reduce_mae, reduce_rmse, reduce_min, reduce_sum, sync_gradients, all_gather_scalar, barrier
+)
+
+import sys
+import pathlib
+BASEDIR = pathlib.Path(__file__).parent.parent.parent.resolve()
+sys.path.insert(0, str(BASEDIR / "vendor"))
+from pytorch_lbfgs import LBFGS as HjmshiLBFGS, FullBatchLBFGS as HjmshiFullBatchLBFGS
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+PRINT_TRAINING_STEPS = 1
+PRINT_PRECISION = 3
+USE_WANDB = False
+
+
+def count_params(model):
+    nparams = 0
+    for name, param in model.named_parameters():
+        params = torch.tensor(param.size())
+        nparams += torch.prod(params, 0)
+    return nparams
+
+
+def flatten_gradients(model):
+    grads = []
+    for p in model.parameters():
+        if p.grad is not None:
+            grads.append(p.grad.view(-1))
+        else:
+            grads.append(torch.zeros_like(p).view(-1))
+    return torch.cat(grads)
+
+
+def set_gradients(model, flat_grad):
+    offset = 0
+    for p in model.parameters():
+        numel = p.numel()
+        p.grad = flat_grad[offset:offset + numel].view_as(p)
+        offset += numel
+
+
+def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
+                       energy_loss=None, gradient_loss=None,
+                       ema_energy_loss=None, ema_gradient_loss=None):
+    eps = 1e-12
+    norm_e = torch.norm(g_energy) + eps
+    norm_g = torch.norm(g_gradient) + eps
+    g_energy_norm = g_energy / norm_e
+    g_gradient_norm = g_gradient / norm_g
+    cos_sim = torch.dot(g_energy_norm, g_gradient_norm)
+    if (energy_loss is not None and gradient_loss is not None and
+        ema_energy_loss is not None and ema_gradient_loss is not None and
+        ema_energy_loss > eps and ema_gradient_loss > eps):
+        rel_energy = energy_loss / ema_energy_loss
+        rel_gradient = gradient_loss / ema_gradient_loss
+        if not isinstance(rel_energy, torch.Tensor):
+            rel_energy = torch.tensor(rel_energy, device=g_energy.device)
+        if not isinstance(rel_gradient, torch.Tensor):
+            rel_gradient = torch.tensor(rel_gradient, device=g_gradient.device)
+        alpha = rel_gradient / (rel_energy + rel_gradient + eps)
+    else:
+        alpha = torch.tensor(0.5, device=g_energy.device)
+    alpha = torch.clamp(alpha, alpha_min, alpha_max)
+    g_combined = alpha * g_energy_norm + (1 - alpha) * g_gradient_norm
+    combined_norm = torch.norm(g_combined) + eps
+    target_norm = 0.5 * (norm_e + norm_g)
+    rescale_factor = torch.clamp(target_norm / combined_norm, max=10.0)
+    g_combined = g_combined * rescale_factor
+    return alpha, cos_sim, g_combined
+
+
+class BaseTrainer:
+    def __init__(self, model_folder, model_name, chk_path, cfg, train, val, test, rank=0, world_size=1, local_rank=0):
+        self.rank = rank
+        self.world_size = world_size
+        self.local_rank = local_rank
+
+        cfg_dataset = cfg.get('DATASET', {})
+        sharding_enabled = cfg_dataset.get('SHARDED', False) and self.world_size > 1
+
+        # Save full training data for scaler fitting BEFORE sharding
+        full_train_X = train.X
+        full_train_y = train.y
+
+        # Data sharding for distributed full-batch training
+        if sharding_enabled:
+            from distributed import shard_dataset
+            train, dropped_train = shard_dataset(train, self.rank, self.world_size)
+            val, dropped_val = shard_dataset(val, self.rank, self.world_size)
+            test, dropped_test = shard_dataset(test, self.rank, self.world_size)
+            if is_main_process():
+                logging.info(f"Data sharding enabled: {len(train.y)} train / {len(val.y)} val / {len(test.y)} test per rank")
+                total_dropped = dropped_train + dropped_val + dropped_test
+                if total_dropped > 0:
+                    logging.info(f"Dropped {total_dropped} samples to ensure equal shards")
+
+        EVENTDIR = "runs"
+        if not os.path.isdir(EVENTDIR):
+            os.makedirs(EVENTDIR)
+
+        self.model_name = model_name
+
+        self.model_folder = model_folder
+
+        self.cfg = cfg
+
+        self.train = train
+        self.val   = val
+        self.test  = test
+
+        cfg_model = cfg.get('MODEL', None)
+
+        pretrained_model, pretrained_xscaler, pretrained_yscaler = self.load_pretrained_model_if_configured()
+        if pretrained_model is not None:
+            self.model = pretrained_model
+            self.xscaler = pretrained_xscaler
+            self.yscaler = pretrained_yscaler
+
+            logging.info("Applying xscaler and yscaler loaded from pretrained model on the new dataset") 
+            apply_scalers_on_dataset(self.train, self.val, self.test, self.xscaler, self.yscaler)
+
+            if cfg_model is not None:
+                print("\n")
+                logging.warning("Configuration provided within the MODEL is going to be ignored! The configuration of the pretrained model will be retained.\n")
+        else:
+            self.model = self.build_model()
+
+            logging.info("Fitting scalers to full training dataset (before sharding)...\n")
+            self.xscaler, self.yscaler = fit_scalers_to_train_dataset(train, cfg['DATASET'], X=full_train_X, y=full_train_y)
+            apply_scalers_on_dataset(self.train, self.val, self.test, self.xscaler, self.yscaler)
+
+        logging.info("Using the NN model structured as {}".format(self.model))
+        nparams = count_params(self.model)
+        logging.info("Number of parameters: {}".format(nparams))
+
+        self.cfg_solver = cfg['TRAINING']
+        self.grad_clip_norm = self.cfg_solver.get('GRAD_CLIP_NORM', None)
+
+        self.cfg_loss = cfg['LOSS']
+        self.loss_fn  = self.build_loss()
+        self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+
+        # Track when gradient training starts for progressive G_LAMBDA ramping
+        if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH') is None:
+            self.gradient_start_epoch = 0
+        else:
+            self.gradient_start_epoch = None
+
+        self.cfg_regularization = cfg.get('REGULARIZATION', None)
+        self.regularization = self.build_regularization()
+
+        self.cfg_batch = self._parse_batch_cfg(cfg.get('BATCH', None))
+
+        # Data sharding is only compatible with full-batch L-BFGS
+        if cfg_dataset.get('SHARDED', False) and bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
+            raise ValueError(
+                "DATASET.SHARDED=true is incompatible with BATCH.MULTIBATCH_ENABLED=true. "
+                "Data sharding only works with full-batch L-BFGS."
+            )
+
+        self.cfg_debug = cfg.get('DEBUG', {})
+
+        self.chk_path = chk_path
+        self.es = self.build_early_stopper()
+        self.meta_info = {
+            "NPOLY":    self.train.NPOLY,
+            "NMON":     self.train.NMON,
+            "NATOMS":   self.train.NATOMS,
+            "symmetry": self.train.symmetry,
+            "order":    self.train.order,
+        }
+
+        # Trust-region diagnostics state (lazy init in train_epoch).
+        # _prev_trust_mask: bool tensor (N,) -- last epoch's membership
+        # _prev_train_gradient_errors: float tensor (N,) -- per-config train gradient
+        #     RMSE from the last validation pass; used to test the eviction signal
+        # _trust_flip_count: int tensor (N,) -- cumulative # times each config
+        #     has toggled in/out of the trust set across training
+        # _trust_history_path: where to write per-epoch CSV summary
+        self._prev_trust_mask = None
+        self._prev_train_gradient_errors = None
+        self._trust_flip_count = None
+        self._trust_history_path = os.path.join(
+            self.model_folder, "{}.trust_history.csv".format(model_name)
+        )
+        self._trust_history_initialized = False
+
+        # Per-epoch gradient-loss contribution + phi histogram (active set only).
+        self._gradient_diag_path = os.path.join(
+            self.model_folder, "{}.gradient_diagnostics.csv".format(model_name)
+        )
+        self._gradient_diag_initialized = False
+
+        # L-BFGS line-search telemetry (state inspected after optimizer.step).
+        self._lbfgs_diag_path = os.path.join(
+            self.model_folder, "{}.lbfgs_diagnostics.csv".format(model_name)
+        )
+        self._lbfgs_diag_initialized = False
+        self._lbfgs_prev_n_iter = 0
+        self._lbfgs_prev_func_evals = 0
+        self._last_vendored_closure_eval = 0
+
+        # Distributed per-rank diagnostics (local metrics before averaging)
+        self._dist_diag_path = os.path.join(
+            self.model_folder, "{}.distributed_diagnostics.csv".format(model_name)
+        )
+        self._dist_diag_initialized = False
+
+        # MGDA (Multi-objective Gradient Descent Algorithm) state
+        # Now uses GradNorm: normalized gradients + adaptive alpha from loss ratios
+        self._mgda_alpha_ema = None  # EMA-smoothed alpha value
+        self._mgda_energy_loss_ema = None  # EMA of energy loss for adaptive alpha
+        self._mgda_gradient_loss_ema = None  # EMA of gradient loss for adaptive alpha
+        self._mgda_diag_path = os.path.join(
+            self.model_folder, "{}.mgda_diagnostics.csv".format(model_name)
+        )
+        self._mgda_diag_initialized = False
+
+    def build_model(self):
+        cfg_model = self.cfg.get('MODEL', None)
+        if self.cfg['TYPE'] == 'ENERGY':
+            return build_network(cfg_model, hidden_dims=self.cfg['MODEL']['HIDDEN_DIMS'], input_features=self.train.NPOLY, output_features=1)
+        elif self.cfg['TYPE'] == 'DIPOLE':
+            return build_network(cfg_model, hidden_dims=self.cfg['MODEL']['HIDDEN_DIMS'][0], input_features=self.train.NPOLY, output_features=3)
+        elif self.cfg['TYPE'] == 'DIPOLEQ':
+            return QModel(cfg_model, input_features=self.train.NPOLY, output_features=[len(natoms) for natoms in self.train.symmetry.values()])
+        elif self.cfg['TYPE'] == 'DIPOLEC':
+            return build_network(cfg_model, input_features=3 * self.train.NATOMS, output_features=1)
+        else:
+            assert False, 'unreachable'
+
+    def _log(self, msg):
+        """Rank-0 only logging helper."""
+        if is_main_process():
+            logging.info(msg)
+    def reset_weights(self):
+        for layer in self.model.children():
+            if hasattr(layer, 'reset_parameters'):
+                logging.info(f'Reset trainable parameters of layer = {layer}')
+                layer.reset_parameters()
+    def load_pretrained_model_if_configured(self):
+        self.cfg_pretrained_model_settings = self.cfg.get('PRETRAINED_MODEL_SETTINGS', None)
+        if self.cfg_pretrained_model_settings is None: 
+            return None, None, None 
+
+        pretrained_source_path = self.cfg_pretrained_model_settings.get('SOURCE', None)
+        assert pretrained_source_path is not None, "SOURCE path for pretrained model is not provided"
+
+        pretrained_source_path = os.path.join(self.model_folder, pretrained_source_path)
+        print("\n")
+        logging.info("Looking for pretrained model (.pt) in {}".format(pretrained_source_path))
+        model, xscaler, yscaler = load_from_checkpoint(pretrained_source_path)
+
+
+        return model, xscaler, yscaler
+    def continue_from_checkpoint(self, chkpath):
+        assert os.path.exists(chkpath)
+
+        self.reset_weights()
+        checkpoint = torch.load(chkpath, map_location=torch.device(DEVICE))
+        self.model.load_state_dict(checkpoint["model"])
+
+        self.train_model()
+    def model_eval(self):
+        self.test.X = self.test.X.to(self.device)
+        self.test.y = self.test.y.to(self.device)
+
+        if self.test.dX is not None:
+            self.test.dX = self.test.dX.to(self.device)
+            self.test.dy = self.test.dy.to(self.device)
+
+        # Calling model.eval() will change the behavior of some layers, 
+        # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
+        self.model.eval()
+
+        if self.cfg_loss['USE_GRADIENTS']:
+            # Use memory-efficient gradient evaluation (no create_graph needed)
+            train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
+            val_y_pred, val_dy_pred     = self.compute_gradients_eval(self.val)
+            test_y_pred, test_dy_pred   = self.compute_gradients_eval(self.test)
+
+            # Trust-region loss expects an extra trust_indices argument;
+            # for final evaluation we evaluate gradients on the full dataset.
+            if isinstance(self.loss_fn, WMSELoss_TrustRegion_wgradients):
+                train_indices = torch.arange(len(self.train.y), device=self.device)
+                val_indices   = torch.arange(len(self.val.y), device=self.device)
+                test_indices  = torch.arange(len(self.test.y), device=self.device)
+
+                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred, train_indices)
+                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred, val_indices)
+                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred, test_indices)
+            else:
+                loss_train_e, loss_train_g = self.loss_fn.forward_separate(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+                loss_val_e, loss_val_g     = self.loss_fn.forward_separate(self.val.y, val_y_pred, self.val.dy, val_dy_pred)
+                loss_test_e, loss_test_g   = self.loss_fn.forward_separate(self.test.y, test_y_pred, self.test.dy, test_dy_pred)
+
+            if self.world_size > 1:
+                loss_train_e = reduce_mean(loss_train_e)
+                loss_train_g = reduce_mean(loss_train_g)
+                loss_val_e   = reduce_mean(loss_val_e)
+                loss_val_g   = reduce_mean(loss_val_g)
+                loss_test_e  = reduce_mean(loss_test_e)
+                loss_test_g  = reduce_mean(loss_test_g)
+
+            self._log("Model evaluation after training:")
+            self._log("Train      loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_train_e, loss_train_g))
+            self._log("Validation loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_g))
+            self._log("Test       loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_g))
+
+        elif self.cfg['TYPE'] == 'ENERGY':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                pred_train = self.model(self.train.X)
+                loss_train = self.loss_fn(self.train.y, pred_train)
+
+                pred_val   = self.model(self.val.X)
+                loss_val   = self.loss_fn(self.val.y, pred_val)
+
+                pred_test  = self.model(self.test.X)
+                loss_test  = self.loss_fn(self.test.y, pred_test)
+
+            if self.world_size > 1:
+                loss_train = reduce_mean(loss_train)
+                loss_val   = reduce_mean(loss_val)
+                loss_test  = reduce_mean(loss_test)
+
+            self._log("Model evaluation after training:")
+            self._log("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
+            self._log("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
+            self._log("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
+
+        elif self.cfg['TYPE'] == 'DIPOLEQ':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                train_q_pred   = self.model(self.train.X)
+                train_X_inf    = torch.zeros_like(self.train.X).cpu()
+                train_X_inf_tr = torch.from_numpy(self.xscaler.transform(train_X_inf)).to(self.device)
+                train_q_inf    = self.model(train_X_inf_tr)
+                train_q_corr   = train_q_pred - train_q_inf
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_q_pred   = self.model(self.val.X)
+                val_X_inf    = torch.zeros_like(self.val.X).cpu()
+                val_X_inf_tr = torch.from_numpy(self.xscaler.transform(val_X_inf)).to(self.device)
+                val_q_inf    = self.model(val_X_inf_tr)
+                val_q_corr   = val_q_pred - val_q_inf
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
+
+                test_q_pred   = self.model(self.test.X)
+                test_X_inf    = torch.zeros_like(self.test.X).cpu()
+                test_X_inf_tr = torch.from_numpy(self.xscaler.transform(test_X_inf)).to(self.device)
+                test_q_inf    = self.model(test_X_inf_tr)
+                test_q_corr   = test_q_pred - test_q_inf
+                dip_pred_test = torch.einsum('ijk,ij->ik', self.test.xyz_ordered.to(TORCH_FLOAT), test_q_corr)
+                loss_test     = self.loss_fn(self.test.y, dip_pred_test)
+
+            if self.world_size > 1:
+                loss_train = reduce_mean(loss_train)
+                loss_val   = reduce_mean(loss_val)
+                loss_test  = reduce_mean(loss_test)
+
+            self._log("Model evluation after training:")
+            self._log("Train      loss: {1:{0}f}".format(PRINT_PRECISION, loss_train))
+            self._log("Validation loss: {1:{0}f}".format(PRINT_PRECISION, loss_val))
+            self._log("Test       loss: {1:{0}f}".format(PRINT_PRECISION, loss_test))
+
+        else:
+            assert False, "unreachable"
+
+    def build_regularization(self):
+        if self.cfg_regularization is None:
+            return None
+
+        if self.cfg_regularization['NAME'] == 'L1':
+            lambda_ = float(self.cfg_regularization['LAMBDA'])
+            reg = L1Regularization(lambda_)
+        elif self.cfg_regularization['NAME'] == 'L2':
+            lambda_ = float(self.cfg_regularization['LAMBDA'])
+            reg = L2Regularization(lambda_)
+        else:
+            raise ValueError("unreachable")
+
+        return reg
+    def _parse_batch_cfg(self, cfg_batch):
+        defaults = {
+            'MULTIBATCH_ENABLED':    False,
+            'MODE':                  'multi_batch',   # 'multi_batch' | 'full_overlap'
+            'BATCH_SIZE':            None,
+            'OVERLAP_FRACTION':      0.25,            # used only in 'multi_batch'
+            'RESHUFFLE_EACH_EPOCH':  True,
+            'LR':                    1.0,
+            'HISTORY_SIZE':          10,
+            'LINE_SEARCH':           None,            # None|'None'|'Wolfe'|'Armijo'
+            'DAMPING':               True,            # Powell damping for 'multi_batch'
+            'DAMPING_EPS':           0.2,
+            'SEED':                  42,
+        }
+
+        if cfg_batch is None:
+            return defaults
+
+        known = set(defaults.keys())
+        for key in cfg_batch.keys():
+            assert key in known, "[BATCH] unknown option: {}".format(key)
+
+        out = dict(defaults)
+        out.update(cfg_batch)
+
+        if not out['MULTIBATCH_ENABLED']:
+            return out
+
+        assert out['MODE'] in ('multi_batch', 'full_overlap'), \
+            "[BATCH] MODE must be 'multi_batch' or 'full_overlap', got {}".format(out['MODE'])
+        assert out['BATCH_SIZE'] is not None and int(out['BATCH_SIZE']) > 0, \
+            "[BATCH] BATCH_SIZE must be a positive integer when MULTIBATCH_ENABLED"
+        out['BATCH_SIZE'] = int(out['BATCH_SIZE'])
+
+        overlap = float(out['OVERLAP_FRACTION'])
+        assert 0.0 < overlap < 0.5, \
+            "[BATCH] OVERLAP_FRACTION must be in (0, 0.5), got {}".format(overlap)
+        out['OVERLAP_FRACTION'] = overlap
+
+        assert out['MODE'] != 'multi_batch', \
+            "[BATCH] MODE='multi_batch' is disabled; use 'full_overlap' instead"
+
+        if out['MODE'] == 'multi_batch':
+            ls = out['LINE_SEARCH']
+            assert ls in (None, 'None'), \
+                "[BATCH] MODE='multi_batch' expects LINE_SEARCH=None (fixed steplength); got {}".format(ls)
+        else:  # full_overlap
+            ls = out['LINE_SEARCH']
+            assert ls in ('Wolfe', 'Armijo'), \
+                "[BATCH] MODE='full_overlap' requires LINE_SEARCH='Wolfe' or 'Armijo'; got {}".format(ls)
+
+        assert self.cfg['TYPE'] == 'ENERGY', \
+            "[BATCH] multi-batch L-BFGS is currently only supported for TYPE=ENERGY"
+
+        assert self.cfg_loss.get('TRUST_THRESHOLD') is None, \
+            "[BATCH] trust-region loss (TRUST_THRESHOLD) is not supported with multi-batch L-BFGS yet"
+
+        assert float(self.cfg_loss.get('FOCAL_GAMMA', 0.0)) == 0.0, \
+            "[BATCH] focal-EMA weighting (FOCAL_GAMMA>0) is not supported with multi-batch L-BFGS yet"
+
+        opt_name = self.cfg_solver['OPTIMIZER']['NAME']
+        assert opt_name == 'LBFGS', \
+            "[BATCH] MULTIBATCH_ENABLED requires OPTIMIZER.NAME=LBFGS, got {}".format(opt_name)
+
+        return out
+    def build_optimizer(self, cfg_optimizer):
+        if cfg_optimizer['NAME'] == 'LBFGS':
+            lr               = cfg_optimizer.get('LR', 1.0)
+            if self.world_size > 1:
+                # Use vendored FullBatchLBFGS for distributed training.
+                # torch.optim.LBFGS is not DDP-safe because its line search
+                # resets parameters after trial evaluations, which breaks DDP's
+                # asynchronous gradient reduction invariants.
+                history_size = cfg_optimizer.get('HISTORY_SIZE', 100)
+                line_search = cfg_optimizer.get('LINE_SEARCH', 'Wolfe')
+                if line_search not in ['Armijo', 'Wolfe', 'None']:
+                    raise ValueError(f"Invalid LINE_SEARCH: {line_search}. Must be 'Armijo', 'Wolfe', or 'None'")
+
+                # Line search parameters (stored for passing to step())
+                self._lbfgs_ls_options = {
+                    'max_ls': cfg_optimizer.get('MAX_LS', 10),
+                    'c1': cfg_optimizer.get('C1', 1e-4),
+                    'c2': cfg_optimizer.get('C2', 0.9),
+                    'eta': cfg_optimizer.get('ETA', 2.0),
+                    'interpolate': cfg_optimizer.get('INTERPOLATE', True),
+                    'ls_debug': cfg_optimizer.get('LS_DEBUG', False),
+                }
+                logging.info(f"Line search options: {self._lbfgs_ls_options}")
+
+                optimizer = HjmshiFullBatchLBFGS(
+                    self.model.parameters(),
+                    lr=lr,
+                    history_size=history_size,
+                    line_search=line_search,
+                )
+                logging.info("Build optimizer: {} (distributed-aware, vendored FullBatchLBFGS)".format(optimizer))
+            else:
+                tolerance_grad   = cfg_optimizer.get('TOLERANCE_GRAD', 1e-14)
+                tolerance_change = cfg_optimizer.get('TOLERANCE_CHANGE', 1e-14)
+                max_iter         = cfg_optimizer.get('MAX_ITER', 100)
+
+                optimizer        = torch.optim.LBFGS(self.model.parameters(), lr=lr, line_search_fn='strong_wolfe', tolerance_grad=tolerance_grad,
+                                                     tolerance_change=tolerance_change, max_iter=max_iter)
+                logging.info("Build optimizer: {}".format(optimizer))
+        elif cfg_optimizer['NAME'] == 'Adam':
+            lr           = cfg_optimizer.get('LR', 1e-3)
+            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 0.0)
+            weight_decay = cfg_optimizer.get('WEIGHT_DECAY', 0.0)
+            optimizer    = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        else:
+            raise ValueError("unreachable")
+
+        logging.info("Build optimizer: {}".format(optimizer))
+
+        return optimizer
+    def build_loss(self):
+        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'GRADIENT_TRUST_THRESHOLD', 'GRADIENT_TRUST_SOFT_SCALE', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT', 'HUBER_DELTA', 'USE_MGDA', 'MGDA_ALPHA_MIN', 'MGDA_ALPHA_MAX', 'MGDA_EMA_DECAY')
+        for option in self.cfg_loss.keys():
+            assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
+
+        # have all defaults in the same place and set them to configuration if the value is omitted in the YAML file
+        self.cfg_loss.setdefault('LAMBDA_Q', 1.0e3)
+        self.cfg_loss.setdefault('USE_GRADIENTS_AFTER_EPOCH', None)
+        self.cfg_loss.setdefault('USE_GRADIENTS', False)
+        self.cfg_loss.setdefault('G_LAMBDA_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
+        self.cfg_loss.setdefault('TRUST_SOFT_SCALE', None)
+        self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
+        self.cfg_loss.setdefault('GRADIENT_TRUST_THRESHOLD', None)
+        self.cfg_loss.setdefault('GRADIENT_TRUST_SOFT_SCALE', None)
+        self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
+        self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
+        self.cfg_loss.setdefault('USE_HUBER_GRADIENT', False)
+
+        # Validate MGDA configuration
+        if self.cfg_loss.get('USE_MGDA', False):
+            gradients_enabled = (self.cfg_loss['USE_GRADIENTS'] or
+                                 self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None)
+            assert gradients_enabled, \
+                "USE_MGDA requires USE_GRADIENTS or USE_GRADIENTS_AFTER_EPOCH to be enabled"
+
+        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLE':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLEQ':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg['TYPE'] == 'DIPOLEC':
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
+            Eref = self.cfg_loss.get('EREF', 2000.0)
+            loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
+            Eref = self.cfg_loss.get('EREF', 2000.0)
+            loss_fn = WMSELoss_Boltzmann(Eref=Eref)
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
+            loss_fn = WRMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
+            loss_fn = WMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
+
+        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
+            Emax = self.cfg_loss.get('EMAX', 2000.0)
+            loss_fn = WRMSELoss_PS(Emax=Emax)
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
+            Emax = self.cfg_loss.get('EMAX', 2000.0)
+            loss_fn = WMSELoss_PS(Emax=Emax)
+
+
+        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_GRADIENTS']:
+            dwt = self.cfg_loss.get('dwt', 1.0)
+            g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
+            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
+            if trust_threshold is not None:
+                # Use memory-efficient trust region loss with soft boundaries
+                soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
+                use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
+                huber_delta = None
+                if use_huber:
+                    # Check for explicit override first
+                    huber_delta = self.cfg_loss.get('HUBER_DELTA', None)
+                    if huber_delta is not None:
+                        logging.info("Huber delta (explicit) = {:.6e}".format(huber_delta))
+                    else:
+                        mad = getattr(self.train, 'mad_grad_components', None)
+                        assert mad is not None and mad > 0, (
+                            "USE_HUBER_GRADIENT requires train.mad_grad_components; "
+                            "available only for gradient-loaded datasets.")
+                        # Huber 95%-efficiency constant at the normal is k = 1.345*sigma.
+                        # For Gaussian, sigma ~= 1.4826 * MAD, so k ~= 1.994 * MAD.
+                        huber_delta = 2.0 * float(mad)
+                        logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
+                loss_fn = WMSELoss_TrustRegion_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
+                                                       trust_threshold=trust_threshold,
+                                                       soft_scale=soft_scale,
+                                                       focal_gamma=focal_gamma,
+                                                       focal_ema_decay=focal_ema_decay,
+                                                       huber_delta=huber_delta)
+                # Log gradient trust settings (applied in compute_trust_mask)
+                grad_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
+                if grad_trust_threshold is not None:
+                    grad_trust_soft_scale = self.cfg_loss.get('GRADIENT_TRUST_SOFT_SCALE', None)
+                    logging.info("Gradient trust threshold = {:.2f} cm-1/bohr (soft_scale={})".format(
+                        grad_trust_threshold, grad_trust_soft_scale))
+            else:
+                use_huber = self.cfg_loss.get('USE_HUBER_GRADIENT', False)
+                huber_delta = None
+                if use_huber:
+                    huber_delta = self.cfg_loss.get('HUBER_DELTA', None)
+                    if huber_delta is not None:
+                        logging.info("Huber delta (explicit) = {:.6e}".format(huber_delta))
+                    else:
+                        mad = getattr(self.train, 'mad_grad_components', None)
+                        assert mad is not None and mad > 0, (
+                            "USE_HUBER_GRADIENT requires train.mad_grad_components; "
+                            "available only for gradient-loaded datasets.")
+                        huber_delta = 2.0 * float(mad)
+                        logging.info("Huber delta (auto) = 2 * MAD = {:.6e}".format(huber_delta))
+                loss_fn = WMSELoss_Ratio_wgradients(natoms=self.train.NATOMS, dwt=dwt, g_lambda=g_lambda,
+                                                   huber_delta=huber_delta)
+
+        else:
+            print(self.cfg_loss)
+            raise ValueError("unreachable")
+
+        logging.info("Build loss function: {}".format(loss_fn))
+
+        return loss_fn
+    def build_scheduler(self):
+        cfg_scheduler = self.cfg_solver['SCHEDULER']
+        scheduler_name = cfg_scheduler['NAME']
+
+        if scheduler_name == 'ReduceLROnPlateau':
+            factor         = cfg_scheduler.get('LR_REDUCE_GAMMA', 0.1)
+            threshold      = cfg_scheduler.get('THRESHOLD', 0.1)
+            threshold_mode = cfg_scheduler.get('THRESHOLD_MODE', 'abs')
+            patience       = cfg_scheduler.get('PATIENCE', 10)
+            cooldown       = cfg_scheduler.get('COOLDOWN', 0)
+            min_lr         = cfg_scheduler.get('MIN_LR', 1e-5)
+
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, factor=factor, threshold=threshold, threshold_mode=threshold_mode,
+                patience=patience, cooldown=cooldown, min_lr=min_lr)
+
+            logging.info("Build scheduler:")
+            logging.info(" NAME:            {}".format(scheduler_name))
+            logging.info(" LR_REDUCE_GAMMA: {}".format(factor))
+            logging.info(" THRESHOLD:       {}".format(threshold))
+            logging.info(" THRESHOLD_MODE:  {}".format(threshold_mode))
+            logging.info(" PATIENCE:        {}".format(patience))
+            logging.info(" COOLDOWN:        {}".format(cooldown))
+            logging.info(" MIN_LR:          {}\n".format(min_lr))
+
+        elif scheduler_name == 'CosineAnnealingWarmRestarts':
+            T_0     = cfg_scheduler.get('T_0', 100)
+            T_mult  = cfg_scheduler.get('T_MULT', 2)
+            eta_min = cfg_scheduler.get('ETA_MIN', 1e-6)
+
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=T_0, T_mult=T_mult, eta_min=eta_min)
+
+            logging.info("Build scheduler:")
+            logging.info(" NAME:    {}".format(scheduler_name))
+            logging.info(" T_0:     {} (epochs until first restart)".format(T_0))
+            logging.info(" T_MULT:  {} (period multiplier after each restart)".format(T_mult))
+            logging.info(" ETA_MIN: {}\n".format(eta_min))
+
+        else:
+            raise ValueError("Unknown scheduler: {}".format(scheduler_name))
+
+        return scheduler
+    def build_early_stopper(self):
+        cfg_early_stopping = self.cfg_solver['EARLY_STOPPING']
+
+        patience  = cfg_early_stopping.get('PATIENCE', 1000)
+        tolerance = cfg_early_stopping.get('TOLERANCE', 0.1)
+
+        return EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
+    def compute_gradients(self, dataset):
+        Xtr = dataset.X
+
+        Xtr.requires_grad = True
+
+        y_pred = self.model(Xtr)
+        dEdp   = torch.autograd.grad(outputs=y_pred, inputs=Xtr, grad_outputs=torch.ones_like(y_pred), retain_graph=True, create_graph=True)[0]
+
+        Xtr.requires_grad = False
+
+        # take into account normalization of polynomials
+        # now we have derivatives of energy w.r.t. to polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
+        # `torch.einsum` throws a Runtime error without an explicit conversion to Double
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
+        dEdx = torch.mul(dEdx, y_scale)
+
+        return y_pred, dEdx
+    def compute_gradients_from_energy(self, X_subset, dX_subset, y_pred_subset):
+        """
+        Compute gradients for a subset given pre-computed energy predictions.
+        This avoids a second forward pass through the model.
+
+        Args:
+            X_subset: Input polynomials for subset (must have requires_grad=True)
+            dX_subset: Polynomial gradients for subset
+            y_pred_subset: Energy predictions for subset (from same forward pass)
+        """
+        logging.debug("compute_gradients_from_energy: X_subset shape={}, dX_subset shape={}".format(
+            X_subset.shape, dX_subset.shape))
+
+        dEdp = torch.autograd.grad(
+            outputs=y_pred_subset,
+            inputs=X_subset,
+            grad_outputs=torch.ones_like(y_pred_subset),
+            retain_graph=True,
+            create_graph=True
+        )[0]
+
+        # take into account normalization of polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # gradient = dE/dx = \sigma(E) * dE/d(poly) * d(poly)/dx
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dX_subset.to(TORCH_FLOAT))
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
+        dEdx = torch.mul(dEdx, y_scale)
+
+        return dEdx
+    def compute_trust_mask(self, dataset):
+        """
+        Compute trust region active set based on energy prediction errors
+        and optionally gradient errors from the previous epoch.
+
+        Uses soft boundaries with sigmoid weighting:
+            phi(e_i) = sigmoid((threshold - error) / soft_scale) in [0, 1]
+        Active set = {i : phi(e_i) > soft_cutoff} (memory optimization).
+
+        When GRADIENT_TRUST_THRESHOLD is set, configs with large gradient
+        errors (from previous epoch) are down-weighted using a soft sigmoid.
+        This is combined multiplicatively with energy-based weights.
+
+        Returns:
+          trust_indices : 1-D LongTensor of active-set config indices
+          trust_mask    : 1-D BoolTensor of shape (N,) indicating membership
+          energy_errors : 1-D float tensor of |E_pred - E_true| (cm^-1)
+          gradient_weights : 1-D float tensor of combined weights for the active set
+        """
+        trust_threshold = getattr(self, 'current_trust_threshold', None)
+        if trust_threshold is None:
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+
+        soft_scale = self.cfg_loss.get('TRUST_SOFT_SCALE', None)
+        soft_cutoff = self.cfg_loss.get('TRUST_SOFT_CUTOFF', 0.01)
+
+        # Gradient trust: filter by previous epoch's gradient errors
+        grad_trust_threshold = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD', None)
+        grad_trust_soft_scale = self.cfg_loss.get('GRADIENT_TRUST_SOFT_SCALE', None)
+
+        with torch.no_grad():
+            y_pred = self.model(dataset.X)
+
+            # Descale energies
+            en_mean = torch.from_numpy(self.yscaler.mean_).to(self.device)
+            en_std = torch.from_numpy(self.yscaler.scale_).to(self.device)
+
+            en_pred_descaled = y_pred * en_std + en_mean
+            en_true_descaled = dataset.y * en_std + en_mean
+
+            energy_errors = torch.abs(en_pred_descaled - en_true_descaled).view(-1)
+
+            # Always use soft boundary with sigmoid weighting
+            phi_energy = WMSELoss_TrustRegion_wgradients.soft_phi(
+                energy_errors, trust_threshold, soft_scale=soft_scale
+            )
+            trust_mask = phi_energy > soft_cutoff
+            trust_indices = torch.nonzero(trust_mask, as_tuple=False).view(-1)
+            gradient_weights = phi_energy[trust_indices]
+
+            # Apply gradient trust filtering (uses previous epoch's gradient errors)
+            if (grad_trust_threshold is not None
+                    and self._prev_train_gradient_errors is not None
+                    and self._prev_train_gradient_errors.numel() == energy_errors.numel()):
+                # Compute soft phi for gradient errors (same sigmoid as energy)
+                phi_grad = WMSELoss_TrustRegion_wgradients.soft_phi(
+                    self._prev_train_gradient_errors,
+                    grad_trust_threshold,
+                    soft_scale=grad_trust_soft_scale
+                )
+                # Multiply energy weights by gradient weights
+                gradient_weights = gradient_weights * phi_grad[trust_indices]
+
+        return trust_indices, trust_mask, energy_errors, gradient_weights
+    def compute_gradients_eval(self, dataset):
+        """
+        Compute gradients for evaluation (no create_graph needed).
+        Much more memory efficient than compute_gradients() since we don't need
+        to backpropagate through the gradient computation.
+        """
+        Xtr = dataset.X.clone().detach()
+        Xtr.requires_grad = True
+
+        with torch.enable_grad():
+            y_pred = self.model(Xtr)
+            dEdp = torch.autograd.grad(
+                outputs=y_pred,
+                inputs=Xtr,
+                grad_outputs=torch.ones_like(y_pred),
+                retain_graph=False,
+                create_graph=False
+            )[0]
+
+        Xtr.requires_grad = False
+
+        # take into account normalization of polynomials
+        x_scale = torch.from_numpy(self.xscaler.scale_).to(self.device)
+        dEdp = torch.div(dEdp, x_scale)
+
+        # gradient = dE/dx
+        dEdx = torch.einsum('ij,ijk -> ik', dEdp.to(TORCH_FLOAT), dataset.dX.to(TORCH_FLOAT))
+
+        # take into account normalization of model energy
+        y_scale = torch.from_numpy(self.yscaler.scale_).to(self.device)
+        dEdx = torch.mul(dEdx, y_scale)
+
+        return y_pred.detach(), dEdx.detach()
+    def log_trust_region_diagnostics(self, epoch, trust_mask, energy_errors,
+                                     gradient_weights):
+        """Diagnose trust-region evolution: churn, eviction signal, flip counts.
+
+        Compares the current trust mask against the previous epoch's mask
+        and the per-config gradient errors recorded at the end of the previous
+        validation pass. Writes a CSV row per epoch and logs a summary.
+
+        The eviction signal is the key check for "evasion" behavior:
+        if configs that just LEFT the trust set had systematically higher
+        gradient errors than configs that STAYED, the optimizer is plausibly
+        gaming the boundary by pushing hard configs out.
+        """
+        N_local = trust_mask.numel()
+        cur = trust_mask.detach()
+        n_in_local = int(cur.sum().item())
+
+        # Initialize trackers lazily on the first call.
+        if self._trust_flip_count is None:
+            self._trust_flip_count = torch.zeros(N_local, dtype=torch.long, device=DEVICE)
+
+        if self._prev_trust_mask is None:
+            entered_local = n_in_local
+            left_local = 0
+            stable_in_local = n_in_local
+            stable_out_local = N_local - n_in_local
+            mean_err_left = float('nan')
+            mean_err_stayed = float('nan')
+            med_err_left = float('nan')
+            med_err_stayed = float('nan')
+        else:
+            prev = self._prev_trust_mask
+            entered_mask = cur & (~prev)
+            left_mask    = (~cur) & prev
+            stable_in_mask  = cur & prev
+            stable_out_mask = (~cur) & (~prev)
+            entered_local = int(entered_mask.sum().item())
+            left_local = int(left_mask.sum().item())
+            stable_in_local = int(stable_in_mask.sum().item())
+            stable_out_local = int(stable_out_mask.sum().item())
+
+            # Update cumulative flip count.
+            flips = entered_mask | left_mask
+            self._trust_flip_count[flips] += 1
+
+            # Eviction signal: compare prev-epoch gradient errors of left vs stayed.
+            if (self._prev_train_gradient_errors is not None
+                    and self._prev_train_gradient_errors.numel() == N_local):
+                pfe = self._prev_train_gradient_errors
+                if left_local > 0:
+                    mean_err_left = float(pfe[left_mask].mean().item())
+                    med_err_left  = float(pfe[left_mask].median().item())
+                else:
+                    mean_err_left = float('nan')
+                    med_err_left  = float('nan')
+                if stable_in_local > 0:
+                    mean_err_stayed = float(pfe[stable_in_mask].mean().item())
+                    med_err_stayed  = float(pfe[stable_in_mask].median().item())
+                else:
+                    mean_err_stayed = float('nan')
+                    med_err_stayed  = float('nan')
+            else:
+                mean_err_left = float('nan')
+                mean_err_stayed = float('nan')
+                med_err_left = float('nan')
+                med_err_stayed = float('nan')
+
+        if gradient_weights.numel() > 0:
+            phi_sum = float(gradient_weights.sum().item())
+            phi_mean = float(gradient_weights.mean().item())
+            phi_min = float(gradient_weights.min().item())
+        else:
+            phi_sum = float('nan')
+            phi_mean = float('nan')
+            phi_min = float('nan')
+
+        max_flips = int(self._trust_flip_count.max().item())
+        ever_in = int((self._trust_flip_count > 0).sum().item()) + stable_in_local
+
+        # Aggregate counts across ranks for logging
+        if self.world_size > 1:
+            counts = torch.tensor([N_local, n_in_local, entered_local, left_local, stable_in_local],
+                                  dtype=torch.float32, device=DEVICE)
+            counts = reduce_sum(counts)
+            N, n_in, entered, left, stable_in = [int(c.item()) for c in counts]
+            frac = n_in / max(N, 1)
+        else:
+            N, n_in, entered, left, stable_in = N_local, n_in_local, entered_local, left_local, stable_in_local
+            frac = n_in / max(N, 1)
+
+        if is_main_process():
+            logging.info(
+                "[trust-diag] epoch={} | n_in={}/{} ({:.1%}) | entered={} left={} "
+                "stable_in={} | prev-epoch gradient-RMSE: left={:.2f} stayed={:.2f} "
+                "(med {:.2f}/{:.2f}) | max_flips={}".format(
+                    epoch, n_in, N, frac, entered, left, stable_in,
+                    mean_err_left, mean_err_stayed,
+                    med_err_left, med_err_stayed, max_flips
+                )
+            )
+
+        # Append CSV row for post-hoc plotting (only on main process).
+        stable_out = N - n_in  # Compute from aggregated values
+        if is_main_process():
+            if not self._trust_history_initialized:
+                try:
+                    with open(self._trust_history_path, "w") as f:
+                        f.write("epoch,N,n_in,frac,entered,left,stable_in,stable_out,"
+                                "mean_err_left,mean_err_stayed,med_err_left,med_err_stayed,"
+                                "phi_sum,phi_mean,phi_min,max_flips\n")
+                    self._trust_history_initialized = True
+                except OSError as e:
+                    logging.warning("Could not initialize trust history CSV: {}".format(e))
+            try:
+                with open(self._trust_history_path, "a") as f:
+                    f.write("{},{},{},{:.6f},{},{},{},{},"
+                            "{:.6f},{:.6f},{:.6f},{:.6f},"
+                            "{:.6f},{:.6f},{:.6f},{}\n".format(
+                        epoch, N, n_in, frac, entered, left, stable_in, stable_out,
+                        mean_err_left, mean_err_stayed, med_err_left, med_err_stayed,
+                        phi_sum, phi_mean, phi_min, max_flips
+                    ))
+            except OSError as e:
+                logging.warning("Could not append to trust history CSV: {}".format(e))
+
+        # Snapshot current mask for next-epoch comparison.
+        self._prev_trust_mask = cur.clone()
+    def log_gradient_loss_diagnostics(self, epoch, train_dy, train_dy_pred,
+                                   train_e_d, train_e_pred,
+                                   trust_indices, gradient_weights):
+        """Per-config gradient-loss contribution + phi histogram on the active set.
+
+        Contribution mirrors the loss term per config:
+            c_i = phi_i * w_energy_i * w_focal_i * ||f_i - f_i_pred||^2 / (3 N_atoms)
+        (un-normalized; we want raw share, not the loss value itself.)
+        """
+        if trust_indices is None or trust_indices.numel() == 0:
+            return
+
+        natoms = self.train.NATOMS
+        n_active = int(trust_indices.numel())
+
+        with torch.no_grad():
+            # Per-config gradient squared error on the active set.
+            dy_act      = train_dy[trust_indices]
+            dy_pred_act = train_dy_pred[trust_indices]
+            f_sq = (
+                torch.sum((dy_act - dy_pred_act) ** 2, dim=1)
+                / (3.0 * natoms)
+            )  # (n_active,)
+
+            # Re-derive w_energy * w_focal on the active set. _compute_weights
+            # is safe to call here: error_scale was already updated inside the
+            # closure, so the EMA guard prevents double-update.
+            if hasattr(self.loss_fn, '_compute_weights'):
+                w_full = self.loss_fn._compute_weights(train_e_d, train_e_pred)
+                w_act = w_full.view(-1)[trust_indices]
+            else:
+                w_act = torch.ones(n_active, device=DEVICE)
+
+            phi_act = gradient_weights.view(-1).to(f_sq.dtype)
+
+            contrib = (phi_act * w_act * f_sq).detach().cpu()
+            phi_cpu = phi_act.detach().cpu()
+
+            qs = torch.tensor([0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+                              dtype=contrib.dtype)
+            cq = torch.quantile(contrib, qs).tolist()
+            contrib_sum = float(contrib.sum().item())
+            contrib_max = float(contrib.max().item())
+
+            # Top-k tail share (k = 1%, 5%, 10% of active set).
+            sorted_c, _ = torch.sort(contrib, descending=True)
+            def _tail_share(frac):
+                k = max(1, int(round(frac * n_active)))
+                return float(sorted_c[:k].sum().item()) / max(contrib_sum, 1e-30)
+            top1  = _tail_share(0.01)
+            top5  = _tail_share(0.05)
+            top10 = _tail_share(0.10)
+
+            pq = torch.quantile(phi_cpu, qs[:5].to(phi_cpu.dtype)).tolist()
+            # Bin phi into membership categories.
+            bins = torch.tensor([0.0, 0.25, 0.50, 0.75, 0.90, 1.0001])
+            # counts per bin
+            idx = torch.bucketize(phi_cpu, bins) - 1
+            idx = idx.clamp(0, 4)
+            bin_counts = [int((idx == b).sum().item()) for b in range(5)]
+
+        if not self._gradient_diag_initialized:
+            try:
+                with open(self._gradient_diag_path, "w") as f:
+                    f.write(
+                        "epoch,n_active,contrib_sum,contrib_max,"
+                        "contrib_q10,contrib_q25,contrib_q50,contrib_q75,"
+                        "contrib_q90,contrib_q95,contrib_q99,"
+                        "top1pct_share,top5pct_share,top10pct_share,"
+                        "phi_q10,phi_q25,phi_q50,phi_q75,phi_q90,"
+                        "phi_lt_25,phi_25_50,phi_50_75,phi_75_90,phi_ge_90\n"
+                    )
+                self._gradient_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize gradient diag CSV: {}".format(e))
+        try:
+            with open(self._gradient_diag_path, "a") as f:
+                f.write(
+                    "{},{},{:.6e},{:.6e},"
+                    "{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},"
+                    "{:.6f},{:.6f},{:.6f},"
+                    "{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},"
+                    "{},{},{},{},{}\n".format(
+                        epoch, n_active, contrib_sum, contrib_max,
+                        cq[0], cq[1], cq[2], cq[3], cq[4], cq[5], cq[6],
+                        top1, top5, top10,
+                        pq[0], pq[1], pq[2], pq[3], pq[4],
+                        bin_counts[0], bin_counts[1], bin_counts[2],
+                        bin_counts[3], bin_counts[4],
+                    )
+                )
+        except OSError as e:
+            logging.warning("Could not append to gradient diag CSV: {}".format(e))
+
+        if is_main_process():
+            logging.info(
+                "[grad-diag] epoch={} | top1%={:.1%} top5%={:.1%} top10%={:.1%} "
+                "of gradient loss | contrib q50={:.3e} q95={:.3e} max={:.3e}".format(
+                    epoch, top1, top5, top10, cq[2], cq[5], contrib_max
+                )
+            )
+    def log_lbfgs_diagnostics(self, epoch, optimizer):
+        """L-BFGS line-search telemetry, dumped per epoch.
+
+        Pulls inner state from torch.optim.LBFGS or vendored FullBatchLBFGS:
+          - this-step iteration / closure-call counts (deltas from cumulative)
+          - last accepted step length t
+          - initial Hessian diag scaling H_diag = (s . y) / (y . y)
+          - curvature pair stats: <s_k, y_k> -- min/max/last/mean
+            over the stored history (small or absent => degenerate curvature)
+          - flat gradient norm at the last accepted iterate
+        """
+        if isinstance(optimizer, torch.optim.LBFGS):
+            params = optimizer.param_groups[0]['params']
+            if not params:
+                return
+            state = optimizer.state.get(params[0], {})
+            if not state:
+                return
+
+            cum_n_iter     = int(state.get('n_iter', 0))
+            cum_func_evals = int(state.get('func_evals', 0))
+            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
+            evals_this_step = cum_func_evals - self._lbfgs_prev_func_evals
+            self._lbfgs_prev_n_iter = cum_n_iter
+            self._lbfgs_prev_func_evals = cum_func_evals
+
+            t_val = state.get('t', None)
+            try:
+                t_val = float(t_val) if t_val is not None else float('nan')
+            except (TypeError, ValueError):
+                t_val = float('nan')
+
+            H_diag = state.get('H_diag', None)
+            try:
+                H_diag = float(H_diag) if H_diag is not None else float('nan')
+            except (TypeError, ValueError):
+                H_diag = float('nan')
+
+            ro = state.get('ro', []) or []
+            n_pairs = len(ro)
+            if n_pairs > 0:
+                sy_vals = []
+                for r in ro:
+                    try:
+                        rv = float(r)
+                        if rv != 0.0:
+                            sy_vals.append(1.0 / rv)
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        pass
+                if sy_vals:
+                    sy_min  = min(sy_vals)
+                    sy_max  = max(sy_vals)
+                    sy_last = sy_vals[-1]
+                    sy_mean = sum(sy_vals) / len(sy_vals)
+                else:
+                    sy_min = sy_max = sy_last = sy_mean = float('nan')
+            else:
+                sy_min = sy_max = sy_last = sy_mean = float('nan')
+
+            prev_flat_grad = state.get('prev_flat_grad', None)
+            if prev_flat_grad is not None:
+                try:
+                    grad_norm = float(prev_flat_grad.norm().item())
+                except (RuntimeError, AttributeError):
+                    grad_norm = float('nan')
+            else:
+                grad_norm = float('nan')
+
+        elif isinstance(optimizer, HjmshiFullBatchLBFGS):
+            state = optimizer.state['global_state']
+            cum_n_iter = int(state.get('n_iter', 0))
+            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
+            self._lbfgs_prev_n_iter = cum_n_iter
+            # Closure evals are captured in train_epoch for vendored LBFGS
+            evals_this_step = getattr(self, '_last_vendored_closure_eval', float('nan'))
+
+            t_val = float(state.get('t', float('nan')))
+            H_diag = float(state.get('H_diag', float('nan')))
+
+            old_dirs = state.get('old_dirs', [])
+            old_stps = state.get('old_stps', [])
+            n_pairs = len(old_dirs)
+            if n_pairs > 0:
+                sy_vals = []
+                for s, y in zip(old_stps, old_dirs):
+                    try:
+                        sy = float(s.dot(y).item())
+                        if sy != 0.0:
+                            sy_vals.append(sy)
+                    except (TypeError, ValueError):
+                        pass
+                if sy_vals:
+                    sy_min  = min(sy_vals)
+                    sy_max  = max(sy_vals)
+                    sy_last = sy_vals[-1]
+                    sy_mean = sum(sy_vals) / len(sy_vals)
+                else:
+                    sy_min = sy_max = sy_last = sy_mean = float('nan')
+            else:
+                sy_min = sy_max = sy_last = sy_mean = float('nan')
+
+            prev_flat_grad = state.get('prev_flat_grad', None)
+            if prev_flat_grad is not None:
+                try:
+                    grad_norm = float(prev_flat_grad.norm().item())
+                except (RuntimeError, AttributeError):
+                    grad_norm = float('nan')
+            else:
+                grad_norm = float('nan')
+        else:
+            return
+
+        if not self._lbfgs_diag_initialized:
+            try:
+                with open(self._lbfgs_diag_path, "w") as f:
+                    f.write("epoch,iters_this_step,evals_this_step,t,H_diag,"
+                            "n_pairs,grad_norm,sy_min,sy_mean,sy_max,sy_last\n")
+                self._lbfgs_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize lbfgs diag CSV: {}".format(e))
+        try:
+            with open(self._lbfgs_diag_path, "a") as f:
+                f.write("{},{},{},{:.6e},{:.6e},{},{:.6e},"
+                        "{:.6e},{:.6e},{:.6e},{:.6e}\n".format(
+                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
+                    n_pairs, grad_norm, sy_min, sy_mean, sy_max, sy_last,
+                ))
+        except OSError as e:
+            logging.warning("Could not append to lbfgs diag CSV: {}".format(e))
+
+        if is_main_process():
+            logging.info(
+                "[lbfgs-diag] epoch={} | iters={} evals={} t={:.3e} H_diag={:.3e} "
+                "pairs={} grad_norm={:.3e} sy(last/min/max)={:.3e}/{:.3e}/{:.3e}".format(
+                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
+                    n_pairs, grad_norm, sy_last, sy_min, sy_max,
+                )
+            )
+    def log_mgda_diagnostics(self, epoch, alpha, alpha_raw, cos_sim):
+        """Log MGDA+GradNorm diagnostics.
+
+        Args:
+            epoch: current epoch
+            alpha: EMA-smoothed weight for energy objective
+            alpha_raw: raw (unsmoothed) weight from loss-ratio computation
+            cos_sim: cosine similarity between normalized gradients
+        """
+        if not is_main_process():
+            return
+
+        # Get loss EMAs for logging
+        e_loss_ema = self._mgda_energy_loss_ema if self._mgda_energy_loss_ema is not None else 0.0
+        g_loss_ema = self._mgda_gradient_loss_ema if self._mgda_gradient_loss_ema is not None else 0.0
+
+        if not self._mgda_diag_initialized:
+            try:
+                with open(self._mgda_diag_path, "w") as f:
+                    f.write("epoch,alpha,alpha_raw,cos_sim,e_loss_ema,g_loss_ema\n")
+                self._mgda_diag_initialized = True
+            except OSError as e:
+                logging.warning("Could not initialize MGDA diag CSV: {}".format(e))
+
+        try:
+            with open(self._mgda_diag_path, "a") as f:
+                f.write("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}\n".format(
+                    epoch, alpha, alpha_raw, cos_sim, e_loss_ema, g_loss_ema
+                ))
+        except OSError as e:
+            logging.warning("Could not append to MGDA diag CSV: {}".format(e))
+    def log_distributed_diagnostics(self, epoch, loss_local, e_rmse_local,
+                                     n_trust_local=None, n_total_local=None,
+                                     use_trust_region=False):
+        """Log verbose per-rank metrics for distributed training.
+
+        Shows per-rank values + global aggregates to diagnose imbalanced shards,
+        rank drift, or trust region distribution issues.
+
+        Args:
+            epoch: current epoch
+            loss_local: local weighted MSE (before reduce_mean)
+            e_rmse_local: local energy RMSE in cm-1 (before reduce)
+            n_trust_local: number of configs in trust region on this rank (optional)
+            n_total_local: total configs on this rank (optional)
+            use_trust_region: whether to log trust region statistics
+        """
+        if self.world_size <= 1:
+            return
+
+        # Gather values from all ranks
+        losses = all_gather_scalar(float(loss_local), device=DEVICE)
+        rmses = all_gather_scalar(float(e_rmse_local), device=DEVICE)
+        if use_trust_region:
+            trusts = all_gather_scalar(int(n_trust_local), device=DEVICE)
+            totals = all_gather_scalar(int(n_total_local), device=DEVICE)
+
+        # Log verbose multi-line format on rank 0
+        if is_main_process():
+            lines = [f"[dist-diag] epoch={epoch}"]
+            for r in range(self.world_size):
+                if use_trust_region:
+                    trust_pct = 100.0 * trusts[r] / max(totals[r], 1)
+                    lines.append(
+                        f"  rank {r}: E-RMSE={rmses[r]:.2f} cm-1  "
+                        f"trust={int(trusts[r])}/{int(totals[r])} ({trust_pct:.1f}%)  "
+                        f"loss={losses[r]:.3f}"
+                    )
+                else:
+                    lines.append(
+                        f"  rank {r}: E-RMSE={rmses[r]:.2f} cm-1  "
+                        f"loss={losses[r]:.3f}"
+                    )
+            # Global summary
+            avg_loss = sum(losses) / len(losses)
+            if use_trust_region:
+                total_trust = sum(trusts)
+                total_n = sum(totals)
+                global_trust_pct = 100.0 * total_trust / max(total_n, 1)
+                lines.append(
+                    f"  global: E-RMSE=<aggregated above>  "
+                    f"trust={int(total_trust)}/{int(total_n)} ({global_trust_pct:.1f}%)  "
+                    f"loss={avg_loss:.3f}"
+                )
+            else:
+                lines.append(
+                    f"  global: E-RMSE=<aggregated above>  "
+                    f"loss={avg_loss:.3f}"
+                )
+            logging.info("\n".join(lines))
+
+        # Write CSV for post-hoc analysis (all ranks write their own row)
+        if not self._dist_diag_initialized:
+            if is_main_process():
+                try:
+                    with open(self._dist_diag_path, "w") as f:
+                        if use_trust_region:
+                            f.write("epoch,rank,loss_local,e_rmse_local,n_trust,n_total\n")
+                        else:
+                            f.write("epoch,rank,loss_local,e_rmse_local\n")
+                    self._dist_diag_initialized = True
+                except OSError as e:
+                    logging.warning("Could not initialize distributed diag CSV: {}".format(e))
+            barrier()  # Ensure header is written before other ranks append
+            self._dist_diag_initialized = True
+
+        try:
+            with open(self._dist_diag_path, "a") as f:
+                if use_trust_region:
+                    f.write("{},{},{:.6e},{:.6e},{},{}\n".format(
+                        epoch, self.rank, float(loss_local), float(e_rmse_local),
+                        int(n_trust_local), int(n_total_local)
+                    ))
+                else:
+                    f.write("{},{},{:.6e},{:.6e}\n".format(
+                        epoch, self.rank, float(loss_local), float(e_rmse_local)
+                    ))
+        except OSError as e:
+            if is_main_process():
+                logging.warning("Could not append to distributed diag CSV: {}".format(e))
+    def train_model(self):
+        try:
+            # Set device based on mode
+            if self.world_size > 1:
+                self.device = torch.device(f"cuda:{self.local_rank}")
+            else:
+                self.device = DEVICE
+
+            self.model = self.model.to(self.device)
+
+            if self.cfg_solver.get('TORCH_COMPILE', False):
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+                if is_main_process():
+                    logging.info("Model compiled with torch.compile(mode='reduce-overhead')")
+
+            # Wrap with DDP for distributed training (except for LBFGS which uses
+            # explicit gradient sync to avoid race conditions with line search)
+            opt_name = self.cfg_solver['OPTIMIZER']['NAME']
+            if self.world_size > 1 and opt_name != 'LBFGS':
+                self.model = DDP(self.model, device_ids=[self.local_rank])
+                if is_main_process():
+                    logging.info(f"Distributed training enabled: {self.world_size} GPUs (DDP)")
+            elif self.world_size > 1:
+                if is_main_process():
+                    logging.info(f"Distributed training enabled: {self.world_size} GPUs (explicit gradient sync, no DDP)")
+
+            # Initialize TensorBoard only on rank 0 to avoid event-file corruption.
+            if is_main_process():
+                log_dir = os.path.join("runs", self.model_name)
+                self.writer = SummaryWriter(log_dir=log_dir)
+            else:
+                self.writer = None
+
+            # nn.Module.to() moves parameters and buffers, but our loss classes
+            # store plain Tensor attributes (e.g. self.dwt). Move them explicitly.
+            def _move_plain_tensors(mod, device):
+                for k, v in mod.__dict__.items():
+                    if isinstance(v, torch.Tensor) and not isinstance(v, torch.nn.Module):
+                        setattr(mod, k, v.to(device))
+            _move_plain_tensors(self.loss_fn, self.device)
+            if self.regularization is not None:
+                _move_plain_tensors(self.regularization, self.device)
+
+            multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
+
+            if multibatch:
+                # Keep the training set on CPU; each step copies only its batch
+                # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
+                if torch.cuda.is_available():
+                    self.train.X = self.train.X.pin_memory()
+                    self.train.y = self.train.y.pin_memory()
+                    if self.train.dX is not None:
+                        self.train.dX = self.train.dX.pin_memory()
+                        self.train.dy = self.train.dy.pin_memory()
+                # Val stays on GPU for cheap eval.
+                self.val.X = self.val.X.to(self.device)
+                self.val.y = self.val.y.to(self.device)
+            else:
+                self.train.X = self.train.X.to(self.device)
+                self.train.y = self.train.y.to(self.device)
+                self.val.X = self.val.X.to(self.device)
+                self.val.y = self.val.y.to(self.device)
+
+            self.loss_fn = self.loss_fn.to(self.device)
+
+            if self.cfg['TYPE'] == 'DIPOLE':
+                self.train.grm = self.train.grm.to(self.device)
+                self.val.grm   = self.val.grm.to(self.device)
+
+            if self.cfg['TYPE'] == 'DIPOLEQ':
+                self.train.xyz_ordered = self.train.xyz_ordered.to(self.device)
+                self.val.xyz_ordered = self.val.xyz_ordered.to(self.device)
+                self.test.xyz_ordered = self.test.xyz_ordered.to(self.device)
+
+            if self.train.dX is not None and not multibatch:
+                self.train.dX = self.train.dX.to(self.device)
+                self.train.dy = self.train.dy.to(self.device)
+
+                self.val.dX = self.val.dX.to(self.device)
+                self.val.dy = self.val.dy.to(self.device)
+            elif self.train.dX is not None and multibatch:
+                # Only move validation gradient tensors; train stays on pinned CPU.
+                self.val.dX = self.val.dX.to(self.device)
+                self.val.dy = self.val.dy.to(self.device)
+
+
+            if multibatch:
+                self.optimizer = self._build_multibatch_optimizer()
+                self._init_multibatch_sampler()
+            else:
+                self.optimizer = self.build_optimizer(self.cfg_solver['OPTIMIZER'])
+            self.scheduler = self.build_scheduler()
+
+            start = time.time()
+
+            MAX_EPOCHS = self.cfg_solver['MAX_EPOCHS']
+
+            for epoch in range(MAX_EPOCHS):
+                # switch into mixed loss function: E + F
+                if self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None and epoch == self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH']:
+                    self.cfg_loss['USE_GRADIENTS'] = True
+                    self.loss_fn = self.build_loss().to(self.device)
+                    self.loss_fn.set_scale(self.yscaler.mean_, self.yscaler.scale_)
+                    self.gradient_start_epoch = epoch
+
+                    self.es.reset()
+
+                    # Reset L-BFGS curvature history. The stored (s_k, y_k) pairs
+                    # describe the energy-only loss surface and produce degenerate
+                    # search directions on the new energy+gradient surface, causing
+                    # the Wolfe line search to return t=0 indefinitely.
+                    if isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS)):
+                        if isinstance(self.optimizer, torch.optim.LBFGS):
+                            self.optimizer.state.clear()
+                        else:
+                            # vendored LBFGS / FullBatchLBFGS
+                            state = self.optimizer.state['global_state']
+                            state['n_iter'] = 0
+                            state['curv_skips'] = 0
+                            state['fail_skips'] = 0
+                            state['H_diag'] = 1
+                            state['fail'] = True
+                            state['old_dirs'] = []
+                            state['old_stps'] = []
+                            if 'rho' in state:
+                                state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
+                            if 'alpha' in state:
+                                state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
+                        self._lbfgs_prev_n_iter = 0
+                        self._lbfgs_prev_func_evals = 0
+                        self._log("Reset L-BFGS state at gradient inclusion (epoch {})".format(epoch))
+
+                    # Reset LR to initial value so the optimizer has full step
+                    # budget to explore the new loss landscape.
+                    initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
+                    for pg in self.optimizer.param_groups:
+                        pg['lr'] = initial_lr
+                    self.scheduler = self.build_scheduler()
+                    self._log("Reset LR to {} and rebuilt scheduler at gradient inclusion".format(initial_lr))
+
+                # Progressive G_LAMBDA ramp
+                if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('G_LAMBDA_RAMP_EPOCHS', 0) > 0:
+                    ramp_epochs = self.cfg_loss['G_LAMBDA_RAMP_EPOCHS']
+                    start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
+                    progress = (epoch - start_epoch) / ramp_epochs
+                    progress = max(0.0, min(1.0, progress))
+                    target_g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
+                    current_g_lambda = target_g_lambda * progress
+                    self.loss_fn.g_lambda = torch.tensor(current_g_lambda).to(self.device)
+                    if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                        self._log("G_LAMBDA ramp: epoch {}, progress {:.1%}, g_lambda = {:.4f}".format(epoch, progress, current_g_lambda))
+
+                # Progressive trust-threshold annealing
+                if self.cfg_loss['USE_GRADIENTS'] and self.cfg_loss.get('TRUST_THRESHOLD_RAMP_EPOCHS', 0) > 0:
+                    ramp_epochs = self.cfg_loss['TRUST_THRESHOLD_RAMP_EPOCHS']
+                    start_epoch = self.gradient_start_epoch if self.gradient_start_epoch is not None else 0
+                    progress = (epoch - start_epoch) / ramp_epochs
+                    progress = max(0.0, min(1.0, progress))
+                    target_threshold = self.cfg_loss.get('TRUST_THRESHOLD', 50.0)
+                    start_threshold = self.cfg_loss.get('TRUST_THRESHOLD_START', target_threshold)
+                    self.current_trust_threshold = start_threshold + (target_threshold - start_threshold) * progress
+                    if epoch % PRINT_TRAINING_STEPS == 0 or epoch == start_epoch or epoch == start_epoch + ramp_epochs:
+                        self._log("Trust-threshold anneal: epoch {}, progress {:.1%}, threshold = {:.1f}".format(epoch, progress, self.current_trust_threshold))
+                else:
+                    self.current_trust_threshold = None
+
+                # Periodic L-BFGS curvature reset. The combined energy+gradient
+                # surface evolves as G_LAMBDA ramps; stale curvature pairs cause
+                # the Wolfe line search to return t=0. Clearing the history gradients
+                # steepest-descent restart and fresh curvature accumulation.
+                lbfgs_reset_interval = self.cfg_solver['OPTIMIZER'].get(
+                    'LBFGS_RESET_INTERVAL', 0
+                )
+                if (lbfgs_reset_interval > 0
+                        and self.cfg_loss['USE_GRADIENTS']
+                        and isinstance(self.optimizer, (torch.optim.LBFGS, HjmshiLBFGS, HjmshiFullBatchLBFGS))
+                        and epoch > self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0)
+                        and (epoch - self.cfg_loss.get('USE_GRADIENTS_AFTER_EPOCH', 0))
+                            % lbfgs_reset_interval == 0):
+                    if isinstance(self.optimizer, torch.optim.LBFGS):
+                        self.optimizer.state.clear()
+                    else:
+                        state = self.optimizer.state['global_state']
+                        state['n_iter'] = 0
+                        state['curv_skips'] = 0
+                        state['fail_skips'] = 0
+                        state['H_diag'] = 1
+                        state['fail'] = True
+                        state['old_dirs'] = []
+                        state['old_stps'] = []
+                        if 'rho' in state:
+                            state['rho'] = [None] * self.optimizer.param_groups[0]['history_size']
+                        if 'alpha' in state:
+                            state['alpha'] = [None] * self.optimizer.param_groups[0]['history_size']
+                    self._lbfgs_prev_n_iter = 0
+                    self._lbfgs_prev_func_evals = 0
+                    self._log("Periodic L-BFGS state reset (epoch {})".format(epoch))
+
+                    # Optionally reset LR to initial value on L-BFGS reset
+                    if self.cfg_solver['OPTIMIZER'].get('LR_RESET_ON_LBFGS_RESET', False):
+                        initial_lr = self.cfg_solver['OPTIMIZER'].get('LR', 0.1)
+                        for pg in self.optimizer.param_groups:
+                            pg['lr'] = initial_lr
+                        self.scheduler = self.build_scheduler()
+                        self._log("Reset LR to {} and rebuilt scheduler".format(initial_lr))
+
+                self._log("loss function: {}".format(self.loss_fn))
+
+                if bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False)):
+                    self.train_epoch_multibatch(epoch, self.optimizer)
+                else:
+                    self.train_epoch(epoch, self.optimizer)
+
+                # Step scheduler - ReduceLROnPlateau requires metric, CosineAnnealing does not
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(self.loss_val)
+                else:
+                    self.scheduler.step()
+
+                if epoch % PRINT_TRAINING_STEPS == 0:
+                    end = time.time()
+                    self._log("Elapsed time: {:.0f}s\n".format(end - start))
+
+                # writing all pending events to disk
+                if self.writer is not None:
+                    self.writer.flush()
+
+                # pass loss values to EarlyStopping mechanism 
+                self.es(epoch, self.loss_val, self.model, self.xscaler, self.yscaler, meta_info=self.meta_info)
+
+                if self.es.status:
+                    self._log("Invoking early stop.")
+                    break
+
+            if self.loss_val < self.es.best_score:
+                save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
+
+            self._log("\nReloading best model from the last checkpoint")
+
+            self.reset_weights()
+            checkpoint = torch.load(self.chk_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint["model"])
+
+            if is_main_process() and getattr(self, 'writer', None) is not None:
+                self.writer.close()
+            return self.model
+        except Exception:
+            if is_main_process() and getattr(self, 'writer', None) is not None:
+                self.writer.close()
+            raise
+
+
+    def train_epoch(self, epoch, optimizer):
+        CLOSURE_CALL_COUNT = 0
+        debug_closure = self.cfg_debug.get('CLOSURE', False)
+
+        # Precompute trust-region mask once per epoch so that the objective
+        # stays fixed during the LBFGS step. Recomputing it inside the closure
+        # breaks the line search because the loss landscape changes between
+        # closure evaluations.
+        use_trust_region = False
+        trust_indices = None
+        n_in_trust = 0
+        X_subset = None
+        dX_subset = None
+        train_dy_subset = None
+        gradient_weights = None
+        energy_errors = None
+        trust_mask = None
+
+        if self.cfg_loss['USE_GRADIENTS']:
+            trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
+            if trust_threshold is not None:
+                use_trust_region = True
+                trust_indices, trust_mask, energy_errors, gradient_weights = \
+                    self.compute_trust_mask(self.train)
+                n_in_trust = len(trust_indices)
+
+                if n_in_trust > 0:
+                    X_subset = self.train.X[trust_indices].clone()
+                    X_subset.requires_grad = True
+                    dX_subset = self.train.dX[trust_indices]
+                    train_dy_subset = self.train.dy[trust_indices]
+
+                # Aggregate trust region stats across ranks for correct logging
+                n_in_trust_t = torch.tensor(n_in_trust, dtype=torch.float32, device=DEVICE)
+                n_total_t = torch.tensor(len(self.train.X), dtype=torch.float32, device=DEVICE)
+                err_min_t = energy_errors.min()
+                err_max_t = energy_errors.max()
+                if self.world_size > 1:
+                    n_in_trust_global = int(reduce_sum(n_in_trust_t).item())
+                    n_total_global = int(reduce_sum(n_total_t).item())
+                    err_min_global = reduce_min(err_min_t).item()
+                    err_max_global = torch.tensor(err_max_t.item(), device=DEVICE)
+                    dist.all_reduce(err_max_global, op=dist.ReduceOp.MAX)
+                    err_max_global = err_max_global.item()
+                else:
+                    n_in_trust_global = n_in_trust
+                    n_total_global = len(self.train.X)
+                    err_min_global = err_min_t.item()
+                    err_max_global = err_max_t.item()
+                frac_global = 100.0 * n_in_trust_global / max(n_total_global, 1)
+
+                if n_in_trust > 0:
+                    phi_sum_t = gradient_weights.sum()
+                    phi_sum_global = reduce_sum(phi_sum_t).item() if self.world_size > 1 else phi_sum_t.item()
+                    grad_trust_enabled = self.cfg_loss.get('GRADIENT_TRUST_THRESHOLD') is not None
+                    label = "soft+grad" if grad_trust_enabled else "soft"
+                    self._log(
+                        "Trust region ({}): {}/{} configs ({:.1f}%) | "
+                        "energy err: min={:.1f}, max={:.1f}, med={:.1f} | "
+                        "weights: min={:.3f}, mean={:.3f}, sum={:.1f}".format(
+                            label,
+                            n_in_trust_global, n_total_global, frac_global,
+                            err_min_global, err_max_global,
+                            energy_errors.median().item(),
+                            gradient_weights.min().item(), gradient_weights.mean().item(),
+                            phi_sum_global))
+                else:
+                    self._log(
+                        "Trust region: 0/{} configs (0.0%) | "
+                        "energy err: min={:.1f}, max={:.1f}, med={:.1f}".format(
+                            n_total_global,
+                            err_min_global, err_max_global,
+                            energy_errors.median().item()))
+
+                # Run trust-region diagnostics (churn + eviction signal).
+                self.log_trust_region_diagnostics(
+                    epoch, trust_mask, energy_errors, gradient_weights
+                )
+
+        def _compute_loss(separate=False):
+            """Compute training loss.
+
+            Args:
+                separate: If True and using gradients with trust region,
+                         return (energy_loss, gradient_loss) tuple for MGDA.
+                         Otherwise return combined loss.
+            """
+            if self.cfg_loss['USE_GRADIENTS']:
+                if use_trust_region:
+                    if n_in_trust > 0:
+                        y_pred_subset = self.model(X_subset)
+                        train_dy_pred_subset = self.compute_gradients_from_energy(
+                            X_subset, dX_subset, y_pred_subset
+                        )
+                        train_y_pred = self.model(self.train.X)
+                        if separate:
+                            energy_loss, gradient_loss = self.loss_fn.forward_separate(
+                                self.train.y, train_y_pred,
+                                train_dy_subset, train_dy_pred_subset,
+                                trust_indices, gradient_weights
+                            )
+                            # Add regularization to energy loss (it's model complexity, not gradient fitting)
+                            if self.regularization is not None:
+                                energy_loss = energy_loss + self.regularization(self.model)
+                            return energy_loss, gradient_loss
+                        else:
+                            loss = self.loss_fn(
+                                self.train.y, train_y_pred,
+                                train_dy_subset, train_dy_pred_subset,
+                                trust_indices, gradient_weights
+                            )
+                    else:
+                        # No configs in trust region yet - energy only
+                        train_y_pred = self.model(self.train.X)
+                        loss = self.loss_fn.forward_energy_only(self.train.y, train_y_pred)
+                        if separate:
+                            if self.regularization is not None:
+                                loss = loss + self.regularization(self.model)
+                            return loss, torch.tensor(0.0, device=DEVICE)
+                else:
+                    # Original approach: compute gradients for ALL configs
+                    train_y_pred, train_dy_pred = self.compute_gradients(self.train)
+                    if separate:
+                        energy_loss, gradient_loss = self.loss_fn.forward_separate(
+                            self.train.y, train_y_pred, self.train.dy, train_dy_pred
+                        )
+                        if self.regularization is not None:
+                            energy_loss = energy_loss + self.regularization(self.model)
+                        return energy_loss, gradient_loss
+                    loss = self.loss_fn(self.train.y, train_y_pred, self.train.dy, train_dy_pred)
+
+            elif self.cfg['TYPE'] == 'DIPOLE':
+                y_pred = self.model(self.train.X)
+                dip_pred = torch.einsum('ijk,ik->ij', self.train.grm, y_pred)
+                loss = self.loss_fn(self.train.y, dip_pred)
+
+            elif self.cfg['TYPE'] == 'DIPOLEQ':
+                q_pred   = self.model(self.train.X)
+                X_inf    = torch.zeros_like(self.train.X).cpu()
+                X_inf_tr = torch.from_numpy(self.xscaler.transform(X_inf)).to(self.device)
+                q_inf    = self.model(X_inf_tr)
+                q_corr   = q_pred - q_inf
+                dip_pred = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), q_corr)
+                qsum     = torch.sum(q_corr, dim=1)
+                qreg     = self.cfg_loss['LAMBDA_Q'] * torch.mean(qsum * qsum)
+                loss     = self.loss_fn(self.train.y, dip_pred)
+                loss = loss + qreg
+
+            elif self.cfg['TYPE'] == 'DIPOLEC':
+                dip_pred = self.model(self.train.X)
+                loss = self.loss_fn(self.train.y, dip_pred)
+
+            elif self.cfg['TYPE'] == 'ENERGY':
+                y_pred = self.model(self.train.X)
+                loss = self.loss_fn(self.train.y, y_pred)
+
+            else:
+                assert False, "unreachable"
+
+            if self.regularization is not None:
+                loss = loss + self.regularization(self.model)
+            return loss
+
+        def closure():
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+            loss = _compute_loss()
+            loss.backward()
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+            # Synchronize loss across ranks so L-BFGS line search makes
+            # identical decisions on every process.
+            if self.world_size > 1:
+                loss = reduce_mean(loss.detach())
+            return loss
+
+        def closure_no_backward():
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+            loss = _compute_loss()
+            return loss
+
+        # MGDA (Multi-objective Gradient Descent Algorithm) closure
+        # Computes optimal combination of energy and gradient loss gradients
+        # MGDA is only active when gradients are currently being used
+        use_mgda = (self.cfg_loss.get('USE_MGDA', False)
+                    and self.cfg_loss['USE_GRADIENTS'])
+        mgda_alpha_min = self.cfg_loss.get('MGDA_ALPHA_MIN', 0.1)
+        mgda_alpha_max = self.cfg_loss.get('MGDA_ALPHA_MAX', 0.9)
+        mgda_ema_decay = self.cfg_loss.get('MGDA_EMA_DECAY', 0.9)
+        _mgda_alpha_raw = [None]  # Mutable container for closure
+        _mgda_alpha = [None]
+        _mgda_cos_sim = [None]
+
+        def closure_mgda():
+            """MGDA+GradNorm closure: normalized gradients + adaptive alpha from loss ratios."""
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            optimizer.zero_grad()
+
+            # Compute separate losses
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: computing separate losses")
+            energy_loss, gradient_loss = _compute_loss(separate=True)
+
+            # Update loss EMAs for adaptive alpha computation
+            energy_loss_val = energy_loss.detach().item()
+            gradient_loss_val = gradient_loss.detach().item()
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: e_loss={energy_loss_val:.4f}, g_loss={gradient_loss_val:.4f}")
+
+            if self._mgda_energy_loss_ema is None:
+                self._mgda_energy_loss_ema = energy_loss_val
+                self._mgda_gradient_loss_ema = gradient_loss_val
+            else:
+                self._mgda_energy_loss_ema = (mgda_ema_decay * self._mgda_energy_loss_ema +
+                                              (1 - mgda_ema_decay) * energy_loss_val)
+                self._mgda_gradient_loss_ema = (mgda_ema_decay * self._mgda_gradient_loss_ema +
+                                                (1 - mgda_ema_decay) * gradient_loss_val)
+
+            # Backward pass for energy gradient
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: energy backward START")
+            energy_loss.backward(retain_graph=True)
+            g_energy = flatten_gradients(self.model)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: energy backward DONE, g_energy norm={g_energy.norm().item():.4f}")
+
+            # Backward pass for gradient loss gradient
+            optimizer.zero_grad()
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: gradient backward START")
+            gradient_loss.backward()
+            g_gradient = flatten_gradients(self.model)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda: gradient backward DONE, g_gradient norm={g_gradient.norm().item():.4f}")
+
+            # Sync gradients across ranks before computing weights
+            if self.world_size > 1:
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] closure_mgda: all_reduce START")
+                dist.all_reduce(g_energy, op=dist.ReduceOp.SUM)
+                g_energy = g_energy / self.world_size
+                dist.all_reduce(g_gradient, op=dist.ReduceOp.SUM)
+                g_gradient = g_gradient / self.world_size
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] closure_mgda: all_reduce DONE")
+
+            # Compute GradNorm weights: normalized gradients + adaptive alpha from loss ratios
+            alpha_raw, cos_sim, combined_grad = compute_mgda_alpha(
+                g_energy, g_gradient,
+                mgda_alpha_min, mgda_alpha_max,
+                energy_loss=energy_loss_val,
+                gradient_loss=gradient_loss_val,
+                ema_energy_loss=self._mgda_energy_loss_ema,
+                ema_gradient_loss=self._mgda_gradient_loss_ema
+            )
+
+            # EMA smoothing of alpha to prevent oscillation
+            if self._mgda_alpha_ema is None:
+                alpha = alpha_raw
+                self._mgda_alpha_ema = alpha.item()
+            else:
+                alpha = mgda_ema_decay * self._mgda_alpha_ema + (1 - mgda_ema_decay) * alpha_raw.item()
+                self._mgda_alpha_ema = alpha
+                alpha = torch.tensor(alpha, device=g_energy.device)
+
+            # Store for diagnostics
+            _mgda_alpha_raw[0] = alpha_raw.item()
+            _mgda_alpha[0] = alpha.item() if isinstance(alpha, torch.Tensor) else alpha
+            _mgda_cos_sim[0] = cos_sim.item()
+
+            # Set the combined normalized gradient
+            set_gradients(self.model, combined_grad)
+
+            # Gradient clipping on combined gradient
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+            # Return combined loss for L-BFGS line search
+            combined_loss = alpha * energy_loss.detach() + (1 - alpha) * gradient_loss.detach()
+            if self.world_size > 1:
+                combined_loss = reduce_mean(combined_loss)
+            return combined_loss
+
+        def closure_mgda_no_backward():
+            """MGDA closure for line search (backward may be called by vendored LBFGS)."""
+            nonlocal CLOSURE_CALL_COUNT
+            CLOSURE_CALL_COUNT = CLOSURE_CALL_COUNT + 1
+            if debug_closure: 
+                logging.info(f"[rank {self.rank}] closure_mgda_no_backward: call #{CLOSURE_CALL_COUNT}")
+            optimizer.zero_grad()
+            energy_loss, gradient_loss = _compute_loss(separate=True)
+            # Use current EMA alpha for consistent loss evaluation
+            alpha = self._mgda_alpha_ema if self._mgda_alpha_ema is not None else 0.5
+            combined_loss = alpha * energy_loss + (1 - alpha) * gradient_loss
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] closure_mgda_no_backward: done, loss={combined_loss.item():.4f}")
+            return combined_loss
+
+        # Calling model.train() will change the behavior of some layers such as nn.Dropout and nn.BatchNormXd
+        self.model.train()
+
+        # Reset focal weighting flag to allow one error_scale update per optimizer step
+        # (prevents non-deterministic loss during LBFGS line search)
+        if hasattr(self.loss_fn, 'reset_error_scale_flag'):
+            self.loss_fn.reset_error_scale_flag()
+
+        start_time = timeit.default_timer()
+        if isinstance(optimizer, HjmshiFullBatchLBFGS):
+            # Vendored FullBatchLBFGS for distributed training.
+            if use_mgda:
+                # MGDA mode: use MGDA closures that compute optimal gradient combination
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] vendored LBFGS (MGDA): about to call initial closure_mgda")
+                loss = closure_mgda()  # This sets gradients via MGDA
+                if debug_closure:
+                    logging.info(f"[rank {self.rank}] vendored LBFGS (MGDA): initial closure_mgda done, loss={loss.item():.4f}")
+                # Note: closure_mgda already syncs gradients and applies clipping
+                # Build grad_sync closure that captures self.model
+                def _grad_sync():
+                    if debug_closure:
+                        logging.info(f"[rank {self.rank}] _grad_sync: START")
+                    sync_gradients(self.model)
+                    if debug_closure:
+                        logging.info(f"[rank {self.rank}] _grad_sync: DONE")
+                options = {
+                    'closure': closure_mgda_no_backward,
+                    'current_loss': loss,
+                    'grad_clip_norm': None,  # Already applied in closure_mgda
+                    'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
+                    'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
+                }
+            else:
+                # Standard mode
+                # Pre-compute loss & gradient at the current iterate.
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: zero_grad")
+                optimizer.zero_grad()
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: closure_no_backward")
+                loss = closure_no_backward()
+                logging.debug(f"[rank {self.rank}] vendored LBFGS: backward (loss={loss.item():.4f})")
+                loss.backward()
+                # Explicit gradient sync - don't rely on DDP's implicit async sync
+                if self.world_size > 1:
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients START")
+                    sync_gradients(self.model)
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: sync_gradients DONE")
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                if self.world_size > 1:
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean START")
+                    loss = reduce_mean(loss.detach())
+                    logging.debug(f"[rank {self.rank}] vendored LBFGS: reduce_mean DONE")
+                # Build grad_sync closure that captures self.model
+                def _grad_sync():
+                    sync_gradients(self.model)
+                options = {
+                    'closure': closure_no_backward,
+                    'current_loss': loss,
+                    'grad_clip_norm': self.grad_clip_norm,
+                    'loss_sync_fn': reduce_mean if self.world_size > 1 else None,
+                    'grad_sync_fn': _grad_sync if self.world_size > 1 else None,
+                }
+            # Add line search options from config
+            if hasattr(self, '_lbfgs_ls_options'):
+                options.update(self._lbfgs_ls_options)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] vendored LBFGS: calling optimizer.step()")
+            obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+            if debug_closure:
+                logging.info(f"[rank {self.rank}] vendored LBFGS: optimizer.step() done, evals={closure_eval}")
+            self._last_vendored_closure_eval = closure_eval + 1  # +1 for the initial evaluation above
+            CLOSURE_CALL_COUNT = self._last_vendored_closure_eval
+            elapsed = timeit.default_timer() - start_time
+            self._log("Optimizer makes step in {:.2f}s".format(elapsed))
+            self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+        else:
+            # Non-vendored optimizer (e.g., torch.optim.LBFGS)
+            if use_mgda:
+                optimizer.step(closure_mgda)
+            else:
+                optimizer.step(closure)
+            elapsed = timeit.default_timer() - start_time
+            self._log("Optimizer makes step in {:.2f}s".format(elapsed))
+            self._log("CLOSURE_CALL_COUNT = {}".format(CLOSURE_CALL_COUNT))
+
+        current_lr = optimizer.param_groups[0]['lr']
+        self._log("(optimizer) current lr: {}".format(current_lr))
+
+        # LBFGS line-search telemetry (no-op for non-LBFGS optimizers).
+        self.log_lbfgs_diagnostics(epoch, optimizer)
+
+        # MGDA diagnostics logging
+        if use_mgda and _mgda_alpha[0] is not None:
+            self._log("(MGDA) alpha={:.4f} (raw={:.4f}), cos_sim={:.4f}".format(
+                _mgda_alpha[0], _mgda_alpha_raw[0], _mgda_cos_sim[0]))
+            self.log_mgda_diagnostics(epoch, _mgda_alpha[0], _mgda_alpha_raw[0], _mgda_cos_sim[0])
+
+        # Calling model.eval() will change the behavior of some layers, 
+        # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
+        self.model.eval()
+
+        if self.cfg_loss['USE_GRADIENTS']:
+            # Use memory-efficient gradient evaluation (no create_graph)
+            train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
+            val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
+
+            # Compute energy metrics directly (works with any loss function)
+            # Compute local values first, then aggregate via reduce_rmse/reduce_mae
+            train_e_d    = self.loss_fn.descale_energies(self.train.y)
+            train_e_pred = self.loss_fn.descale_energies(train_y_pred)
+            train_e_errors = (train_e_d - train_e_pred).view(-1)
+            train_e_rmse_local = torch.sqrt(torch.mean(train_e_errors ** 2)).item()
+            train_e_mae  = reduce_mae(train_e_errors)
+            train_e_rmse = reduce_rmse(train_e_errors)
+
+            val_e_d    = self.loss_fn.descale_energies(self.val.y)
+            val_e_pred = self.loss_fn.descale_energies(val_y_pred)
+            val_e_errors = (val_e_d - val_e_pred).view(-1)
+            val_e_rmse_local = torch.sqrt(torch.mean(val_e_errors ** 2)).item()
+            val_e_mae  = reduce_mae(val_e_errors)
+            val_e_rmse = reduce_rmse(val_e_errors)
+
+            # Compute gradient metrics directly (per-component errors for RMSE/MAE)
+            natoms   = self.train.NATOMS
+            train_dy = self.train.dy.reshape(-1, 3 * natoms)
+            val_dy   = self.val.dy.reshape(-1, 3 * natoms)
+            train_g_errors = (train_dy - train_dy_pred).view(-1)
+            val_g_errors   = (val_dy - val_dy_pred).view(-1)
+            train_g_mae  = reduce_mae(train_g_errors)
+            val_g_mae    = reduce_mae(val_g_errors)
+            train_g_rmse = reduce_rmse(train_g_errors)
+            val_g_rmse   = reduce_rmse(val_g_errors)
+
+            # Snapshot per-config train gradient RMSE for next-epoch trust-region
+            # diagnostics (eviction signal: do "left" configs have higher
+            # gradient errors than "stayed" configs?).
+            with torch.no_grad():
+                per_config_f_rmse = torch.sqrt(
+                    torch.sum((train_dy - train_dy_pred) ** 2, dim=1) / (3 * natoms)
+                ).detach()
+                self._prev_train_gradient_errors = per_config_f_rmse
+
+            # Per-config gradient-loss contribution + phi histogram on the active set.
+            if use_trust_region and trust_indices is not None and n_in_trust > 0:
+                self.log_gradient_loss_diagnostics(
+                    epoch, train_dy, train_dy_pred,
+                    train_e_d, train_e_pred,
+                    trust_indices, gradient_weights,
+                )
+
+            # Compute weighted loss values for logging (energy component only for scheduler)
+            # Sync minimum across ranks for consistent weighting in distributed mode
+            enmin_train = reduce_min(train_e_d.min())
+            w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
+            loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
+
+            enmin_val = reduce_min(val_e_d.min())
+            w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
+            loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
+
+            # Log verbose per-rank diagnostics before reducing
+            if self.world_size > 1:
+                self.log_distributed_diagnostics(
+                    epoch,
+                    loss_local=loss_val_e.item(),
+                    e_rmse_local=val_e_rmse_local,
+                    n_trust_local=n_in_trust if use_trust_region else None,
+                    n_total_local=len(self.train.X) if use_trust_region else None,
+                    use_trust_region=use_trust_region
+                )
+
+            # Reduce weighted losses across ranks for scheduler / early stopping.
+            # (MAE/RMSE already aggregated via reduce_mae/reduce_rmse above)
+            if self.world_size > 1:
+                loss_train_e = reduce_mean(loss_train_e)
+                loss_val_e   = reduce_mean(loss_val_e)
+
+            self._log("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
+                                           (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
+                                           (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE val:   {:.3f} cm-1; (gradient) RMSE val:   {:.3f} cm-1/bohr".format(
+                epoch, loss_train_e, loss_val_e, train_e_mae, train_g_mae, val_e_mae, val_g_mae, train_e_rmse, train_g_rmse, val_e_rmse, val_g_rmse
+            ))
+
+            # value to be passed to EarlyStopping/ReduceLR mechanisms
+            self.loss_val = loss_val_e
+
+            if self.writer is not None:
+                self.writer.add_scalar("loss/train", loss_train_e, epoch)
+                self.writer.add_scalar("loss/val", loss_val_e, epoch)
+
+            # log metrics to WANDB to visualize model performance
+            if is_main_process() and USE_WANDB:
+                wandb.log({
+                    "loss_train_e" : loss_train_e, "loss_val_e" : loss_val_e,
+                    "train_e_mae" : train_e_mae, "train_e_rmse" : train_e_rmse, "val_e_mae" : val_e_mae, "val_e_rmse" : val_e_rmse,
+                    "train_g_mae" : train_g_mae, "train_g_rmse" : train_g_rmse, "val_g_mae" : val_g_mae, "val_g_rmse" : val_g_rmse,
+                    "lr" : current_lr})
+
+
+        elif self.cfg['TYPE'] == 'DIPOLE':
+            with torch.no_grad():
+                train_y_pred   = self.model(self.train.X)
+                dip_pred_train = torch.einsum('ijk,ik->ij', self.train.grm, train_y_pred)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_y_pred   = self.model(self.val.X)
+                dip_pred_val = torch.einsum('ijk,ik->ij', self.val.grm, val_y_pred)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
+
+                if self.world_size > 1:
+                    # DIPOLE mode: use loss as proxy for RMSE, no trust region
+                    self.log_distributed_diagnostics(
+                        epoch,
+                        loss_local=loss_val.item(),
+                        e_rmse_local=loss_val.item(),  # Use loss as proxy
+                        use_trust_region=False
+                    )
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
+            # log metrics to WANDB to visualize model performance
+            if is_main_process() and USE_WANDB:
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val})
+
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+
+        elif self.cfg['TYPE'] == 'DIPOLEQ':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                train_q_pred   = self.model(self.train.X)
+                train_X_inf    = torch.zeros_like(self.train.X).cpu()
+                train_X_inf_tr = torch.from_numpy(self.xscaler.transform(train_X_inf)).to(self.device)
+                train_q_inf    = self.model(train_X_inf_tr)
+                train_q_corr   = train_q_pred - train_q_inf
+                dip_pred_train = torch.einsum('ijk,ij->ik', self.train.xyz_ordered.to(TORCH_FLOAT), train_q_corr)
+                loss_train     = self.loss_fn(self.train.y, dip_pred_train)
+
+                val_q_pred   = self.model(self.val.X)
+                val_X_inf    = torch.zeros_like(self.val.X).cpu()
+                val_X_inf_tr = torch.from_numpy(self.xscaler.transform(val_X_inf)).to(self.device)
+                val_q_inf    = self.model(val_X_inf_tr)
+                val_q_corr   = val_q_pred - val_q_inf
+                dip_pred_val = torch.einsum('ijk,ij->ik', self.val.xyz_ordered.to(TORCH_FLOAT), val_q_corr)
+                loss_val     = self.loss_fn(self.val.y, dip_pred_val)
+
+                train_qsum = torch.sum(train_q_corr, dim=1)
+                train_qreg = self.cfg_loss['LAMBDA_Q'] * torch.mean(train_qsum * train_qsum)
+                val_qsum   = torch.sum(val_q_corr, dim=1)
+                val_qreg   = self.cfg_loss['LAMBDA_Q'] * torch.mean(val_qsum * val_qsum)
+
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+                    train_qreg = reduce_mean(train_qreg)
+                    val_qreg   = reduce_mean(val_qreg)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
+            # log metrics to WANDB to visualize model performance
+            if is_main_process() and USE_WANDB:
+                wandb.log({"loss_train": loss_train, "loss_val": loss_val, "train_qreg": train_qreg, "val_qreg": val_qreg, "lr" : current_lr})
+
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; qreg train: {3:{1}f}; loss val: {4:.{1}f}; qreg val: {5:.{1}f}".format(
+                epoch, PRINT_PRECISION, loss_train, train_qreg, loss_val, val_qreg
+            ))
+
+        elif self.cfg['TYPE'] == 'DIPOLEC':
+            with torch.no_grad():
+                train_dip_pred = self.model(self.train.X)
+                loss_train = self.loss_fn(self.train.y, train_dip_pred)
+
+                val_dip_pred = self.model(self.val.X)
+                loss_val = self.loss_fn(self.val.y, val_dip_pred)
+
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
+                self.loss_val = loss_val
+
+            self._log("Epoch: {0}; loss train: {2:.{1}f}; loss val: {3:.{1}f}".format(epoch, PRINT_PRECISION, loss_train, loss_val))
+
+        elif self.cfg['TYPE'] == 'ENERGY':
+            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
+            # or wrap the forward pass into with torch.no_grad().
+            with torch.no_grad():
+                train_y_pred = self.model(self.train.X)
+                loss_train   = self.loss_fn(self.train.y, train_y_pred)
+
+                val_y_pred = self.model(self.val.X)
+                loss_val   = self.loss_fn(self.val.y, val_y_pred)
+
+                if self.world_size > 1:
+                    loss_train = reduce_mean(loss_train)
+                    loss_val   = reduce_mean(loss_val)
+
+                # value to be passed to EarlyStopping/ReduceLR mechanisms
+                self.loss_val = loss_val
+
+            # tensorboard writer
+            if self.writer is not None:
+                self.writer.add_scalar("loss/train", loss_train, epoch)
+                self.writer.add_scalar("loss/val", loss_val, epoch)
+                self.writer.add_scalar("lr", current_lr, epoch)
+
+            # log metrics to WANDB to visualize model performance
+            if is_main_process() and USE_WANDB:
+                wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr})
+
+            self._log("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1; lr: {4:.2e}".format(epoch, PRINT_PRECISION, loss_train, loss_val, current_lr))
+
+        else:
+            assert False, "unreachable"
+    def _build_multibatch_optimizer(self):
+        mode = self.cfg_batch['MODE']
+        lr = float(self.cfg_batch['LR'])
+        history_size = int(self.cfg_batch['HISTORY_SIZE'])
+
+        if mode == 'multi_batch':
+            line_search = 'None'   # fixed steplength; Powell damping handles curvature.
+            opt_cls = HjmshiLBFGS
+        else:
+            line_search = self.cfg_batch['LINE_SEARCH']
+            opt_cls = HjmshiFullBatchLBFGS
+
+        opt = opt_cls(
+            self.model.parameters(),
+            lr=lr,
+            history_size=history_size,
+            line_search=line_search,
+            debug=False,
+        )
+        self._log(
+            "Built multi-batch LBFGS: mode={} lr={} history_size={} line_search={}".format(
+                mode, lr, history_size, line_search
+            )
+        )
+        return opt
+    def _init_multibatch_sampler(self):
+        n = self.train.X.shape[0]
+        B = int(self.cfg_batch['BATCH_SIZE'])
+        seed = int(self.cfg_batch['SEED'])
+        mode = self.cfg_batch['MODE']
+        if mode == 'multi_batch':
+            self.sampler = MultiBatchSampler(
+                n_samples=n,
+                batch_size=B,
+                overlap_fraction=float(self.cfg_batch['OVERLAP_FRACTION']),
+                seed=seed,
+            )
+        elif self.world_size > 1:
+            # Distributed mode: each rank gets a slice of the batch
+            self.sampler = DistributedFullOverlapSampler(
+                n_samples=n,
+                batch_size=B,
+                rank=self.rank,
+                world_size=self.world_size,
+                seed=seed,
+            )
+        else:
+            # Single GPU mode
+            self.sampler = FullOverlapSampler(
+                n_samples=n,
+                batch_size=B,
+                seed=seed,
+            )
+        if is_main_process():
+            dist_info = f" (distributed: {self.world_size} ranks)" if self.world_size > 1 else ""
+            logging.info(
+                "Initialized sampler: mode={} N={} batch_size={} steps/epoch={}{}".format(
+                    mode, n, B, self.sampler.steps_per_epoch(), dist_info
+                )
+            )
+    def _gather_batch(self, idx):
+        """Move one batch of (X, y[, dX, dy]) to DEVICE. Returns a plain dict."""
+        use_grad = self.cfg_loss['USE_GRADIENTS']
+        non_blocking = torch.cuda.is_available()
+
+        X_cpu = self.train.X[idx]
+        y_cpu = self.train.y[idx]
+        X = X_cpu.to(self.device, non_blocking=non_blocking)
+        y = y_cpu.to(self.device, non_blocking=non_blocking)
+
+        batch = {'X': X, 'y': y}
+        if use_grad:
+            dX_cpu = self.train.dX[idx]
+            dy_cpu = self.train.dy[idx]
+            batch['dX'] = dX_cpu.to(self.device, non_blocking=non_blocking)
+            batch['dy'] = dy_cpu.to(self.device, non_blocking=non_blocking)
+        return batch
+    def _loss_and_flat_grad(self, batch):
+        """Forward + backward on one batch; returns (loss_tensor, flat_grad)."""
+        self.optimizer.zero_grad()
+
+        if self.cfg_loss['USE_GRADIENTS']:
+            X = batch['X'].clone()
+            X.requires_grad = True
+            y_pred = self.model(X)
+            dy_pred = self.compute_gradients_from_energy(X, batch['dX'], y_pred)
+            loss = self.loss_fn(batch['y'], y_pred, batch['dy'], dy_pred)
+        else:
+            y_pred = self.model(batch['X'])
+            loss = self.loss_fn(batch['y'], y_pred)
+
+        if self.regularization is not None:
+            loss = loss + self.regularization(self.model)
+
+        loss.backward()
+
+        if self.grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+        flat_grad = self.optimizer._gather_flat_grad()
+        return loss, flat_grad
+    def _make_closure(self, batch):
+        """Factory closure for Wolfe/Armijo line search.
+
+        Returns a callable with no arguments that recomputes the objective on
+        the *same* batch each call -- hjmshi's LBFGS expects the closure to
+        return a scalar tensor (no backward inside).
+        """
+        def closure():
+            self.optimizer.zero_grad()
+            if self.cfg_loss['USE_GRADIENTS']:
+                X = batch['X'].clone()
+                X.requires_grad = True
+                y_pred = self.model(X)
+                dy_pred = self.compute_gradients_from_energy(X, batch['dX'], y_pred)
+                loss = self.loss_fn(batch['y'], y_pred, batch['dy'], dy_pred)
+            else:
+                y_pred = self.model(batch['X'])
+                loss = self.loss_fn(batch['y'], y_pred)
+            if self.regularization is not None:
+                loss = loss + self.regularization(self.model)
+            return loss
+        return closure
+    def train_epoch_multibatch(self, epoch, optimizer):
+        self.model.train()
+        mode = self.cfg_batch['MODE']
+        steps = self.sampler.steps_per_epoch()
+
+        if hasattr(self.sampler, 'set_epoch'):
+            self.sampler.set_epoch(epoch)
+
+        start_time = timeit.default_timer()
+
+        if mode == 'multi_batch':
+            alpha = float(self.cfg_batch['OVERLAP_FRACTION'])
+            damping = bool(self.cfg_batch['DAMPING'])
+            damping_eps = float(self.cfg_batch['DAMPING_EPS'])
+
+            Ok_prev_idx = self.sampler.current_prev_overlap()
+            batch_Ok_prev = self._gather_batch(Ok_prev_idx)
+            _, g_Ok_prev = self._loss_and_flat_grad(batch_Ok_prev)
+
+            last_loss = None
+            for step in range(steps):
+                Ok_idx, Nk_idx = self.sampler.next_step()
+
+                batch_Ok = self._gather_batch(Ok_idx)
+                loss_Ok, g_Ok = self._loss_and_flat_grad(batch_Ok)
+
+                batch_Nk = self._gather_batch(Nk_idx)
+                _, g_Nk = self._loss_and_flat_grad(batch_Nk)
+
+                g_Sk = alpha * (g_Ok_prev + g_Ok) + (1.0 - 2.0 * alpha) * g_Nk
+
+                p = optimizer.two_loop_recursion(-g_Sk)
+                lr_used = optimizer.step(p, g_Ok, g_Sk=g_Sk)
+
+                # Recompute Ok gradient at the new iterate for curvature pair.
+                batch_Ok_new = self._gather_batch(Ok_idx)
+                _, g_Ok_new = self._loss_and_flat_grad(batch_Ok_new)
+                optimizer.curvature_update(g_Ok_new, eps=damping_eps, damping=damping)
+
+                # Shift: this step's Ok becomes next step's "Ok_prev".
+                self.sampler.advance(Ok_idx)
+                g_Ok_prev = g_Ok_new
+                last_loss = loss_Ok.detach()
+
+            self._log(
+                "Epoch {} multi_batch: {} steps, lr_last={}, loss_Ok_last={:.6e}".format(
+                    epoch, steps, lr_used, float(last_loss) if last_loss is not None else float('nan')
+                )
+            )
+
+        else:  # full_overlap
+            last_loss = None
+            max_iter = self.cfg_solver['OPTIMIZER'].get('MAX_ITER', 100)
+            debug_timing = self.cfg_debug.get('TIMING', False)
+
+            # Timing accumulators (only used if debug_timing)
+            if debug_timing:
+                t_gather = t_fwd_bwd = t_sync = t_optim = 0.0
+                total_inner_iters = 0
+
+            for step in range(steps):
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
+                (Sk_idx,) = self.sampler.next_step()
+                batch_Sk = self._gather_batch(Sk_idx)
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_gather += timeit.default_timer() - _t0
+
+                def closure():
+                    optimizer.zero_grad()
+                    if self.cfg_loss['USE_GRADIENTS']:
+                        X = batch_Sk['X'].clone()
+                        X.requires_grad = True
+                        y_pred = self.model(X)
+                        dy_pred = self.compute_gradients_from_energy(X, batch_Sk['dX'], y_pred)
+                        loss = self.loss_fn(batch_Sk['y'], y_pred, batch_Sk['dy'], dy_pred)
+                    else:
+                        y_pred = self.model(batch_Sk['X'])
+                        loss = self.loss_fn(batch_Sk['y'], y_pred)
+                    if self.regularization is not None:
+                        loss = loss + self.regularization(self.model)
+                    return loss
+
+                # Sync function for distributed: average loss across ranks after backward
+                loss_sync_fn = reduce_mean if self.world_size > 1 else None
+
+                # Pre-compute loss & gradient at the current iterate before the inner loop
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
+                optimizer.zero_grad()
+                loss = closure()
+                loss.backward()
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_fwd_bwd += timeit.default_timer() - _t0
+
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+                if debug_timing:
+                    _t0 = timeit.default_timer()
+
+                if loss_sync_fn is not None:
+                    loss = loss_sync_fn(loss.detach())
+
+                if debug_timing:
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    t_sync += timeit.default_timer() - _t0
+
+                options = {
+                    'closure': closure,
+                    'current_loss': loss,
+                    'grad_clip_norm': self.grad_clip_norm,
+                    'loss_sync_fn': loss_sync_fn,
+                }
+
+                for inner in range(max_iter):
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
+                    obj, grad_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail = optimizer.step(options=options)
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_optim += timeit.default_timer() - _t0
+                        total_inner_iters += 1
+
+                    last_loss = obj.detach() if hasattr(obj, 'detach') else torch.as_tensor(obj)
+
+                    # Stop early if line search failed or step size is zero
+                    if fail or t == 0:
+                        break
+
+                    # Recompute gradient for next inner iteration
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
+                    optimizer.zero_grad()
+                    loss = closure()
+                    loss.backward()
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_fwd_bwd += timeit.default_timer() - _t0
+
+                    if self.grad_clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+
+                    if debug_timing:
+                        _t0 = timeit.default_timer()
+
+                    if loss_sync_fn is not None:
+                        loss = loss_sync_fn(loss.detach())
+
+                    if debug_timing:
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        t_sync += timeit.default_timer() - _t0
+
+                    options['current_loss'] = loss
+
+            if debug_timing:
+                self._log(
+                    "Epoch {} full_overlap: {} steps, {} inner_iters, loss={:.6e}".format(
+                        epoch, steps, total_inner_iters, float(last_loss) if last_loss is not None else float('nan')
+                    )
+                )
+                self._log(
+                    "  Timing: gather={:.2f}s fwd_bwd={:.2f}s sync={:.2f}s optim={:.2f}s".format(
+                        t_gather, t_fwd_bwd, t_sync, t_optim
+                    )
+                )
+            else:
+                self._log(
+                    "Epoch {} full_overlap: {} steps, loss_Sk_last={:.6e}".format(
+                        epoch, steps, float(last_loss) if last_loss is not None else float('nan')
+                    )
+                )
+
+        elapsed = timeit.default_timer() - start_time
+        self._log("Epoch {} multibatch step time: {:.2f}s".format(epoch, elapsed))
+
+        self.model.eval()
+        with torch.no_grad():
+            if self.cfg_loss['USE_GRADIENTS']:
+                # Compute predictions for both train and val
+                train_y_pred, train_dy_pred = self.compute_gradients_eval(self.train)
+                val_y_pred, val_dy_pred = self.compute_gradients_eval(self.val)
+
+                # Energy metrics - use reduce_rmse/reduce_mae for correct distributed aggregation
+                train_e_d    = self.loss_fn.descale_energies(self.train.y)
+                train_e_pred = self.loss_fn.descale_energies(train_y_pred)
+                train_e_errors = (train_e_d - train_e_pred).view(-1)
+                val_e_rmse_local = torch.sqrt(torch.mean(train_e_errors ** 2)).item()
+                train_e_mae  = reduce_mae(train_e_errors)
+                train_e_rmse = reduce_rmse(train_e_errors)
+
+                val_e_d    = self.loss_fn.descale_energies(self.val.y)
+                val_e_pred = self.loss_fn.descale_energies(val_y_pred)
+                val_e_errors = (val_e_d - val_e_pred).view(-1)
+                val_e_rmse_local = torch.sqrt(torch.mean(val_e_errors ** 2)).item()
+                val_e_mae  = reduce_mae(val_e_errors)
+                val_e_rmse = reduce_rmse(val_e_errors)
+
+                # Gradient metrics (per-component errors)
+                natoms = self.train.NATOMS
+                train_dy = self.train.dy.reshape(-1, 3 * natoms)
+                val_dy   = self.val.dy.reshape(-1, 3 * natoms)
+                train_g_errors = (train_dy - train_dy_pred).view(-1)
+                val_g_errors   = (val_dy - val_dy_pred).view(-1)
+                train_g_mae  = reduce_mae(train_g_errors)
+                val_g_mae    = reduce_mae(val_g_errors)
+                train_g_rmse = reduce_rmse(train_g_errors)
+                val_g_rmse   = reduce_rmse(val_g_errors)
+
+                # Weighted MSE for scheduler
+                # Sync minimum across ranks for consistent weighting in distributed mode
+                enmin_train = reduce_min(train_e_d.min())
+                w_train = self.loss_fn.dwt / (self.loss_fn.dwt + train_e_d - enmin_train)
+                loss_train_e = (w_train.view(-1) * (train_e_d - train_e_pred).view(-1)**2).mean()
+
+                enmin_val = reduce_min(val_e_d.min())
+                w_val = self.loss_fn.dwt / (self.loss_fn.dwt + val_e_d - enmin_val)
+                loss_val_e = (w_val.view(-1) * (val_e_d - val_e_pred).view(-1)**2).mean()
+
+                if self.world_size > 1:
+                    # Multi-batch mode doesn't use trust region
+                    self.log_distributed_diagnostics(
+                        epoch,
+                        loss_local=loss_val_e.item(),
+                        e_rmse_local=val_e_rmse_local,
+                        use_trust_region=False
+                    )
+                    # MAE/RMSE already aggregated above via reduce_mae/reduce_rmse
+                    loss_train_e = reduce_mean(loss_train_e)
+                    loss_val_e   = reduce_mean(loss_val_e)
+
+                self._log("Epoch: {}; (energy) WMSE train: {:.3f}; (energy) WMSE val: {:.3f}\n \
+                                           (energy) MAE train:  {:.3f} cm-1; (gradient) MAE train:  {:.3f} cm-1/bohr\n \
+                                           (energy) MAE val:    {:.3f} cm-1; (gradient) MAE val:    {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE train: {:.3f} cm-1; (gradient) RMSE train: {:.3f} cm-1/bohr\n \
+                                           (energy) RMSE val:   {:.3f} cm-1; (gradient) RMSE val:   {:.3f} cm-1/bohr".format(
+                    epoch, loss_train_e, loss_val_e, train_e_mae, train_g_mae, val_e_mae, val_g_mae, train_e_rmse, train_g_rmse, val_e_rmse, val_g_rmse
+                ))
+
+                loss_val = loss_val_e
+
+                if self.writer is not None:
+                    self.writer.add_scalar("loss/train", loss_train_e, epoch)
+            else:
+                val_y_pred = self.model(self.val.X)
+                loss_val = self.loss_fn(self.val.y, val_y_pred)
+                if self.world_size > 1:
+                    loss_val = reduce_mean(loss_val)
+                self._log("Epoch: {}; loss val: {:.3f} cm-1".format(epoch, loss_val))
+
+        self.loss_val = loss_val
+        current_lr = optimizer.param_groups[0]['lr']
+        if self.writer is not None:
+            self.writer.add_scalar("loss/val", loss_val, epoch)
+            self.writer.add_scalar("lr", current_lr, epoch)
