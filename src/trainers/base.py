@@ -3,6 +3,7 @@ import os
 import random
 import time
 import timeit
+from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
@@ -10,21 +11,12 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from config import TORCH_FLOAT
-from build_model import build_network, QModel
 from data_io import fit_scalers_to_train_dataset, apply_scalers_on_dataset, load_from_checkpoint, save_checkpoint
-from losses import (
-    EarlyStopping,
-    WMSELoss_Ratio, WRMSELoss_Ratio, WRMSELoss_Ratio_dipole,
-    WMSELoss_Boltzmann, WRMSELoss_Boltzmann,
-    WMSELoss_PS, WRMSELoss_PS,
-    WMSELoss_Ratio_wgradients, WMSELoss_TrustRegion_wgradients,
-)
+from losses import EarlyStopping
 from regularization import L1Regularization, L2Regularization
-from batching import FullOverlapSampler, MultiBatchSampler, DistributedFullOverlapSampler
 from distributed import (
-    is_main_process, shard_dataset, cleanup,
-    reduce_mean, reduce_mae, reduce_rmse, reduce_min, reduce_sum, sync_gradients, all_gather_scalar, barrier
+    is_main_process, shard_dataset,
+    reduce_mean, sync_gradients, all_gather_scalar, barrier,
 )
 
 import sys
@@ -95,7 +87,7 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
     return alpha, cos_sim, g_combined
 
 
-class BaseTrainer:
+class BaseTrainer(ABC):
     def __init__(self, model_folder, model_name, chk_path, cfg, train, val, test, rank=0, world_size=1, local_rank=0):
         self.rank = rank
         self.world_size = world_size
@@ -242,18 +234,10 @@ class BaseTrainer:
         )
         self._mgda_diag_initialized = False
 
+    @abstractmethod
     def build_model(self):
-        cfg_model = self.cfg.get('MODEL', None)
-        if self.cfg['TYPE'] == 'ENERGY':
-            return build_network(cfg_model, hidden_dims=self.cfg['MODEL']['HIDDEN_DIMS'], input_features=self.train.NPOLY, output_features=1)
-        elif self.cfg['TYPE'] == 'DIPOLE':
-            return build_network(cfg_model, hidden_dims=self.cfg['MODEL']['HIDDEN_DIMS'][0], input_features=self.train.NPOLY, output_features=3)
-        elif self.cfg['TYPE'] == 'DIPOLEQ':
-            return QModel(cfg_model, input_features=self.train.NPOLY, output_features=[len(natoms) for natoms in self.train.symmetry.values()])
-        elif self.cfg['TYPE'] == 'DIPOLEC':
-            return build_network(cfg_model, input_features=3 * self.train.NATOMS, output_features=1)
-        else:
-            assert False, 'unreachable'
+        """Construct and return the network (nn.Module)."""
+        raise NotImplementedError
 
     def _log(self, msg):
         """Rank-0 only logging helper."""
@@ -287,43 +271,10 @@ class BaseTrainer:
         self.model.load_state_dict(checkpoint["model"])
 
         self.train_model()
+    @abstractmethod
     def model_eval(self):
-        self.test.X = self.test.X.to(self.device)
-        self.test.y = self.test.y.to(self.device)
-
-        if self.test.dX is not None:
-            self.test.dX = self.test.dX.to(self.device)
-            self.test.dy = self.test.dy.to(self.device)
-
-        # Calling model.eval() will change the behavior of some layers, 
-        # such as nn.Dropout, which will be disabled, and nn.BatchNormXd, which will use the running stats during evaluation.
-        self.model.eval()
-
-        if self.cfg['TYPE'] == 'ENERGY':
-            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
-            # or wrap the forward pass into with torch.no_grad().
-            with torch.no_grad():
-                pred_train = self.model(self.train.X)
-                loss_train = self.loss_fn(self.train.y, pred_train)
-
-                pred_val   = self.model(self.val.X)
-                loss_val   = self.loss_fn(self.val.y, pred_val)
-
-                pred_test  = self.model(self.test.X)
-                loss_test  = self.loss_fn(self.test.y, pred_test)
-
-            if self.world_size > 1:
-                loss_train = reduce_mean(loss_train)
-                loss_val   = reduce_mean(loss_val)
-                loss_test  = reduce_mean(loss_test)
-
-            self._log("Model evaluation after training:")
-            self._log("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
-            self._log("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
-            self._log("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
-
-        else:
-            assert False, "unreachable"
+        """Final train/val/test evaluation and logging."""
+        raise NotImplementedError
 
     def build_regularization(self):
         if self.cfg_regularization is None:
@@ -454,65 +405,11 @@ class BaseTrainer:
         logging.info("Build optimizer: {}".format(optimizer))
 
         return optimizer
+    @abstractmethod
     def build_loss(self):
-        known_options = ('NAME', 'WEIGHT_TYPE', 'DWT', 'EREF', 'EMAX', 'USE_GRADIENTS', 'USE_GRADIENTS_AFTER_EPOCH', 'G_LAMBDA', 'G_LAMBDA_RAMP_EPOCHS', 'LAMBDA_Q', 'TRUST_THRESHOLD', 'TRUST_THRESHOLD_START', 'TRUST_THRESHOLD_RAMP_EPOCHS', 'TRUST_SOFT_SCALE', 'TRUST_SOFT_CUTOFF', 'GRADIENT_TRUST_THRESHOLD', 'GRADIENT_TRUST_SOFT_SCALE', 'FOCAL_GAMMA', 'FOCAL_EMA_DECAY', 'USE_HUBER_GRADIENT', 'HUBER_DELTA', 'USE_MGDA', 'MGDA_ALPHA_MIN', 'MGDA_ALPHA_MAX', 'MGDA_EMA_DECAY')
-        for option in self.cfg_loss.keys():
-            assert option.upper() in known_options, "[build_loss] unknown option: {}".format(option)
+        """Construct and return the loss function (self.loss_fn)."""
+        raise NotImplementedError
 
-        # have all defaults in the same place and set them to configuration if the value is omitted in the YAML file
-        self.cfg_loss.setdefault('LAMBDA_Q', 1.0e3)
-        self.cfg_loss.setdefault('USE_GRADIENTS_AFTER_EPOCH', None)
-        self.cfg_loss.setdefault('USE_GRADIENTS', False)
-        self.cfg_loss.setdefault('G_LAMBDA_RAMP_EPOCHS', 0)
-        self.cfg_loss.setdefault('TRUST_THRESHOLD_RAMP_EPOCHS', 0)
-        self.cfg_loss.setdefault('TRUST_SOFT_SCALE', None)
-        self.cfg_loss.setdefault('TRUST_SOFT_CUTOFF', 0.01)
-        self.cfg_loss.setdefault('GRADIENT_TRUST_THRESHOLD', None)
-        self.cfg_loss.setdefault('GRADIENT_TRUST_SOFT_SCALE', None)
-        self.cfg_loss.setdefault('FOCAL_GAMMA', 0.0)
-        self.cfg_loss.setdefault('FOCAL_EMA_DECAY', 0.95)
-        self.cfg_loss.setdefault('USE_HUBER_GRADIENT', False)
-
-        # Validate MGDA configuration
-        if self.cfg_loss.get('USE_MGDA', False):
-            gradients_enabled = (self.cfg_loss['USE_GRADIENTS'] or
-                                 self.cfg_loss['USE_GRADIENTS_AFTER_EPOCH'] is not None)
-            assert gradients_enabled, \
-                "USE_MGDA requires USE_GRADIENTS or USE_GRADIENTS_AFTER_EPOCH to be enabled"
-
-        if self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
-            Eref = self.cfg_loss.get('EREF', 2000.0)
-            loss_fn = WRMSELoss_Boltzmann(Eref=Eref)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Boltzmann' and not self.cfg_loss['USE_GRADIENTS']:
-            Eref = self.cfg_loss.get('EREF', 2000.0)
-            loss_fn = WMSELoss_Boltzmann(Eref=Eref)
-
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
-            dwt = self.cfg_loss.get('dwt', 1.0)
-            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
-            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
-            loss_fn = WRMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
-            dwt = self.cfg_loss.get('dwt', 1.0)
-            focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
-            focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
-            loss_fn = WMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
-
-        elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
-            Emax = self.cfg_loss.get('EMAX', 2000.0)
-            loss_fn = WRMSELoss_PS(Emax=Emax)
-        elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'PS' and not self.cfg_loss['USE_GRADIENTS']:
-            Emax = self.cfg_loss.get('EMAX', 2000.0)
-            loss_fn = WMSELoss_PS(Emax=Emax)
-
-
-        else:
-            print(self.cfg_loss)
-            raise ValueError("unreachable")
-
-        logging.info("Build loss function: {}".format(loss_fn))
-
-        return loss_fn
     def build_scheduler(self):
         cfg_scheduler = self.cfg_solver['SCHEDULER']
         scheduler_name = cfg_scheduler['NAME']
@@ -790,39 +687,10 @@ class BaseTrainer:
         except OSError as e:
             if is_main_process():
                 logging.warning("Could not append to distributed diag CSV: {}".format(e))
+    @abstractmethod
     def prepare_data_for_device(self):
-        """Move energy/gradient dataset tensors (X/y, dX/dy) to self.device.
-
-        Dipole trainers override this to also move grm / xyz_ordered."""
-        multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
-        if multibatch:
-            # Keep the training set on CPU; each step copies only its batch
-            # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
-            if torch.cuda.is_available():
-                self.train.X = self.train.X.pin_memory()
-                self.train.y = self.train.y.pin_memory()
-                if self.train.dX is not None:
-                    self.train.dX = self.train.dX.pin_memory()
-                    self.train.dy = self.train.dy.pin_memory()
-            # Val stays on GPU for cheap eval.
-            self.val.X = self.val.X.to(self.device)
-            self.val.y = self.val.y.to(self.device)
-        else:
-            self.train.X = self.train.X.to(self.device)
-            self.train.y = self.train.y.to(self.device)
-            self.val.X = self.val.X.to(self.device)
-            self.val.y = self.val.y.to(self.device)
-
-        if self.train.dX is not None and not multibatch:
-            self.train.dX = self.train.dX.to(self.device)
-            self.train.dy = self.train.dy.to(self.device)
-
-            self.val.dX = self.val.dX.to(self.device)
-            self.val.dy = self.val.dy.to(self.device)
-        elif self.train.dX is not None and multibatch:
-            # Only move validation gradient tensors; train stays on pinned CPU.
-            self.val.dX = self.val.dX.to(self.device)
-            self.val.dy = self.val.dy.to(self.device)
+        """Move dataset tensors to self.device."""
+        raise NotImplementedError
 
     def train_model(self):
         try:
@@ -941,57 +809,15 @@ class BaseTrainer:
         Energy/dipole trainers need no per-epoch preparation."""
         pass
 
+    @abstractmethod
     def compute_loss(self, separate=False):
-        """Compute training loss.
+        """Forward pass + training loss. Returns a tensor, or an (energy_loss, gradient_loss) tuple when separate=True."""
+        raise NotImplementedError
 
-        Args:
-            separate: If True and using gradients with trust region,
-                     return (energy_loss, gradient_loss) tuple for MGDA.
-                     Otherwise return combined loss.
-        """
-        if self.cfg['TYPE'] == 'ENERGY':
-            y_pred = self.model(self.train.X)
-            loss = self.loss_fn(self.train.y, y_pred)
-
-        else:
-            assert False, "unreachable"
-
-        if self.regularization is not None:
-            loss = loss + self.regularization(self.model)
-        return loss
-
+    @abstractmethod
     def evaluate_and_log(self, epoch, current_lr):
-        if self.cfg['TYPE'] == 'ENERGY':
-            # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
-            # or wrap the forward pass into with torch.no_grad().
-            with torch.no_grad():
-                train_y_pred = self.model(self.train.X)
-                loss_train   = self.loss_fn(self.train.y, train_y_pred)
-
-                val_y_pred = self.model(self.val.X)
-                loss_val   = self.loss_fn(self.val.y, val_y_pred)
-
-                if self.world_size > 1:
-                    loss_train = reduce_mean(loss_train)
-                    loss_val   = reduce_mean(loss_val)
-
-                # value to be passed to EarlyStopping/ReduceLR mechanisms
-                self.loss_val = loss_val
-
-            # tensorboard writer
-            if self.writer is not None:
-                self.writer.add_scalar("loss/train", loss_train, epoch)
-                self.writer.add_scalar("loss/val", loss_val, epoch)
-                self.writer.add_scalar("lr", current_lr, epoch)
-
-            # log metrics to WANDB to visualize model performance
-            if is_main_process() and USE_WANDB:
-                wandb.log({"loss_train" : loss_train, "loss_val" : loss_val, "lr" : current_lr})
-
-            self._log("Epoch: {0}; loss train: {2:.{1}f} cm-1; loss val: {3:.{1}f} cm-1; lr: {4:.2e}".format(epoch, PRINT_PRECISION, loss_train, loss_val, current_lr))
-
-        else:
-            assert False, "unreachable"
+        """Per-epoch train/val evaluation and logging; must set self.loss_val."""
+        raise NotImplementedError
 
     def supports_mgda(self):
         return False

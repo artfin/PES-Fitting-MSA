@@ -32,6 +32,38 @@ class GradientTrainer(MultibatchMixin, BaseTrainer):
         cfg_model = self.cfg.get('MODEL', None)
         return build_network(cfg_model, hidden_dims=self.cfg['MODEL']['HIDDEN_DIMS'], input_features=self.train.NPOLY, output_features=1)
 
+    def prepare_data_for_device(self):
+        """Move energy + gradient dataset tensors (X/y, dX/dy) to self.device."""
+        multibatch = bool(self.cfg_batch.get('MULTIBATCH_ENABLED', False))
+        if multibatch:
+            # Keep the training set on CPU; each step copies only its batch
+            # to the GPU (pin_memory makes the per-batch copy faster when CUDA).
+            if torch.cuda.is_available():
+                self.train.X = self.train.X.pin_memory()
+                self.train.y = self.train.y.pin_memory()
+                if self.train.dX is not None:
+                    self.train.dX = self.train.dX.pin_memory()
+                    self.train.dy = self.train.dy.pin_memory()
+            # Val stays on GPU for cheap eval.
+            self.val.X = self.val.X.to(self.device)
+            self.val.y = self.val.y.to(self.device)
+        else:
+            self.train.X = self.train.X.to(self.device)
+            self.train.y = self.train.y.to(self.device)
+            self.val.X = self.val.X.to(self.device)
+            self.val.y = self.val.y.to(self.device)
+
+        if self.train.dX is not None and not multibatch:
+            self.train.dX = self.train.dX.to(self.device)
+            self.train.dy = self.train.dy.to(self.device)
+
+            self.val.dX = self.val.dX.to(self.device)
+            self.val.dy = self.val.dy.to(self.device)
+        elif self.train.dX is not None and multibatch:
+            # Only move validation gradient tensors; train stays on pinned CPU.
+            self.val.dX = self.val.dX.to(self.device)
+            self.val.dy = self.val.dy.to(self.device)
+
     # ------------------------------------------------------------------
     # construction
     # ------------------------------------------------------------------

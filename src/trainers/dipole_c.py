@@ -18,6 +18,12 @@ class DipoleCTrainer(BaseTrainer):
         cfg_model = self.cfg.get('MODEL', None)
         return build_network(cfg_model, input_features=3 * self.train.NATOMS, output_features=1)
 
+    def prepare_data_for_device(self):
+        self.train.X = self.train.X.to(self.device)
+        self.train.y = self.train.y.to(self.device)
+        self.val.X = self.val.X.to(self.device)
+        self.val.y = self.val.y.to(self.device)
+
     def build_loss(self):
         # base.__init__ reads cfg_loss['USE_GRADIENTS'] right after build_loss();
         # dipole configs don't declare the gradient keys, so mirror the defaults.
