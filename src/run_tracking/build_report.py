@@ -13,9 +13,9 @@ Usage:
 """
 
 import argparse
+import base64
 import datetime as _dt
 import html
-import json
 import os
 import sys
 
@@ -78,6 +78,7 @@ def build_rows(runs, baseline_cfg=None):
             "summary": summ,
             "config_flat": flatten_config(run.config),
             "diff": diff,
+            "figures": run.figures,
             "date": _fmt_date(run.mtime),
             "sort_ts": run.mtime,
         })
@@ -128,6 +129,7 @@ tr.detail.hidden { display: none; }
 .rmse { font-weight: 650; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }
 .dot.manifest { background: var(--accent); }
+.dot.backfill { background: var(--warn); }
 .dot.log { background: transparent; border: 1px solid var(--muted); }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
 .badge.reproducible { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
@@ -144,6 +146,13 @@ tr.detail.hidden { display: none; }
 .diff .from { color: var(--warn); } .diff .to { color: var(--ok); }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 @media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+.figmark { color: var(--accent); font-size: 11px; font-weight: 600; }
+.figs { margin: 0 0 16px; }
+.figs h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.figgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.figgrid figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.figgrid img { display: block; width: 100%; height: auto; }
+.figgrid figcaption { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); padding: 6px 8px; background: var(--card); }
 .foot { color: var(--muted); font-size: 12px; margin-top: 22px; }
 code { background: var(--card); padding: 1px 5px; border-radius: 5px; }
 """
@@ -175,11 +184,13 @@ def _kpis(rows):
     manifests = sum(1 for r in rows if r["rmse_source"] == "manifest")
     repro = sum(1 for r in rows if r["repro_level"] == "reproducible")
     best = next((r for r in rows if r["rmse"] is not None), None)
+    with_figs = sum(1 for r in rows if r["figures"])
     cards = [
         ("total runs", n),
         ("best val RMSE", _fmt_rmse(best["rmse"]) + " cm⁻¹" if best else "—"),
         ("best run", best["stem"] if best else "—"),
         ("with metrics", "{}/{}".format(with_metric, n)),
+        ("with figures", with_figs),
         ("tracked manifests", manifests),
         ("reproducible", repro),
     ]
@@ -191,10 +202,36 @@ def _kpis(rows):
     return "".join(out)
 
 
-def _detail_panel(r):
+def _img_src(path, folder, embed):
+    """Return an <img> src: a base64 data URI (self-contained) or a relative path."""
+    if not embed:
+        return _esc(os.path.relpath(path, folder))
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return "data:image/png;base64," + b64
+    except Exception:
+        return _esc(os.path.relpath(path, folder))
+
+
+def _figures_html(figs, folder, embed):
+    if not figs:
+        return ""
+    imgs = []
+    for p in figs:
+        imgs.append('<figure><img loading="lazy" src="{src}" alt="{name}">'
+                    '<figcaption>{name}</figcaption></figure>'.format(
+                        src=_img_src(p, folder, embed),
+                        name=_esc(os.path.basename(p))))
+    return '<div class="figs"><h3>figures</h3><div class="figgrid">{}</div></div>'.format("".join(imgs))
+
+
+def _detail_panel(r, folder, embed):
     parts = ['<div class="panel">']
     if r["intent"]:
         parts.append('<p class="intent">{}</p>'.format(_esc(r["intent"])))
+
+    parts.append(_figures_html(r["figures"], folder, embed))
 
     parts.append('<div class="cols">')
 
@@ -241,7 +278,7 @@ _COLS = [
 ]
 
 
-def render_html(rows, folder, baseline):
+def render_html(rows, folder, baseline, abs_folder, embed):
     head = "".join(
         '<th class="{cls}" onclick="sortBy({i},{num})">{label}</th>'.format(
             i=i, num="true" if num else "false",
@@ -254,9 +291,11 @@ def render_html(rows, folder, baseline):
         src = r["rmse_source"]
         dot = '<span class="dot {}"></span>'.format(src) if src else ""
         rmse_v = "" if r["rmse"] is None else "{:.6f}".format(r["rmse"])
+        nfig = len(r["figures"])
+        fig_marker = ' <span class="figmark" title="{n} figure(s)">▦{n}</span>'.format(n=nfig) if nfig else ""
         cells = [
             ('num', str(rank), '<span class="rank">{}</span>'.format(rank)),
-            ('', r["stem"], _esc(r["stem"])),
+            ('', r["stem"], _esc(r["stem"]) + fig_marker),
             ('num rmse', rmse_v, _fmt_rmse(r["rmse"]) + dot),
             ('num', r["best_epoch"], _esc(r["best_epoch"]) if r["best_epoch"] is not None else "—"),
             ('', s["type"], _esc(s["type"])),
@@ -274,7 +313,8 @@ def render_html(rows, folder, baseline):
         body.append('<tr class="run" data-stem="{stem}" onclick="toggle(\'d-{stem}\')">{tds}</tr>'
                     .format(stem=_esc(r["stem"]), tds=tds))
         body.append('<tr class="detail hidden" id="d-{stem}"><td colspan="{n}">{panel}</td></tr>'
-                    .format(stem=_esc(r["stem"]), n=len(_COLS), panel=_detail_panel(r)))
+                    .format(stem=_esc(r["stem"]), n=len(_COLS),
+                            panel=_detail_panel(r, abs_folder, embed)))
 
     gen = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     base_note = " · baseline: <code>{}</code>".format(_esc(baseline)) if baseline else ""
@@ -292,7 +332,7 @@ def render_html(rows, folder, baseline):
 <tbody>{body}</tbody>
 </table></div>
 <p class="foot">Sorted by validation RMSE. Click a row for config &amp; metrics; click a column header to re-sort.
-Metric source: <span class="dot manifest"></span> metrics.json &nbsp; <span class="dot log"></span> parsed from log.
+Metric source: <span class="dot manifest"></span> tracked metrics.json &nbsp; <span class="dot backfill"></span> backfilled from log &nbsp; <span class="dot log"></span> parsed on the fly.
 Repro badge shows the git commit each run was produced at.</p>
 </div><script>{js}</script></body></html>""".format(
         folder=_esc(folder), css=_CSS, n=len(rows), gen=gen, base_note=base_note,
@@ -305,6 +345,9 @@ def main():
     ap.add_argument("--out", default=None, help="output HTML path (default: <folder>/report.html)")
     ap.add_argument("--baseline", default=None,
                     help="run stem to diff every run's config against")
+    ap.add_argument("--link-figures", action="store_true",
+                    help="reference figures by relative path instead of embedding them "
+                         "(smaller file, but no longer self-contained/emailable)")
     args = ap.parse_args()
 
     folder = os.path.abspath(args.folder)
@@ -320,12 +363,16 @@ def main():
         baseline_cfg = match.config
 
     rows = build_rows(runs, baseline_cfg=baseline_cfg)
+    embed = not args.link_figures
     out = args.out or os.path.join(folder, "report.html")
     with open(out, "w") as f:
-        f.write(render_html(rows, os.path.relpath(folder), args.baseline))
+        f.write(render_html(rows, os.path.relpath(folder), args.baseline, folder, embed))
 
     with_metric = sum(1 for r in rows if r["rmse"] is not None)
-    print("Wrote {} ({} runs, {} with a val-RMSE metric)".format(out, len(rows), with_metric))
+    with_figs = sum(1 for r in rows if r["figures"])
+    print("Wrote {} ({} runs, {} with a val-RMSE metric, {} with figures{})".format(
+        out, len(rows), with_metric, with_figs,
+        "" if embed else "; figures linked by path"))
 
 
 if __name__ == "__main__":

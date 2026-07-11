@@ -9,11 +9,12 @@ siblings). This works on today's flat layout and will keep working after the
 Phase 3 migration to per-run directories.
 """
 
+import glob
 import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 
@@ -46,6 +47,15 @@ class Run:
             if os.path.isfile(p):
                 return os.path.getmtime(p)
         return 0.0
+
+    @property
+    def figures(self) -> List[str]:
+        """PNG figures belonging to this run (``<stem>*.png`` in its folder).
+
+        Works in both layouts: a per-run dir holds only this run's figures, and
+        in the flat layout the stem-prefix scopes them to this run.
+        """
+        return sorted(glob.glob(os.path.join(self.folder, self.stem + "*.png")))
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +105,8 @@ def _intent_comment(path, max_len=600):
     return text or None
 
 
-def discover_runs(folder):
-    """Return a list of Run objects found in ``folder`` (flat layout)."""
+def _discover_flat(folder):
+    """Discover runs whose ``<stem>.yaml`` sits directly in ``folder``."""
     runs = []
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".yaml"):
@@ -114,6 +124,24 @@ def discover_runs(folder):
             provenance=_load_json(os.path.join(folder, stem + ".provenance.json")),
             metrics=_load_json(os.path.join(folder, stem + ".metrics.json")),
         ))
+    return runs
+
+
+def discover_runs(folder):
+    """Return Run objects from ``folder``, supporting both layouts.
+
+    Per-run-dir layout (Phase 3): each run lives in ``folder/runs/<stem>/``.
+    Flat layout (legacy): ``<stem>.yaml`` siblings directly in ``folder``.
+    Both are scanned, so a partially-migrated folder still reports every run.
+    """
+    runs = []
+    runs_root = os.path.join(folder, "runs")
+    if os.path.isdir(runs_root):
+        for sub in sorted(os.listdir(runs_root)):
+            subpath = os.path.join(runs_root, sub)
+            if os.path.isdir(subpath):
+                runs.extend(_discover_flat(subpath))
+    runs.extend(_discover_flat(folder))  # any runs still at the root
     return runs
 
 
@@ -143,13 +171,15 @@ def best_val_rmse_from_log(log_path):
 
 
 def resolve_best_val_rmse(run):
-    """Return (value, source) where source is 'manifest', 'log', or None.
+    """Return (value, source) where source is 'manifest', 'backfill', 'log', or None.
 
-    Prefers structured metrics.json (Phase 1 / backfilled). Falls back to parsing
-    the log so pre-tracking runs still appear in the report.
+    Prefers the structured metrics.json: a genuine Phase-1 manifest reads
+    'manifest', a Phase-4 log-backfill reads 'backfill'. Falls back to parsing the
+    log on the fly ('log') so runs with neither still appear in the report.
     """
     if run.metrics and run.metrics.get("best_val_rmse") is not None:
-        return float(run.metrics["best_val_rmse"]), "manifest"
+        source = "backfill" if run.metrics.get("backfilled") else "manifest"
+        return float(run.metrics["best_val_rmse"]), source
     if run.has_log:
         v = best_val_rmse_from_log(run.log_path)
         if v is not None:
