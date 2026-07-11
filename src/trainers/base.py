@@ -11,6 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
+from config import DEVICE, PRINT_TRAINING_STEPS, PRINT_PRECISION, USE_WANDB
 from data_io import fit_scalers_to_train_dataset, apply_scalers_on_dataset, load_from_checkpoint, save_checkpoint
 from losses import EarlyStopping
 from regularization import L1Regularization, L2Regularization
@@ -18,17 +19,13 @@ from distributed import (
     is_main_process, shard_dataset,
     reduce_mean, sync_gradients, all_gather_scalar, barrier,
 )
+from .mixins import DiagnosticsMixin, DistributedDiagnosticsMixin
 
 import sys
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.parent.resolve()
 sys.path.insert(0, str(BASEDIR / "vendor"))
 from pytorch_lbfgs import LBFGS as HjmshiLBFGS, FullBatchLBFGS as HjmshiFullBatchLBFGS
-
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-PRINT_TRAINING_STEPS = 1
-PRINT_PRECISION = 3
-USE_WANDB = False
 
 
 def count_params(model):
@@ -87,7 +84,7 @@ def compute_mgda_alpha(g_energy, g_gradient, alpha_min=0.0, alpha_max=1.0,
     return alpha, cos_sim, g_combined
 
 
-class BaseTrainer(ABC):
+class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
     def __init__(self, model_folder, model_name, chk_path, cfg, train, val, test, rank=0, world_size=1, local_rank=0):
         self.rank = rank
         self.world_size = world_size
@@ -460,233 +457,6 @@ class BaseTrainer(ABC):
         tolerance = cfg_early_stopping.get('TOLERANCE', 0.1)
 
         return EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
-    def log_lbfgs_diagnostics(self, epoch, optimizer):
-        """L-BFGS line-search telemetry, dumped per epoch.
-
-        Pulls inner state from torch.optim.LBFGS or vendored FullBatchLBFGS:
-          - this-step iteration / closure-call counts (deltas from cumulative)
-          - last accepted step length t
-          - initial Hessian diag scaling H_diag = (s . y) / (y . y)
-          - curvature pair stats: <s_k, y_k> -- min/max/last/mean
-            over the stored history (small or absent => degenerate curvature)
-          - flat gradient norm at the last accepted iterate
-        """
-        if isinstance(optimizer, torch.optim.LBFGS):
-            params = optimizer.param_groups[0]['params']
-            if not params:
-                return
-            state = optimizer.state.get(params[0], {})
-            if not state:
-                return
-
-            cum_n_iter     = int(state.get('n_iter', 0))
-            cum_func_evals = int(state.get('func_evals', 0))
-            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
-            evals_this_step = cum_func_evals - self._lbfgs_prev_func_evals
-            self._lbfgs_prev_n_iter = cum_n_iter
-            self._lbfgs_prev_func_evals = cum_func_evals
-
-            t_val = state.get('t', None)
-            try:
-                t_val = float(t_val) if t_val is not None else float('nan')
-            except (TypeError, ValueError):
-                t_val = float('nan')
-
-            H_diag = state.get('H_diag', None)
-            try:
-                H_diag = float(H_diag) if H_diag is not None else float('nan')
-            except (TypeError, ValueError):
-                H_diag = float('nan')
-
-            ro = state.get('ro', []) or []
-            n_pairs = len(ro)
-            if n_pairs > 0:
-                sy_vals = []
-                for r in ro:
-                    try:
-                        rv = float(r)
-                        if rv != 0.0:
-                            sy_vals.append(1.0 / rv)
-                    except (TypeError, ValueError, ZeroDivisionError):
-                        pass
-                if sy_vals:
-                    sy_min  = min(sy_vals)
-                    sy_max  = max(sy_vals)
-                    sy_last = sy_vals[-1]
-                    sy_mean = sum(sy_vals) / len(sy_vals)
-                else:
-                    sy_min = sy_max = sy_last = sy_mean = float('nan')
-            else:
-                sy_min = sy_max = sy_last = sy_mean = float('nan')
-
-            prev_flat_grad = state.get('prev_flat_grad', None)
-            if prev_flat_grad is not None:
-                try:
-                    grad_norm = float(prev_flat_grad.norm().item())
-                except (RuntimeError, AttributeError):
-                    grad_norm = float('nan')
-            else:
-                grad_norm = float('nan')
-
-        elif isinstance(optimizer, HjmshiFullBatchLBFGS):
-            state = optimizer.state['global_state']
-            cum_n_iter = int(state.get('n_iter', 0))
-            iters_this_step = cum_n_iter - self._lbfgs_prev_n_iter
-            self._lbfgs_prev_n_iter = cum_n_iter
-            # Closure evals are captured in train_epoch for vendored LBFGS
-            evals_this_step = getattr(self, '_last_vendored_closure_eval', float('nan'))
-
-            t_val = float(state.get('t', float('nan')))
-            H_diag = float(state.get('H_diag', float('nan')))
-
-            old_dirs = state.get('old_dirs', [])
-            old_stps = state.get('old_stps', [])
-            n_pairs = len(old_dirs)
-            if n_pairs > 0:
-                sy_vals = []
-                for s, y in zip(old_stps, old_dirs):
-                    try:
-                        sy = float(s.dot(y).item())
-                        if sy != 0.0:
-                            sy_vals.append(sy)
-                    except (TypeError, ValueError):
-                        pass
-                if sy_vals:
-                    sy_min  = min(sy_vals)
-                    sy_max  = max(sy_vals)
-                    sy_last = sy_vals[-1]
-                    sy_mean = sum(sy_vals) / len(sy_vals)
-                else:
-                    sy_min = sy_max = sy_last = sy_mean = float('nan')
-            else:
-                sy_min = sy_max = sy_last = sy_mean = float('nan')
-
-            prev_flat_grad = state.get('prev_flat_grad', None)
-            if prev_flat_grad is not None:
-                try:
-                    grad_norm = float(prev_flat_grad.norm().item())
-                except (RuntimeError, AttributeError):
-                    grad_norm = float('nan')
-            else:
-                grad_norm = float('nan')
-        else:
-            return
-
-        if not self._lbfgs_diag_initialized:
-            try:
-                with open(self._lbfgs_diag_path, "w") as f:
-                    f.write("epoch,iters_this_step,evals_this_step,t,H_diag,"
-                            "n_pairs,grad_norm,sy_min,sy_mean,sy_max,sy_last\n")
-                self._lbfgs_diag_initialized = True
-            except OSError as e:
-                logging.warning("Could not initialize lbfgs diag CSV: {}".format(e))
-        try:
-            with open(self._lbfgs_diag_path, "a") as f:
-                f.write("{},{},{},{:.6e},{:.6e},{},{:.6e},"
-                        "{:.6e},{:.6e},{:.6e},{:.6e}\n".format(
-                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
-                    n_pairs, grad_norm, sy_min, sy_mean, sy_max, sy_last,
-                ))
-        except OSError as e:
-            logging.warning("Could not append to lbfgs diag CSV: {}".format(e))
-
-        if is_main_process():
-            logging.info(
-                "[lbfgs-diag] epoch={} | iters={} evals={} t={:.3e} H_diag={:.3e} "
-                "pairs={} grad_norm={:.3e} sy(last/min/max)={:.3e}/{:.3e}/{:.3e}".format(
-                    epoch, iters_this_step, evals_this_step, t_val, H_diag,
-                    n_pairs, grad_norm, sy_last, sy_min, sy_max,
-                )
-            )
-    def log_distributed_diagnostics(self, epoch, loss_local, e_rmse_local,
-                                     n_trust_local=None, n_total_local=None,
-                                     use_trust_region=False):
-        """Log verbose per-rank metrics for distributed training.
-
-        Shows per-rank values + global aggregates to diagnose imbalanced shards,
-        rank drift, or trust region distribution issues.
-
-        Args:
-            epoch: current epoch
-            loss_local: local weighted MSE (before reduce_mean)
-            e_rmse_local: local energy RMSE in cm-1 (before reduce)
-            n_trust_local: number of configs in trust region on this rank (optional)
-            n_total_local: total configs on this rank (optional)
-            use_trust_region: whether to log trust region statistics
-        """
-        if self.world_size <= 1:
-            return
-
-        # Gather values from all ranks
-        losses = all_gather_scalar(float(loss_local), device=DEVICE)
-        rmses = all_gather_scalar(float(e_rmse_local), device=DEVICE)
-        if use_trust_region:
-            trusts = all_gather_scalar(int(n_trust_local), device=DEVICE)
-            totals = all_gather_scalar(int(n_total_local), device=DEVICE)
-
-        # Log verbose multi-line format on rank 0
-        if is_main_process():
-            lines = [f"[dist-diag] epoch={epoch}"]
-            for r in range(self.world_size):
-                if use_trust_region:
-                    trust_pct = 100.0 * trusts[r] / max(totals[r], 1)
-                    lines.append(
-                        f"  rank {r}: E-RMSE={rmses[r]:.2f} cm-1  "
-                        f"trust={int(trusts[r])}/{int(totals[r])} ({trust_pct:.1f}%)  "
-                        f"loss={losses[r]:.3f}"
-                    )
-                else:
-                    lines.append(
-                        f"  rank {r}: E-RMSE={rmses[r]:.2f} cm-1  "
-                        f"loss={losses[r]:.3f}"
-                    )
-            # Global summary
-            avg_loss = sum(losses) / len(losses)
-            if use_trust_region:
-                total_trust = sum(trusts)
-                total_n = sum(totals)
-                global_trust_pct = 100.0 * total_trust / max(total_n, 1)
-                lines.append(
-                    f"  global: E-RMSE=<aggregated above>  "
-                    f"trust={int(total_trust)}/{int(total_n)} ({global_trust_pct:.1f}%)  "
-                    f"loss={avg_loss:.3f}"
-                )
-            else:
-                lines.append(
-                    f"  global: E-RMSE=<aggregated above>  "
-                    f"loss={avg_loss:.3f}"
-                )
-            logging.info("\n".join(lines))
-
-        # Write CSV for post-hoc analysis (all ranks write their own row)
-        if not self._dist_diag_initialized:
-            if is_main_process():
-                try:
-                    with open(self._dist_diag_path, "w") as f:
-                        if use_trust_region:
-                            f.write("epoch,rank,loss_local,e_rmse_local,n_trust,n_total\n")
-                        else:
-                            f.write("epoch,rank,loss_local,e_rmse_local\n")
-                    self._dist_diag_initialized = True
-                except OSError as e:
-                    logging.warning("Could not initialize distributed diag CSV: {}".format(e))
-            barrier()  # Ensure header is written before other ranks append
-            self._dist_diag_initialized = True
-
-        try:
-            with open(self._dist_diag_path, "a") as f:
-                if use_trust_region:
-                    f.write("{},{},{:.6e},{:.6e},{},{}\n".format(
-                        epoch, self.rank, float(loss_local), float(e_rmse_local),
-                        int(n_trust_local), int(n_total_local)
-                    ))
-                else:
-                    f.write("{},{},{:.6e},{:.6e}\n".format(
-                        epoch, self.rank, float(loss_local), float(e_rmse_local)
-                    ))
-        except OSError as e:
-            if is_main_process():
-                logging.warning("Could not append to distributed diag CSV: {}".format(e))
     @abstractmethod
     def prepare_data_for_device(self):
         """Move dataset tensors to self.device."""
