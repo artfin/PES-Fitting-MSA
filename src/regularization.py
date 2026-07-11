@@ -1,6 +1,6 @@
 import torch
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from config import DEVICE
 
 class L1Regularization(torch.nn.Module):
     def __init__(self, lambda_):

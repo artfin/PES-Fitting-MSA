@@ -4,6 +4,7 @@ import random
 import time
 import timeit
 from abc import ABC, abstractmethod
+from typing import Tuple, Union
 
 import numpy as np
 import torch
@@ -232,7 +233,7 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
         self._mgda_diag_initialized = False
 
     @abstractmethod
-    def build_model(self):
+    def build_model(self) -> torch.nn.Module:
         """Construct and return the network (nn.Module)."""
         raise NotImplementedError
 
@@ -269,7 +270,7 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
 
         self.train_model()
     @abstractmethod
-    def model_eval(self):
+    def model_eval(self) -> None:
         """Final train/val/test evaluation and logging."""
         raise NotImplementedError
 
@@ -403,7 +404,7 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
 
         return optimizer
     @abstractmethod
-    def build_loss(self):
+    def build_loss(self) -> torch.nn.Module:
         """Construct and return the loss function (self.loss_fn)."""
         raise NotImplementedError
 
@@ -458,7 +459,7 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
 
         return EarlyStopping(patience=patience, tol=tolerance, chk_path=self.chk_path)
     @abstractmethod
-    def prepare_data_for_device(self):
+    def prepare_data_for_device(self) -> None:
         """Move dataset tensors to self.device."""
         raise NotImplementedError
 
@@ -574,22 +575,22 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
             raise
 
 
-    def prepare_epoch(self, epoch):
+    def prepare_epoch(self, epoch: int) -> None:
         """No-op; GradientTrainer overrides with the gradient prologue.
         Energy/dipole trainers need no per-epoch preparation."""
         pass
 
     @abstractmethod
-    def compute_loss(self, separate=False):
+    def compute_loss(self, separate: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass + training loss. Returns a tensor, or an (energy_loss, gradient_loss) tuple when separate=True."""
         raise NotImplementedError
 
     @abstractmethod
-    def evaluate_and_log(self, epoch, current_lr):
+    def evaluate_and_log(self, epoch: int, current_lr: float) -> None:
         """Per-epoch train/val evaluation and logging; must set self.loss_val."""
         raise NotImplementedError
 
-    def supports_mgda(self):
+    def supports_mgda(self) -> bool:
         return False
 
     def train_epoch(self, epoch, optimizer):

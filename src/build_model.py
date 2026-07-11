@@ -3,9 +3,7 @@ import logging
 import itertools
 import torch
 
-from config import TORCH_FLOAT
-
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from config import TORCH_FLOAT, DEVICE
 
 class Builder:
     def __init__(self, *namespaces):

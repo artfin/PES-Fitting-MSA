@@ -7,7 +7,7 @@ import torch
 import yaml
 from sklearn.preprocessing import StandardScaler
 
-from config import TORCH_FLOAT
+from config import TORCH_FLOAT, DEVICE, USE_WANDB
 from dataset import PolyDataset
 from make_dataset import make_dataset, make_dataset_fpaths
 from build_model import build_network
@@ -17,9 +17,6 @@ BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 from distributed import is_main_process
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-USE_WANDB = False
 if USE_WANDB:
     import wandb
 
@@ -146,23 +143,6 @@ def save_checkpoint(model, xscaler, yscaler, meta_info, chk_path):
         "meta_info"    :  meta_info,
     }
     torch.save(checkpoint, chk_path)
-def setup_google_folder():
-    assert os.path.exists('client_secrets.json')
-    gauth = GoogleAuth()
-    gauth.LocalWebserverAuth()
-
-    drive = GoogleDrive(gauth)
-
-    folderName = "PES-Fitting-MSA"
-
-    folders = drive.ListFile(
-        {'q': "title='" + folderName + "' and mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
-
-    for folder in folders:
-        if folder['title'] == folderName:
-            file = drive.CreateFile({'parents': [{'id': folder['id']}]})
-            file.SetContentFile('README.md')
-            file.Upload()
 
 def load_cfg(cfg_path):
     with open(cfg_path, mode="r") as stream:
