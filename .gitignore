@@ -1,4 +1,5 @@
 .*
+*.pyc
 !.gitignore
 
 # venv folder
@@ -53,3 +54,4 @@ scripts/*/*_*.txt
 scripts/*/.tmp_*
 
 src/trainers/__pycache__/
+src/trainers/mixins/__pycache__/
