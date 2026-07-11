@@ -302,9 +302,12 @@ def plot_errors_from_checkpoint(evaluator, train, val, test, EMAX, figpath=None,
     plt.tight_layout()
 
     if figpath is not None:
-        plt.savefig(figpath, format="pdf", dpi=300)
+        # Format inferred from the extension: '.png' for the run report,
+        # '.pdf' for publication-quality output.
+        plt.savefig(figpath, dpi=300)
 
     plt.show()
+
 
 def timeit_model(model, X):
     ncycles = 100
@@ -738,7 +741,9 @@ if __name__ == '__main__':
 
             errors_fpath = None
             if args.save:
-                errors_fpath = os.path.join(MODEL_FOLDER, MODEL_NAME + "-EMAX={}.pdf".format(args.EMAX))
+                # '<MODEL_NAME>.energy_overview.png' is the naming the run report
+                # globs for figures, so a saved overview shows up in the report.
+                errors_fpath = os.path.join(MODEL_FOLDER, MODEL_NAME + ".energy_overview.png")
                 logging.info("errors_fpath: {}".format(errors_fpath))
 
             plot_errors_from_checkpoint(evaluator, train, val, test, args.EMAX, figpath=errors_fpath, add_reference_pes=args.add_reference_pes)
