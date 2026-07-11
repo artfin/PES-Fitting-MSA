@@ -2,12 +2,15 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 import torch
 
 from data_io import load_cfg, load_dataset, seed_torch
 from trainers import get_trainer
 from distributed import setup_distributed, cleanup
+from distributed import is_main_process
+from run_tracking import capture_provenance, collect_metrics, write_metrics
 
 import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
@@ -37,6 +40,10 @@ if __name__ == "__main__":
 
     if 'PRINT_PRECISION' in cfg:
         PRINT_PRECISION = cfg['PRINT_PRECISION']
+
+    # Stem shared by the run's log and its provenance/metrics manifests, so the
+    # tracking artifacts sit beside the log with a matching name.
+    RUN_STEM = args.log_name if args.log_name is not None else MODEL_NAME
 
     if args.log_name is not None:
         log_path = os.path.join(MODEL_FOLDER, args.log_name + ".log")
@@ -95,11 +102,24 @@ if __name__ == "__main__":
 
     rank, world_size, local_rank = setup_distributed()
 
+    # Capture run provenance (git SHA + working-tree diff, resolved config, env)
+    # so this run is reproducible. Best-effort; only the main process writes,
+    # which is why this follows setup_distributed() (is_main_process gates on rank).
+    if is_main_process():
+        capture_provenance(cfg, MODEL_FOLDER, RUN_STEM,
+                           extra={"world_size": world_size})
+
     trainer = get_trainer(MODEL_FOLDER, MODEL_NAME, chk_path, cfg, train, val, test,
                           rank=rank, world_size=world_size, local_rank=local_rank)
 
+    run_start = time.time()
     try:
         trainer.train_model()
         trainer.model_eval()
     finally:
+        # Emit structured final metrics for the leaderboard/report. Best-effort;
+        # runs even if training raised, so partial runs are still recorded.
+        if is_main_process():
+            metrics = collect_metrics(trainer, wall_time_s=time.time() - run_start)
+            write_metrics(MODEL_FOLDER, RUN_STEM, metrics)
         cleanup()

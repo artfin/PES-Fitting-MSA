@@ -161,6 +161,12 @@ class EnergyTrainer(MultibatchMixin, BaseTrainer):
         self._log("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
         self._log("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
 
+        self.eval_metrics = {
+            "loss_train": float(loss_train),
+            "loss_val":   float(loss_val),
+            "loss_test":  float(loss_test),
+        }
+
     def supports_mgda(self):
         """Energy-only trainer does not support MGDA."""
         return False

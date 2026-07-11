@@ -633,6 +633,12 @@ class GradientTrainer(MultibatchMixin, BaseTrainer):
             self._log("Validation loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_val_e, loss_val_g))
             self._log("Test       loss: {1:.{0}f} cm-1; gradient loss: {2:.{0}f} cm-1/bohr".format(PRINT_PRECISION, loss_test_e, loss_test_g))
 
+            self.eval_metrics = {
+                "loss_train_e": float(loss_train_e), "loss_train_g": float(loss_train_g),
+                "loss_val_e":   float(loss_val_e),   "loss_val_g":   float(loss_val_g),
+                "loss_test_e":  float(loss_test_e),  "loss_test_g":  float(loss_test_g),
+            }
+
         elif self.cfg['TYPE'] == 'ENERGY':
             # To disable the gradient calculation, set the .requires_grad attribute of all parameters to False 
             # or wrap the forward pass into with torch.no_grad().
@@ -655,6 +661,12 @@ class GradientTrainer(MultibatchMixin, BaseTrainer):
             self._log("Train      loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_train))
             self._log("Validation loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_val))
             self._log("Test       loss: {1:.{0}f} cm-1".format(PRINT_PRECISION, loss_test))
+
+            self.eval_metrics = {
+                "loss_train": float(loss_train),
+                "loss_val":   float(loss_val),
+                "loss_test":  float(loss_test),
+            }
         else:
             assert False, "unreachable"
 

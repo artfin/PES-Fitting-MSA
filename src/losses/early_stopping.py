@@ -18,19 +18,23 @@ class EarlyStopping:
 
         self.counter    = 0
         self.best_score = None
+        self.best_epoch = None
         self.status     = False
 
     def reset(self):
         self.counter    = 0
         self.best_score = None
+        self.best_epoch = None
         self.status     = False
 
     def __call__(self, epoch, score, model, xscaler, yscaler, meta_info):
         if self.best_score is None:
             self.best_score = score
+            self.best_epoch = epoch
             save_checkpoint(model, xscaler, yscaler, meta_info, self.chk_path)
         elif score < self.best_score and (self.best_score - score) > self.tol:
             self.best_score = score
+            self.best_epoch = epoch
             self.counter = 0
             save_checkpoint(model, xscaler, yscaler, meta_info, self.chk_path)
         else:

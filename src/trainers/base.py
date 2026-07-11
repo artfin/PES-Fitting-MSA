@@ -178,6 +178,11 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
 
         self.chk_path = chk_path
         self.es = self.build_early_stopper()
+
+        # Run-tracking hooks (see src/provenance.py). `eval_metrics` is filled by
+        # model_eval with final train/val/test losses; `epochs_run` by train_model.
+        self.eval_metrics = {}
+        self.epochs_run = None
         self.meta_info = {
             "NPOLY":    self.train.NPOLY,
             "NMON":     self.train.NMON,
@@ -556,6 +561,8 @@ class BaseTrainer(DiagnosticsMixin, DistributedDiagnosticsMixin, ABC):
                 if self.es.status:
                     self._log("Invoking early stop.")
                     break
+
+            self.epochs_run = epoch + 1
 
             if self.loss_val < self.es.best_score:
                 save_checkpoint(self.model, self.xscaler, self.yscaler, self.meta_info, self.chk_path)
