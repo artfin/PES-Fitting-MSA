@@ -149,10 +149,17 @@ tr.detail.hidden { display: none; }
 .figmark { color: var(--accent); font-size: 11px; font-weight: 600; }
 .figs { margin: 0 0 16px; }
 .figs h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-.figgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
-.figgrid figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
-.figgrid img { display: block; width: 100%; height: auto; }
-.figgrid figcaption { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); padding: 6px 8px; background: var(--card); }
+.figlist { list-style: none; margin: 0; padding: 0; }
+.figlist li { border-bottom: 1px solid var(--line); }
+.figlink { display: inline-flex; align-items: center; gap: 7px; background: none; border: none;
+  color: var(--accent); font-family: ui-monospace, monospace; font-size: 12.5px; cursor: pointer;
+  padding: 8px 0; text-align: left; }
+.figlink::before { content: "▸"; color: var(--muted); font-size: 11px; }
+.figlink:hover { text-decoration: underline; }
+.figview { padding: 4px 0 14px; }
+.figview.hidden { display: none; }
+.figview img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff; }
 .foot { color: var(--muted); font-size: 12px; margin-top: 22px; }
 code { background: var(--card); padding: 1px 5px; border-radius: 5px; }
 """
@@ -214,16 +221,21 @@ def _img_src(path, folder, embed):
         return _esc(os.path.relpath(path, folder))
 
 
-def _figures_html(figs, folder, embed):
+def _figures_html(stem, figs, folder, embed):
+    """A list of figure names; clicking a name opens that figure below it."""
     if not figs:
         return ""
-    imgs = []
-    for p in figs:
-        imgs.append('<figure><img loading="lazy" src="{src}" alt="{name}">'
-                    '<figcaption>{name}</figcaption></figure>'.format(
-                        src=_img_src(p, folder, embed),
-                        name=_esc(os.path.basename(p))))
-    return '<div class="figs"><h3>figures</h3><div class="figgrid">{}</div></div>'.format("".join(imgs))
+    items = []
+    for i, p in enumerate(figs):
+        fid = "fig-{}-{}".format(stem, i)
+        name = _esc(os.path.basename(p))
+        items.append(
+            '<li><button type="button" class="figlink" onclick="toggle(\'{fid}\')">{name}</button>'
+            '<div class="figview hidden" id="{fid}">'
+            '<img loading="lazy" src="{src}" alt="{name}"></div></li>'.format(
+                fid=fid, name=name, src=_img_src(p, folder, embed)))
+    return ('<div class="figs"><h3>figures ({n})</h3>'
+            '<ul class="figlist">{items}</ul></div>').format(n=len(figs), items="".join(items))
 
 
 def _detail_panel(r, folder, embed):
@@ -231,7 +243,7 @@ def _detail_panel(r, folder, embed):
     if r["intent"]:
         parts.append('<p class="intent">{}</p>'.format(_esc(r["intent"])))
 
-    parts.append(_figures_html(r["figures"], folder, embed))
+    parts.append(_figures_html(r["stem"], r["figures"], folder, embed))
 
     parts.append('<div class="cols">')
 
@@ -339,6 +351,40 @@ Repro badge shows the git commit each run was produced at.</p>
         kpis=_kpis(rows), head=head, body="".join(body), js=_JS)
 
 
+def _refresh_analysis_figures(runs):
+    """Generate any missing per-quantity ``<stem>.<quantity>.png`` diagnostics.
+
+    Figures are cached in the run folder and built **once per run**: only runs
+    with no diagnostic figure yet are plotted, so the matplotlib cost is paid the
+    first time a run is reported and skipped thereafter. Delete a run's
+    ``<stem>.*.png`` diagnostics to force a rebuild. The heavy (matplotlib +
+    pandas) import is lazy and guarded so a bare environment still builds the
+    report -- it just won't add new figures. Discovery in ``registry.Run.figures``
+    then embeds whatever PNGs exist.
+    """
+    if not any(r.has_log for r in runs):
+        return  # nothing to plot -- don't even import matplotlib
+
+    try:
+        from run_tracking import analyze  # lazy: pulls matplotlib/pandas
+    except Exception as e:  # noqa: BLE001 -- missing deps must not kill the report
+        print("Skipping diagnostic figures (--no-analyze to silence): {}".format(e),
+              file=sys.stderr)
+        return
+
+    made = 0
+    for run in runs:
+        if not analyze.needs_analysis(run):
+            continue
+        try:
+            if analyze.render_analysis(run, save=True):
+                made += 1
+        except Exception as e:  # noqa: BLE001 -- one bad run must not abort the report
+            print("  analyze failed for {}: {}".format(run.stem, e), file=sys.stderr)
+    if made:
+        print("Generated diagnostic figures for {} run(s)".format(made))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Generate a static HTML run report.")
     ap.add_argument("--folder", required=True, help="model folder to scan, e.g. models/h2o-h2o")
@@ -348,6 +394,10 @@ def main():
     ap.add_argument("--link-figures", action="store_true",
                     help="reference figures by relative path instead of embedding them "
                          "(smaller file, but no longer self-contained/emailable)")
+    ap.add_argument("--no-analyze", dest="analyze", action="store_false",
+                    help="skip regenerating per-run diagnostic figures (.analysis.png); "
+                         "keeps the report build stdlib-light / matplotlib-free")
+    ap.set_defaults(analyze=True)
     args = ap.parse_args()
 
     folder = os.path.abspath(args.folder)
@@ -355,6 +405,9 @@ def main():
         ap.error("folder not found: {}".format(folder))
 
     runs = discover_runs(folder)
+
+    if args.analyze:
+        _refresh_analysis_figures(runs)
     baseline_cfg = None
     if args.baseline:
         match = next((r for r in runs if r.stem == args.baseline), None)
