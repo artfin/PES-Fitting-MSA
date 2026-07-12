@@ -32,7 +32,7 @@ import pathlib
 BASEDIR = pathlib.Path(__file__).parent.parent.resolve()
 
 import sys
-sys.path.insert(0, os.path.join(BASEDIR, "external", "pes"))
+sys.path.insert(0, os.path.join(BASEDIR, "external", "pes-ch4"))
 from pybind_ch4 import Poten_CH4
 
 plt.style.use('science')
@@ -454,9 +454,11 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
             ys    = sampling_set.y[ind]
             preds = pred[ind]
             logging.info("{} points selected".format(ind.size()[0]))
-            diff = torch.abs(ys - preds)
         else:
-            diff = torch.abs(sampling_set.y - pred)
+            ys    = sampling_set.y
+            preds = pred
+
+        diff = torch.abs(ys - preds)
 
         mean = torch.mean(diff)
         maxx = torch.max(diff)
@@ -471,6 +473,9 @@ def model_evaluation_energy(evaluator, train, val, test, emax, add_reference_pes
     min_energy = train.y.min()
     max_energy = train.y.max()
     logging.info(" (train) ENERGY RANGE: {:.3f} - {:.3f} cm-1".format(min_energy, max_energy))
+
+    if emax is None:
+        emax = torch.max(train.y)
 
     mean_diff_kcal_mol = [ff / KCALTOCM for ff in mean_diff]
     rmse_kcal_mol = [ff/ KCALTOCM for ff in rmse]
