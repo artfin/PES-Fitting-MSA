@@ -155,6 +155,14 @@ def load_cfg(cfg_path):
     for group in cfg.keys():
         assert group in known_groups, "Unknown group: {}".format(group)
 
+    # Trainers validate LOSS keys case-insensitively (build_loss checks
+    # option.upper() against known_options) but read values with literal
+    # uppercase keys (e.g. cfg_loss.get('DWT')). Without normalization a
+    # lowercase `dwt:` in the config is silently dropped and dwt defaults to
+    # 1.0. Upper-case the LOSS keys here so the configured value is honored.
+    if isinstance(cfg.get('LOSS'), dict):
+        cfg['LOSS'] = {k.upper(): v for k, v in cfg['LOSS'].items()}
+
     return cfg
 
 def load_dataset(cfg_dataset, typ):
