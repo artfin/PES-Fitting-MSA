@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import re
 
@@ -10,9 +11,15 @@ from sympy.codegen.ast import Assignment
 
 from tqdm import tqdm
 
-# Always generate float64 C code for C++ compatibility
-C_FLOAT_TYPE = "double"
-EIGEN_SUFFIX = "d"
+from config import C_FLOAT_TYPE
+
+# The generated C basis is loaded via ctypes with ndpointer(NP_FLOAT) (see
+# PolyDataset.setup_c_procs). Its scalar type MUST therefore match the numpy
+# precision selected in config.py, otherwise the float32 buffer is reinterpreted
+# as an array of doubles -> garbage / overflow / segfault. We take the ABI
+# straight from config.C_FLOAT_TYPE ("float" for float32, "double" for float64)
+# and derive the matching Eigen template suffix.
+EIGEN_SUFFIX = "f" if C_FLOAT_TYPE == "float" else "d"
 
 @dataclasses.dataclass
 class Monomial:
@@ -390,6 +397,9 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", force=True)
+    logging.info("Generating C code with scalar ABI: C_FLOAT_TYPE=%s (Eigen suffix=%s) [from config.py]", C_FLOAT_TYPE, EIGEN_SUFFIX)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--basis_file",          required=True,  type=str, help="path to file with basis specification [.BAS]")
     parser.add_argument("--use_eigen_interface", required=False, default=False, type=str2bool, help="whether to generate the C code for calculating polynomials using Eigen")
