@@ -101,12 +101,12 @@ class GradientTrainer(MultibatchMixin, BaseTrainer):
             loss_fn = WMSELoss_Boltzmann(Eref=Eref)
 
         elif self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
-            dwt = self.cfg_loss.get('dwt', 1.0)
+            dwt = self.cfg_loss.get('DWT', 1.0)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             loss_fn = WRMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and not self.cfg_loss['USE_GRADIENTS']:
-            dwt = self.cfg_loss.get('dwt', 1.0)
+            dwt = self.cfg_loss.get('DWT', 1.0)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)
             focal_ema_decay = self.cfg_loss.get('FOCAL_EMA_DECAY', 0.95)
             loss_fn = WMSELoss_Ratio(dwt=dwt, focal_gamma=focal_gamma, focal_ema_decay=focal_ema_decay)
@@ -120,7 +120,7 @@ class GradientTrainer(MultibatchMixin, BaseTrainer):
 
 
         elif self.cfg_loss['NAME'] == 'WMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio' and self.cfg_loss['USE_GRADIENTS']:
-            dwt = self.cfg_loss.get('dwt', 1.0)
+            dwt = self.cfg_loss.get('DWT', 1.0)
             g_lambda = self.cfg_loss.get('G_LAMBDA', 1.0)
             trust_threshold = self.cfg_loss.get('TRUST_THRESHOLD', None)
             focal_gamma = self.cfg_loss.get('FOCAL_GAMMA', 0.0)

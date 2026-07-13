@@ -33,7 +33,7 @@ class DipoleCTrainer(BaseTrainer):
 
         assert self.cfg_loss['NAME'] == 'WRMSE' and self.cfg_loss['WEIGHT_TYPE'] == 'Ratio', \
             "Dipole trainers require LOSS NAME=WRMSE, WEIGHT_TYPE=Ratio"
-        dwt = self.cfg_loss.get('dwt', 1.0)
+        dwt = self.cfg_loss.get('DWT', 1.0)
         loss_fn = WRMSELoss_Ratio_dipole(dwt=dwt)
         logging.info("Build loss function: {}".format(loss_fn))
         return loss_fn

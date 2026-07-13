@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 import time
 
@@ -27,7 +28,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    MODEL_FOLDER = os.path.join(BASEDIR, args.model_folder)
+    MODEL_FOLDER = os.path.normpath(os.path.join(BASEDIR, args.model_folder))
     MODEL_NAME   = args.model_name
 
     assert os.path.isdir(MODEL_FOLDER), "Path to folder is invalid: {}".format(MODEL_FOLDER)
@@ -40,6 +41,20 @@ if __name__ == "__main__":
 
     if 'PRINT_PRECISION' in cfg:
         PRINT_PRECISION = cfg['PRINT_PRECISION']
+
+    # Give each run its own self-contained directory under <model_folder>/runs/,
+    # mirroring the layout produced by run_tracking/migrate.py: the config is
+    # copied in and every artifact (log, checkpoint, provenance, metrics,
+    # diagnostics, eval sidecars) is written there, stem-named. Re-point
+    # --model_folder at the run dir with the same --model_name to resume/evaluate.
+    # Skip re-nesting when --model_folder already sits inside a runs/ tree.
+    if os.path.basename(os.path.dirname(MODEL_FOLDER)) != "runs":
+        RUN_DIR = os.path.join(MODEL_FOLDER, "runs", MODEL_NAME)
+        os.makedirs(RUN_DIR, exist_ok=True)
+        run_cfg_path = os.path.join(RUN_DIR, MODEL_NAME + ".yaml")
+        if os.path.abspath(run_cfg_path) != os.path.abspath(cfg_path):
+            shutil.copy2(cfg_path, run_cfg_path)
+        MODEL_FOLDER = RUN_DIR
 
     # Stem shared by the run's log and its provenance/metrics manifests, so the
     # tracking artifacts sit beside the log with a matching name.
@@ -70,6 +85,8 @@ if __name__ == "__main__":
     consoleHandler.setFormatter(logFormatter)
     rootLogger.addHandler(consoleHandler)
     rootLogger.setLevel(logging.INFO)
+
+    logging.info("Run directory: {}".format(MODEL_FOLDER))
 
     seed_torch()
     if DEVICE.type == 'cuda':
