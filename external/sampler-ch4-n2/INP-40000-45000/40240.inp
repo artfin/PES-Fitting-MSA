@@ -1,0 +1,41 @@
+***,CH4-N2
+memory,160,m;
+gthresh,energy=1.d-11;
+basis=avtz
+symmetry,nosym
+GEOMETRY={
+1, C1,,0.0000000000, 0.0000000000, 0.0000000000
+2, H1,,0.6673107792, -0.0199554316, -1.9586159087
+3, H2,,0.8624788086, -1.7230393017, 0.7681293189
+4, H3,,0.0629893518, 1.5575303161, 1.2401705117
+5, H4,,-1.8578959087, -0.7970774009, -0.2952644584
+6, N1,,1770.7576930451, -659.8408526369, 19.2904003633
+7, N2,,1770.3864096783, -660.3507536151, 21.3275042044
+}
+{hf,maxit=300}
+{ccsd(t)-f12,SINGLES=0,df_basis=avtz/mp2fit,ri_basis=avtz/optri,\
+df_basis_exch=avtz/mp2fit,SCALE_TRIP=1,thrvar=1.e-14,gem_beta=1.3,\
+maxit=200}
+eABa=energy(1)
+eABb=energy(2)
+
+dummy, N1,N2
+{hf,maxit=300}
+{ccsd(t)-f12,SINGLES=0,df_basis=avtz/mp2fit,ri_basis=avtz/optri,\
+df_basis_exch=avtz/mp2fit,SCALE_TRIP=1,thrvar=1.e-14,gem_beta=1.3,\
+maxit=200}
+eAa=energy(1)
+eAb=energy(2)
+
+dummy, C1,H1,H2,H3,H4
+{hf,maxit=300}
+{ccsd(t)-f12,SINGLES=0,df_basis=avtz/mp2fit,ri_basis=avtz/optri,\
+df_basis_exch=avtz/mp2fit,SCALE_TRIP=1,thrvar=1.e-14,gem_beta=1.3,\
+maxit=200}
+eBa=energy(1)
+eBb=energy(2)
+
+eCPa=(eABa-eAa-eBa)*tocm
+eCPb=(eABb-eAb-eBb)*tocm
+
+{table,eCPa,eCPb;digits,10,10}
